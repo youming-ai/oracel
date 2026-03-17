@@ -1,0 +1,74 @@
+[2m2026-03-15T12:13:34.136006Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m Polymarket 5m Bot v0.2.0 - Binance Price Strategy
+[2m2026-03-15T12:13:34.136255Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m Event URL: https://polymarket.com/event/btc-updown-5m-1773364500 → series_id: btc-updown-5m
+[2m2026-03-15T12:13:34.136354Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m === Polymarket 5m Bot v0.2.0 === Mode: paper ===
+[2m2026-03-15T12:13:34.136360Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m Discovering current market...
+[2m2026-03-15T12:13:34.136376Z[0m [32m INFO[0m [2mpolybot::data::market_discovery[0m[2m:[0m Discovering market from series: btc-updown-5m
+[2m2026-03-15T12:13:34.305690Z[0m [32m INFO[0m [2mpolybot::data::market_discovery[0m[2m:[0m Series lookup failed for 'btc-updown-5m', trying as event slug
+[2m2026-03-15T12:13:34.427472Z[0m [32m INFO[0m [2mpolybot::data::market_discovery[0m[2m:[0m Trying alternate slug: btc-up-or-down-5m
+[2m2026-03-15T12:13:36.144403Z[0m [32m INFO[0m [2mpolybot::data::market_discovery[0m[2m:[0m Resolved via alternate slug 'btc-up-or-down-5m'
+[2m2026-03-15T12:13:36.302376Z[0m [32m INFO[0m [2mpolybot::data::market_discovery[0m[2m:[0m Resolved series 'btc-updown-5m' to numeric ID: 10684
+[2m2026-03-15T12:13:36.616711Z[0m [32m INFO[0m [2mpolybot::data::market_discovery[0m[2m:[0m Fetched 301 events for series ID 10684
+[2m2026-03-15T12:13:36.626194Z[0m [32m INFO[0m [2mpolybot::data::market_discovery[0m[2m:[0m Found 301 markets in series btc-updown-5m
+[2m2026-03-15T12:13:36.626281Z[0m [32m INFO[0m [2mpolybot::data::market_discovery[0m[2m:[0m Selected market: btc-updown-5m-1773576600 (ends: 2026-03-15T12:15:00Z)
+[2m2026-03-15T12:13:36.626297Z[0m [32m INFO[0m [2mpolybot::data::market_discovery[0m[2m:[0m Active market parsed: Yes=3462295620368000 No=4669801956749072 Condition=0xcfb5a943a48b50 PriceToBeat=None
+[2m2026-03-15T12:13:36.630020Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m Market discovered: btc-updown-5m-1773576600 | Price to beat: $None | Ends: 2026-03-15 12:15:00 UTC
+[2m2026-03-15T12:13:36.631761Z[0m [32m INFO[0m [2mpolybot::data::binance[0m[2m:[0m Binance ticker WS: wss://stream.binance.us:9443/ws/btcusdt@ticker
+[2m2026-03-15T12:14:16.978002Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m [SIGNAL] NO TRADE (edge_below_0.1000) | P(UP)=26%% P(DN)=74%% | Mkt Yes=0.180 No=0.800 | BTC=$71727 | direction_blend | Regime=Trending X=0 VolR=1.00%
+[2m2026-03-15T12:14:18.968883Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m [SIGNAL] NO TRADE (edge_below_0.1000) | P(UP)=26%% P(DN)=74%% | Mkt Yes=0.170 No=0.820 | BTC=$71727 | direction_blend | Regime=Trending X=0 VolR=1.00%
+[2m2026-03-15T12:14:20.938678Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m [SIGNAL] NO TRADE (prob_below_0.60) | P(UP)=27%% P(DN)=73%% | Mkt Yes=0.160 No=0.840 | BTC=$71727 | direction_blend | Regime=Trending X=0 VolR=1.00%
+[2m2026-03-15T12:14:22.892112Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m [SIGNAL] NO TRADE (prob_below_0.60) | P(UP)=27%% P(DN)=73%% | Mkt Yes=0.150 No=0.830 | BTC=$71727 | direction_blend | Regime=Trending X=0 VolR=1.00%
+[2m2026-03-15T12:14:24.918796Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m [SIGNAL] NO TRADE (prob_below_0.60) | P(UP)=30%% P(DN)=70%% | Mkt Yes=0.060 No=0.930 | BTC=$71727 | direction_blend | Regime=Trending X=0 VolR=1.00%
+[2m2026-03-15T12:14:26.954660Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m [SIGNAL] NO TRADE (prob_below_0.60) | P(UP)=58%% P(DN)=42%% | Mkt Yes=0.070 No=0.920 | BTC=$71727 | direction_blend | Regime=Trending X=0 VolR=1.00%
+[2m2026-03-15T12:14:28.912424Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m [SIGNAL] Edge: 80.7% -> BUY UP [STRONG] | P(UP)=85%% P(DN)=15%% | Mkt Yes=0.040 No=0.950 | BTC=$71727 | ta_only | Regime=Trending X=0 VolR=1.00%
+[2m2026-03-15T12:14:28.912587Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m === TRADE: UP 34622956203680007797226031328190243145115825793141842001954893097757388435919 $10.00 @ 0.040 (edge: 80.7%) ===
+[2m2026-03-15T12:14:28.912604Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m [PAPER] Order: 87720401 | Cost: $0.40 | Balance: $1000.00 → $999.60 | BTC: $71727
+[2m2026-03-15T12:14:28.912941Z[0m [32m INFO[0m [2mpolybot::settlement[0m[2m:[0m [SETTLEMENT] Tracking position 87720401 | UP $10.00 @ 0.040 | settles at 12:15:00 | BTC entry: $71727
+[2m2026-03-15T12:14:36.633276Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m Market refresh needed, discovering...
+[2m2026-03-15T12:14:36.633384Z[0m [32m INFO[0m [2mpolybot::data::market_discovery[0m[2m:[0m Discovering market from series: btc-updown-5m
+[2m2026-03-15T12:14:36.786791Z[0m [32m INFO[0m [2mpolybot::data::market_discovery[0m[2m:[0m Series lookup failed for 'btc-updown-5m', trying as event slug
+[2m2026-03-15T12:14:36.850202Z[0m [32m INFO[0m [2mpolybot::data::market_discovery[0m[2m:[0m Trying alternate slug: btc-up-or-down-5m
+[2m2026-03-15T12:14:39.722312Z[0m [32m INFO[0m [2mpolybot::data::market_discovery[0m[2m:[0m Resolved via alternate slug 'btc-up-or-down-5m'
+[2m2026-03-15T12:14:40.139896Z[0m [32m INFO[0m [2mpolybot::data::market_discovery[0m[2m:[0m Resolved series 'btc-updown-5m' to numeric ID: 10684
+[2m2026-03-15T12:14:40.268384Z[0m [32m INFO[0m [2mpolybot::data::market_discovery[0m[2m:[0m Fetched 301 events for series ID 10684
+[2m2026-03-15T12:14:40.282194Z[0m [32m INFO[0m [2mpolybot::data::market_discovery[0m[2m:[0m Found 301 markets in series btc-updown-5m
+[2m2026-03-15T12:14:40.282311Z[0m [32m INFO[0m [2mpolybot::data::market_discovery[0m[2m:[0m Selected market: btc-updown-5m-1773576600 (ends: 2026-03-15T12:15:00Z)
+[2m2026-03-15T12:14:40.282367Z[0m [32m INFO[0m [2mpolybot::data::market_discovery[0m[2m:[0m Active market parsed: Yes=3462295620368000 No=4669801956749072 Condition=0xcfb5a943a48b50 PriceToBeat=None
+[2m2026-03-15T12:14:40.286485Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m Market updated: btc-updown-5m-1773576600
+[2m2026-03-15T12:15:00.906730Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m [SIGNAL] NO TRADE (edge_below_0.1000) | P(UP)=9%% P(DN)=91%% | Mkt Yes=0.000 No=0.990 | BTC=$71708 | ta_only | Regime=Trending X=0 VolR=1.00%
+[2m2026-03-15T12:15:02.944743Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m [SIGNAL] NO TRADE (prob_below_0.60) | P(UP)=13%% P(DN)=87%% | Mkt Yes=0.000 No=0.990 | BTC=$71708 | ta_only | Regime=Trending X=0 VolR=1.00%
+[2m2026-03-15T12:15:04.924260Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m [SIGNAL] NO TRADE (prob_below_0.60) | P(UP)=13%% P(DN)=87%% | Mkt Yes=0.000 No=0.990 | BTC=$71708 | ta_only | Regime=Trending X=0 VolR=1.00%
+[2m2026-03-15T12:15:06.633359Z[0m [32m INFO[0m [2mpolybot::settlement[0m[2m:[0m [SETTLED] 87720401 UP $10.00 @ 0.040 | BTC $71727→$71708 | ❌ LOSS | PnL: $-0.40 | 0W 1L | Total PnL: $-0.40
+[2m2026-03-15T12:15:06.873871Z[0m [32m INFO[0m [2mpolybot::settlement[0m[2m:[0m [BALANCE] Settled 1 positions | Payout: $0.00 | Balance: $999.60 | Daily PnL: $-0.40
+[2m2026-03-15T12:15:06.874095Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m [SIGNAL] NO TRADE (prob_below_0.60) | P(UP)=20%% P(DN)=80%% | Mkt Yes=0.000 No=0.990 | BTC=$71708 | ta_only | Regime=Trending X=0 VolR=1.00%
+[2m2026-03-15T12:15:08.886568Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m [SIGNAL] NO TRADE (prob_below_0.60) | P(UP)=24%% P(DN)=76%% | Mkt Yes=0.000 No=0.990 | BTC=$71708 | ta_only | Regime=Trending X=0 VolR=1.00%
+[2m2026-03-15T12:15:10.871013Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m [SIGNAL] NO TRADE (prob_below_0.60) | P(UP)=30%% P(DN)=70%% | Mkt Yes=0.000 No=0.990 | BTC=$71708 | ta_only | Regime=Trending X=0 VolR=1.00%
+[2m2026-03-15T12:15:12.940716Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m [SIGNAL] Edge: 73.0% -> BUY UP [STRONG] | P(UP)=73%% P(DN)=27%% | Mkt Yes=0.000 No=0.990 | BTC=$71708 | ta_only | Regime=Trending X=0 VolR=1.00%
+[2m2026-03-15T12:15:12.940871Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m === TRADE: UP 34622956203680007797226031328190243145115825793141842001954893097757388435919 $10.00 @ 0.000 (edge: 73.0%) ===
+[2m2026-03-15T12:15:12.940892Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m [PAPER] Order: 8cecd10b | Cost: $0.00 | Balance: $999.60 → $999.60 | BTC: $71708
+[2m2026-03-15T12:15:12.940971Z[0m [32m INFO[0m [2mpolybot::settlement[0m[2m:[0m [SETTLEMENT] Tracking position 8cecd10b | UP $10.00 @ 0.000 | settles at 12:15:00 | BTC entry: $71708
+[2m2026-03-15T12:15:21.633656Z[0m [32m INFO[0m [2mpolybot::settlement[0m[2m:[0m [SETTLED] 8cecd10b UP $10.00 @ 0.000 | BTC $71708→$71708 | ❌ LOSS | PnL: $+0.00 | 0W 2L | Total PnL: $-0.40
+[2m2026-03-15T12:15:21.633734Z[0m [32m INFO[0m [2mpolybot::settlement[0m[2m:[0m [BALANCE] Settled 1 positions | Payout: $0.00 | Balance: $999.60 | Daily PnL: $-0.40
+[2m2026-03-15T12:15:40.287127Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m Market refresh needed, discovering...
+[2m2026-03-15T12:15:40.287237Z[0m [32m INFO[0m [2mpolybot::data::market_discovery[0m[2m:[0m Discovering market from series: btc-updown-5m
+[2m2026-03-15T12:15:40.389213Z[0m [32m INFO[0m [2mpolybot::data::market_discovery[0m[2m:[0m Series lookup failed for 'btc-updown-5m', trying as event slug
+[2m2026-03-15T12:15:40.415942Z[0m [32m INFO[0m [2mpolybot::data::market_discovery[0m[2m:[0m Trying alternate slug: btc-up-or-down-5m
+[2m2026-03-15T12:15:43.196496Z[0m [32m INFO[0m [2mpolybot::data::market_discovery[0m[2m:[0m Resolved via alternate slug 'btc-up-or-down-5m'
+[2m2026-03-15T12:15:43.382521Z[0m [32m INFO[0m [2mpolybot::data::market_discovery[0m[2m:[0m Resolved series 'btc-updown-5m' to numeric ID: 10684
+[2m2026-03-15T12:15:43.667762Z[0m [32m INFO[0m [2mpolybot::data::market_discovery[0m[2m:[0m Fetched 301 events for series ID 10684
+[2m2026-03-15T12:15:43.677964Z[0m [32m INFO[0m [2mpolybot::data::market_discovery[0m[2m:[0m Found 301 markets in series btc-updown-5m
+[2m2026-03-15T12:15:43.678087Z[0m [32m INFO[0m [2mpolybot::data::market_discovery[0m[2m:[0m Selected market: btc-updown-5m-1773576900 (ends: 2026-03-15T12:20:00Z)
+[2m2026-03-15T12:15:43.678115Z[0m [32m INFO[0m [2mpolybot::data::market_discovery[0m[2m:[0m Active market parsed: Yes=5352075533360280 No=8131176222849427 Condition=0xce2e63eef0cd97 PriceToBeat=None
+[2m2026-03-15T12:15:43.684549Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m Market updated: btc-updown-5m-1773576900
+[2m2026-03-15T12:15:44.887141Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m [SIGNAL] Edge: 24.3% -> BUY UP [STRONG] | P(UP)=59%% P(DN)=41%% | Mkt Yes=0.340 No=0.650 | BTC=$71708 | direction_blend | Regime=Trending X=0 VolR=1.00%
+[2m2026-03-15T12:15:44.887221Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m === TRADE: UP 53520755333602800997385056648791222818489318873341735566837036931107792607935 $10.00 @ 0.340 (edge: 24.3%) ===
+[2m2026-03-15T12:15:44.887235Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m [PAPER] Order: e004149c | Cost: $3.40 | Balance: $999.60 → $996.20 | BTC: $71708
+[2m2026-03-15T12:15:44.887250Z[0m [32m INFO[0m [2mpolybot::settlement[0m[2m:[0m [SETTLEMENT] Tracking position e004149c | UP $10.00 @ 0.340 | settles at 12:20:00 | BTC entry: $71708
+[2m2026-03-15T12:16:16.891051Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m [SIGNAL] NO TRADE (prob_below_0.54) | P(UP)=53%% P(DN)=47%% | Mkt Yes=0.190 No=0.780 | BTC=$71708 | direction_blend | Regime=Trending X=0 VolR=1.00%
+[2m2026-03-15T12:16:18.867851Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m [SIGNAL] Edge: 32.0% -> BUY UP [STRONG] | P(UP)=54%% P(DN)=46%% | Mkt Yes=0.220 No=0.770 | BTC=$71708 | direction_blend | Regime=Trending X=0 VolR=1.00%
+[2m2026-03-15T12:16:18.867999Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m === TRADE: UP 53520755333602800997385056648791222818489318873341735566837036931107792607935 $10.00 @ 0.220 (edge: 32.0%) ===
+[2m2026-03-15T12:16:18.868029Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m [PAPER] Order: a8ee6280 | Cost: $2.20 | Balance: $996.20 → $994.00 | BTC: $71708
+[2m2026-03-15T12:16:18.868121Z[0m [32m INFO[0m [2mpolybot::settlement[0m[2m:[0m [SETTLEMENT] Tracking position a8ee6280 | UP $10.00 @ 0.220 | settles at 12:20:00 | BTC entry: $71708
+[2m2026-03-15T12:16:50.959242Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m [SIGNAL] Edge: 18.6% -> BUY UP [STRONG] | P(UP)=64%% P(DN)=36%% | Mkt Yes=0.440 No=0.540 | BTC=$71708 | direction_blend | Regime=Chop X=0 VolR=1.00%
+[2m2026-03-15T12:16:50.959374Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m === TRADE: UP 53520755333602800997385056648791222818489318873341735566837036931107792607935 $10.00 @ 0.440 (edge: 18.6%) ===
+[2m2026-03-15T12:16:50.959386Z[0m [32m INFO[0m [2mpolybot[0m[2m:[0m [PAPER] Order: 7b4c6902 | Cost: $4.40 | Balance: $994.00 → $989.60 | BTC: $71708
+[2m2026-03-15T12:16:50.959399Z[0m [32m INFO[0m [2mpolybot::settlement[0m[2m:[0m [SETTLEMENT] Tracking position 7b4c6902 | UP $10.00 @ 0.440 | settles at 12:20:00 | BTC entry: $71708
