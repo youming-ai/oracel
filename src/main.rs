@@ -384,6 +384,9 @@ impl Bot {
         tokio::spawn(async move {
             let http = reqwest::Client::new();
             let mut interval = tokio::time::interval(Duration::from_secs(15));
+            // Retry queue: (condition_id, direction_str, attempts_left)
+            let mut redeem_queue: Vec<(String, String, u32)> = Vec::new();
+
             loop {
                 interval.tick().await;
 
@@ -418,17 +421,38 @@ impl Bot {
                         format!("{:.2}", bal),
                     );
 
-                    // Redeem winning positions on-chain
-                    if let Some(ref redeemer) = redeemer {
-                        for r in &results {
-                            if r.won && !r.condition_id.is_empty() {
-                                match redeemer.redeem(&r.condition_id).await {
-                                    Ok(tx) => tracing::info!("[REDEEM] {} tx={}", r.direction.as_str(), tx),
-                                    Err(e) => tracing::warn!("[REDEEM] failed {}: {}", r.direction.as_str(), e),
+                    // Queue winning positions for on-chain redeem
+                    for r in &results {
+                        if r.won && !r.condition_id.is_empty() {
+                            redeem_queue.push((
+                                r.condition_id.clone(),
+                                r.direction.as_str().to_string(),
+                                10, // max retries (~5 min at 30s intervals)
+                            ));
+                        }
+                    }
+                }
+
+                // Process redeem retry queue
+                if let Some(ref redeemer) = redeemer {
+                    let mut still_pending = Vec::new();
+                    for (cid, dir, attempts) in redeem_queue.drain(..) {
+                        match redeemer.redeem(&cid).await {
+                            Ok(tx) => {
+                                tracing::info!("[REDEEM] {} tx={}", dir, tx);
+                            }
+                            Err(e) => {
+                                let msg = e.to_string();
+                                if msg.contains("not received yet") && attempts > 1 {
+                                    tracing::debug!("[REDEEM] {} waiting for oracle, {} retries left", dir, attempts - 1);
+                                    still_pending.push((cid, dir, attempts - 1));
+                                } else {
+                                    tracing::warn!("[REDEEM] failed {}: {}", dir, msg);
                                 }
                             }
                         }
                     }
+                    redeem_queue = still_pending;
                 }
             }
         })
