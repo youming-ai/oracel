@@ -48,6 +48,22 @@ pub struct PolymarketConfig {
 pub struct StrategyConfig {
     pub max_position_size: f64,
     pub min_order_size: f64,
+    #[serde(default = "default_extreme_threshold")]
+    pub extreme_threshold: f64,
+    #[serde(default = "default_fair_value")]
+    pub fair_value: f64,
+    #[serde(default = "default_btc_tiebreaker_usd")]
+    pub btc_tiebreaker_usd: f64,
+}
+
+fn default_extreme_threshold() -> f64 {
+    0.80
+}
+fn default_fair_value() -> f64 {
+    0.50
+}
+fn default_btc_tiebreaker_usd() -> f64 {
+    5.0
 }
 
 // ─── Edge Thresholds ───
@@ -55,6 +71,26 @@ pub struct StrategyConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EdgeConfigFile {
     pub edge_threshold_early: f64,
+    #[serde(default = "default_edge_threshold_mid")]
+    pub edge_threshold_mid: f64,
+    #[serde(default = "default_edge_threshold_late")]
+    pub edge_threshold_late: f64,
+    #[serde(default = "default_min_prob")]
+    pub min_prob_early: f64,
+    #[serde(default = "default_min_prob")]
+    pub min_prob_mid: f64,
+    #[serde(default = "default_min_prob")]
+    pub min_prob_late: f64,
+}
+
+fn default_edge_threshold_mid() -> f64 {
+    0.15
+}
+fn default_edge_threshold_late() -> f64 {
+    0.20
+}
+fn default_min_prob() -> f64 {
+    0.50
 }
 
 // ─── Risk ───
@@ -63,6 +99,12 @@ pub struct EdgeConfigFile {
 pub struct RiskConfig {
     pub max_daily_loss_usdc: f64,
     pub max_consecutive_losses: u32,
+    #[serde(default = "default_max_daily_loss_pct")]
+    pub max_daily_loss_pct: f64,
+}
+
+fn default_max_daily_loss_pct() -> f64 {
+    0.10
 }
 
 // ─── Polling ───
@@ -122,6 +164,9 @@ impl Default for StrategyConfig {
         Self {
             max_position_size: 50.0,
             min_order_size: 5.0,
+            extreme_threshold: 0.80,
+            fair_value: 0.50,
+            btc_tiebreaker_usd: 5.0,
         }
     }
 }
@@ -130,6 +175,11 @@ impl Default for EdgeConfigFile {
     fn default() -> Self {
         Self {
             edge_threshold_early: 0.15,
+            edge_threshold_mid: 0.15,
+            edge_threshold_late: 0.20,
+            min_prob_early: 0.50,
+            min_prob_mid: 0.50,
+            min_prob_late: 0.50,
         }
     }
 }
@@ -139,6 +189,7 @@ impl Default for RiskConfig {
         Self {
             max_daily_loss_usdc: 100.0,
             max_consecutive_losses: 8,
+            max_daily_loss_pct: 0.10,
         }
     }
 }
@@ -155,14 +206,18 @@ impl Default for PollingConfig {
 
 impl MarketConfig {
     pub fn extract_event_slug(url: &str) -> Option<String> {
-        url.trim_end_matches('/').rsplit('/').next()
+        url.trim_end_matches('/')
+            .rsplit('/')
+            .next()
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
     }
 
     pub fn extract_series_from_slug(slug: &str) -> Option<String> {
         let parts: Vec<&str> = slug.split('-').collect();
-        if parts.len() < 2 { return Some(slug.to_string()); }
+        if parts.len() < 2 {
+            return Some(slug.to_string());
+        }
         let last = parts.last().unwrap();
         if last.chars().all(|c| c.is_ascii_digit()) && last.len() >= 8 {
             Some(parts[..parts.len() - 1].join("-"))
@@ -206,7 +261,9 @@ mod tests {
     #[test]
     fn test_extract_event_slug() {
         assert_eq!(
-            MarketConfig::extract_event_slug("https://polymarket.com/event/btc-updown-5m-1773364500"),
+            MarketConfig::extract_event_slug(
+                "https://polymarket.com/event/btc-updown-5m-1773364500"
+            ),
             Some("btc-updown-5m-1773364500".to_string())
         );
         assert_eq!(MarketConfig::extract_event_slug(""), None);
