@@ -80,6 +80,19 @@ scripts/run.sh
 scripts/watch.sh
 ```
 
+## CLI 命令
+
+```bash
+# 正常运行 bot
+cargo run --release
+
+# 派生 CLOB API 密钥
+cargo run -- --derive-keys
+
+# 手动赎回所有持仓（扫描过去 24h 的市场，链上 redeem）
+cargo run -- --redeem-all
+```
+
 ## 配置参数
 
 | 参数 | 默认值 | 说明 |
