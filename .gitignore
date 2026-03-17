@@ -1,5 +1,6 @@
 /target/
 /logs/
 config.json
+.env
 *.swp
 *.tmp

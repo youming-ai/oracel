@@ -248,6 +248,7 @@ impl Bot {
             settlement_ms,
             &account_read,
             &decider_cfg,
+            &closes,
         );
 
         // 6. Execute trade (Stage 4)
@@ -347,15 +348,24 @@ impl Bot {
         let account = self.account.clone();
         let price_source = self.price_source.clone();
         let btc_tiebreaker_usd = self.config.strategy.btc_tiebreaker_usd;
+        let rpc = data::chainlink::rpc_url(&self.config.trading.mode);
 
         tokio::spawn(async move {
+            let http = reqwest::Client::new();
             let mut interval = tokio::time::interval(Duration::from_secs(15));
             loop {
                 interval.tick().await;
 
-                let btc_price = match price_source.latest().await {
-                    Some(p) => p,
-                    None => continue,
+                let btc_price = match data::chainlink::fetch_btc_price(&http, &rpc).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        // Fallback to Coinbase if Chainlink fails
+                        tracing::debug!("[SETTLE] Chainlink failed: {}, using Coinbase", e);
+                        match price_source.latest().await {
+                            Some(p) => p,
+                            None => continue,
+                        }
+                    }
                 };
 
                 let results = settler.write().await.check_settlements(btc_price, btc_tiebreaker_usd);
@@ -384,8 +394,21 @@ impl Bot {
 
 // ─── Main ───
 
+fn load_dotenv() {
+    if let Ok(content) = std::fs::read_to_string(".env") {
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') { continue; }
+            if let Some((k, v)) = line.split_once('=') {
+                std::env::set_var(k.trim(), v.trim());
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    load_dotenv();
     std::fs::create_dir_all(LOG_DIR).ok();
 
     let file_appender = tracing_appender::rolling::never(LOG_DIR, "bot.log");
