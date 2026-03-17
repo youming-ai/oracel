@@ -1,5 +1,5 @@
 /target/
-trade_log.json
-balance.json
+/logs/
+config.json
 *.swp
 *.tmp
