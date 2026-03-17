@@ -457,9 +457,12 @@ async fn main() -> Result<()> {
 
     load_dotenv();
 
-    // Handle --derive-keys before full bot init
+    // Handle subcommands before full bot init
     if std::env::args().any(|a| a == "--derive-keys") {
         return derive_api_keys().await;
+    }
+    if std::env::args().any(|a| a == "--redeem-all") {
+        return redeem_all().await;
     }
 
     std::fs::create_dir_all(LOG_DIR).ok();
@@ -499,6 +502,100 @@ async fn main() -> Result<()> {
     let mut bot = Bot::new(config).await?;
     bot.run().await?;
 
+    Ok(())
+}
+
+/// Redeem all winning outcome tokens for recent markets in the series.
+async fn redeem_all() -> Result<()> {
+    eprintln!("Scanning recent markets for redeemable positions...\n");
+
+    let config_path = Path::new("config.json");
+    let config = if config_path.exists() {
+        Config::load(config_path)?
+    } else {
+        anyhow::bail!("config.json not found");
+    };
+
+    let private_key = if !config.trading.private_key.is_empty() {
+        config.trading.private_key.clone()
+    } else {
+        anyhow::bail!("PRIVATE_KEY not set in .env");
+    };
+
+    let mode = if config.trading.mode == "paper" { "live" } else { &config.trading.mode };
+    let rpc = data::chainlink::rpc_url(mode);
+    let redeemer = data::polymarket::CtfRedeemer::new(private_key, rpc);
+
+    let series_id = config.market.resolve_series_id();
+    if series_id.is_empty() {
+        anyhow::bail!("series_id is empty. Set market.event_url in config.json");
+    }
+
+    let gamma_url = &config.polyclob.gamma_api_url;
+    let http = reqwest::Client::new();
+
+    // Scan past 24h of 5-minute windows (288 windows)
+    let now_ts = chrono::Utc::now().timestamp();
+    let base_ts = (now_ts / 300) * 300;
+    let mut condition_ids: Vec<(String, String)> = Vec::new(); // (condition_id, slug)
+
+    for i in 0..288 {
+        let ts = base_ts - i * 300;
+        let slug = format!("{}-{}", series_id, ts);
+        let url = format!("{}/events?slug={}&limit=1", gamma_url, slug);
+
+        let resp = match http.get(&url).send().await {
+            Ok(r) if r.status().is_success() => r,
+            _ => continue,
+        };
+
+        let data: serde_json::Value = match resp.json().await {
+            Ok(d) => d,
+            _ => continue,
+        };
+
+        if let Some(events) = data.as_array() {
+            if let Some(event) = events.first() {
+                if let Some(markets) = event.get("markets").and_then(|m| m.as_array()) {
+                    for market in markets {
+                        if let Some(cid) = market.get("conditionId").and_then(|c| c.as_str()) {
+                            if !cid.is_empty() && !condition_ids.iter().any(|(id, _)| id == cid) {
+                                condition_ids.push((cid.to_string(), slug.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    eprintln!("Found {} markets with condition IDs\n", condition_ids.len());
+
+    let mut success = 0u32;
+    let mut failed = 0u32;
+    let mut skipped = 0u32;
+
+    for (cid, slug) in &condition_ids {
+        eprint!("  {} ({})... ", &cid[..10.min(cid.len())], slug);
+        match redeemer.redeem(cid).await {
+            Ok(tx) => {
+                eprintln!("OK tx={}", tx);
+                success += 1;
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("nothing to redeem") || msg.contains("revert") {
+                    eprintln!("skip (no position)");
+                    skipped += 1;
+                } else {
+                    eprintln!("FAIL: {}", msg);
+                    failed += 1;
+                }
+            }
+        }
+    }
+
+    eprintln!("\nDone: {} redeemed, {} skipped, {} failed", success, skipped, failed);
     Ok(())
 }
 
