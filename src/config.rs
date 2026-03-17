@@ -197,7 +197,7 @@ impl Default for RiskConfig {
 impl Default for PollingConfig {
     fn default() -> Self {
         Self {
-            signal_interval_ms: 2000,
+            signal_interval_ms: 1000,
         }
     }
 }
