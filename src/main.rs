@@ -6,22 +6,26 @@ mod config;
 mod data;
 mod pipeline;
 mod signing;
-mod types;
 
 use anyhow::Result;
 use chrono::Utc;
 use config::Config;
 use std::io::Write;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{interval, Duration};
+use tracing_subscriber::fmt::writer::MakeWriterExt;
+
+const LOG_DIR: &str = "logs";
 
 use data::coinbase::CoinbaseClient;
 use data::market_discovery::{DiscoveryConfig, MarketDiscovery};
 use data::polymarket::PolymarketClient;
 
 use pipeline::price_source::PriceSource;
-use pipeline::signal::{self, Direction};
+use pipeline::signal;
+use pipeline::signal::Direction;
 use pipeline::decider::{self, DeciderConfig, AccountState};
 use pipeline::executor::Executor;
 use pipeline::settler::{Settler, PendingPosition};
@@ -65,7 +69,7 @@ impl Bot {
     async fn new(config: Config) -> Result<Self> {
         let coinbase = Arc::new(CoinbaseClient::new("BTC-USD"));
         let price_source = Arc::new(PriceSource::new(coinbase, 1000));
-        let polymarket = Arc::new(PolymarketClient::new("", ""));
+        let polymarket = Arc::new(PolymarketClient::new());
 
         let resolved_series_id = config.market.resolve_series_id();
         if resolved_series_id.is_empty() {
@@ -83,12 +87,12 @@ impl Bot {
         let executor = Executor::new(
             config.trading.mode.clone(),
             config.trading.private_key.clone(),
-            PolymarketClient::new("", ""),
+            PolymarketClient::new(),
         );
 
         // Load balance from file or use default
         let initial_balance = Self::load_balance().unwrap_or(1000.0);
-        tracing::info!("Starting balance: ${:.2}", initial_balance);
+        tracing::info!("[INIT] Starting balance: ${:.2}", initial_balance);
 
         Ok(Self {
             config,
@@ -106,54 +110,49 @@ impl Bot {
     }
 
     fn load_balance() -> Option<f64> {
-        let path = std::path::Path::new("balance.json");
-        if path.exists() {
-            let content = std::fs::read_to_string(path).ok()?;
-            let data: serde_json::Value = serde_json::from_str(&content).ok()?;
-            data.get("balance").and_then(|v| v.as_f64())
-        } else {
-            None
-        }
-    }
-
-    fn save_balance(balance: f64) {
-        let path = std::path::Path::new("balance.json");
-        let data = serde_json::json!({"balance": balance, "updated": chrono::Utc::now().to_rfc3339()});
-        if let Ok(content) = serde_json::to_string(&data) {
-            let _ = std::fs::write(path, content);
-        }
+        let content = std::fs::read_to_string(Path::new(LOG_DIR).join("balance")).ok()?;
+        content.trim().parse().ok()
     }
 
     async fn run(&mut self) -> Result<()> {
-        tracing::info!(
-            "=== Polymarket 5m Bot v0.3.0 === Mode: {} === Pipeline ===",
-            self.config.trading.mode
-        );
+        tracing::info!("[INIT] mode={} interval={}ms", self.config.trading.mode, self.config.polling.signal_interval_ms);
 
-        // Step 1: Discover current market
         self.refresh_market().await;
-
-        // Step 2: Start price source (handles Coinbase WS internally)
         self.price_source.clone().start().await;
 
-        // Step 3: Start settlement checker
-        self.start_settlement_checker();
+        let mut settlement_handle = self.start_settlement_checker();
+        let mut refresher_handle = self.start_market_refresher();
 
-        // Step 4: Start market refresh task (every 60s)
-        self.start_market_refresher();
-
-        // Step 5: Main trading loop
         let mut tick = interval(Duration::from_millis(self.config.polling.signal_interval_ms));
 
         loop {
-            tick.tick().await;
-            if let Err(e) = self.tick().await {
-                tracing::error!("Tick error: {}", e);
+            tokio::select! {
+                _ = tick.tick() => {
+                    if let Err(e) = self.tick().await {
+                        tracing::error!("[BOT] Tick error: {}", e);
+                    }
+                }
+                result = &mut settlement_handle => {
+                    match result {
+                        Ok(()) => tracing::error!("[BOT] Settlement checker exited unexpectedly"),
+                        Err(e) => tracing::error!("[BOT] Settlement checker panicked: {}", e),
+                    }
+                    break;
+                }
+                result = &mut refresher_handle => {
+                    match result {
+                        Ok(()) => tracing::error!("[BOT] Market refresher exited unexpectedly"),
+                        Err(e) => tracing::error!("[BOT] Market refresher panicked: {}", e),
+                    }
+                    break;
+                }
             }
         }
+
+        Ok(())
     }
 
-    fn start_market_refresher(&self) {
+    fn start_market_refresher(&self) -> tokio::task::JoinHandle<()> {
         let discovery = self.discovery.clone();
         let token_yes = self.active_token_yes.clone();
         let token_no = self.active_token_no.clone();
@@ -167,21 +166,18 @@ impl Bot {
                     Ok(active) => {
                         let current_yes = token_yes.read().await.clone();
                         if current_yes != active.token_id_yes {
-                            tracing::info!(
-                                "[MARKET] New market: {} | Ends: {}",
-                                active.market.slug, active.end_date
-                            );
+                            tracing::info!("[MKT] {} ends {}", active.market.slug, active.end_date);
                             *token_yes.write().await = active.token_id_yes;
                             *token_no.write().await = active.token_id_no;
                             *settle_ms.write().await = active.end_date.timestamp_millis();
                         }
                     }
                     Err(e) => {
-                        tracing::debug!("Market refresh failed: {}", e);
+                        tracing::debug!("[MARKET] Market refresh failed: {}", e);
                     }
                 }
             }
-        });
+        })
     }
 
     async fn tick(&self) -> Result<()> {
@@ -227,10 +223,9 @@ impl Bot {
         };
 
         // 3. Compute signal based on market prices (Stage 2)
-        let signal = match signal::compute_signal(&closes, poly_yes, poly_no) {
-            Some(s) => s,
-            None => return Ok(()),
-        };
+        if !signal::is_market_extreme(poly_yes, poly_no, self.config.strategy.extreme_threshold) {
+            return Ok(());
+        }
 
         // 4. Decide trade (Stage 3)
         let account_read = self.account.read().await.clone();
@@ -241,10 +236,13 @@ impl Bot {
             min_position: self.config.strategy.min_order_size,
             cooldown_ms: 5_000,
             max_risk_fraction: 0.10,
+            extreme_threshold: self.config.strategy.extreme_threshold,
+            fair_value: self.config.strategy.fair_value,
+            max_consecutive_losses: self.config.risk.max_consecutive_losses,
+            max_daily_loss_pct: self.config.risk.max_daily_loss_pct,
         };
 
         let decision = decider::decide(
-            &signal,
             poly_yes,
             poly_no,
             settlement_ms,
@@ -255,30 +253,20 @@ impl Bot {
         // 6. Execute trade (Stage 4)
         match &decision {
             decider::Decision::Pass(reason) => {
-                let should_log = {
+                {
                     let mut st = self.state.write().await;
                     st.no_trade_count += 1;
-                    let changed = st.last_no_trade_reason != *reason;
-                    let periodic = st.no_trade_count % 60 == 0;
+                    // Compare category only (strip trailing numbers/%)
+                    let category = reason.trim_end_matches(|c: char| c.is_ascii_digit() || c == '%' || c == '_');
+                    let prev_cat = st.last_no_trade_reason.trim_end_matches(|c: char| c.is_ascii_digit() || c == '%' || c == '_');
+                    let changed = category != prev_cat;
                     if changed { st.last_no_trade_reason = reason.clone(); }
-                    changed || periodic
-                };
-                if should_log && !reason.contains("cooldown") && !reason.contains("loss_pause") {
-                    let mkt_str = match (poly_yes, poly_no) {
-                        (Some(y), Some(n)) => {
-                            let total = y + n;
-                            if total > 0.0 { format!("Mkt={:.0}%UP", y/total*100.0) }
-                            else { "Mkt=?".into() }
-                        }
-                        _ => "Mkt=N/A".into(),
-                    };
-                    tracing::info!(
-                        "[SIGNAL] NO TRADE ({}) | {} | BTC=${:.0}",
-                        reason, mkt_str, btc_price,
-                    );
+                    if changed && !reason.contains("cooldown") && !reason.contains("loss_pause") {
+                        tracing::info!("[SKIP] {} | BTC=${:.0}", reason, btc_price);
+                    }
                 }
             }
-            decider::Decision::Trade { direction, size_usdc, edge } => {
+            decider::Decision::Trade { direction, size_usdc: _, edge } => {
                 let token_yes = self.active_token_yes.read().await.clone();
                 let token_no = self.active_token_no.read().await.clone();
 
@@ -288,13 +276,8 @@ impl Bot {
                 };
 
                 tracing::info!(
-                    "[SIGNAL] Edge: {:.0}% -> BUY {} @ ${:.2} | Yes={:.2} No={:.2} | BTC=${:.0}",
-                    edge * 100.0,
-                    direction.as_str(),
-                    cheap_price,
-                    poly_yes.unwrap_or(0.0),
-                    poly_no.unwrap_or(0.0),
-                    btc_price,
+                    "[TRADE] {} @ {:.3} edge={:.0}% BTC=${:.0}",
+                    direction.as_str(), cheap_price, edge * 100.0, btc_price,
                 );
 
                 if let Some(order) = self.executor.execute(
@@ -315,36 +298,28 @@ impl Bot {
 
                     // Add to settler
                     self.settler.write().await.add_position(PendingPosition {
-                        order_id: order.order_id.clone(),
                         direction: order.direction,
                         size_usdc: order.size_usdc,
                         entry_price: order.entry_price,
                         cost: order.cost,
-                        token_id: order.token_id,
                         settlement_time_ms: order.settlement_time_ms,
                         entry_btc_price: order.entry_btc_price,
                     });
 
                     // Log to file
-                    let entry = serde_json::json!({
-                        "timestamp": Utc::now().to_rfc3339(),
-                        "order_id": order.order_id,
-                        "event": "trade",
-                        "direction": order.direction.as_str(),
-                        "size": order.size_usdc,
-                        "entry_price": order.entry_price,
-                        "cost": order.cost,
-                        "edge_pct": edge * 100.0,
-                        "balance_after": self.account.read().await.balance,
-                        "settlement_time_ms": order.settlement_time_ms,
-                    });
+                    let bal = self.account.read().await.balance;
                     if let Ok(mut file) = std::fs::OpenOptions::new()
-                        .create(true).append(true).open("trade_log.json") {
-                        if let Err(e) = serde_json::to_writer(&file, &entry) {
-                            tracing::warn!("Failed to write trade log: {}", e);
-                        } else {
-                            let _ = writeln!(file, "");
-                        }
+                        .create(true).append(true).open(Path::new(LOG_DIR).join("trades.csv"))
+                    {
+                        let _ = writeln!(file, "{},{},{},{:.3},{:.2},{:.1},{:.2}",
+                            Utc::now().format("%H:%M:%S"),
+                            order.direction.as_str(),
+                            &order.order_id[..8],
+                            order.entry_price,
+                            order.cost,
+                            edge * 100.0,
+                            bal,
+                        );
                     }
                 }
             }
@@ -354,27 +329,24 @@ impl Bot {
     }
 
     async fn refresh_market(&self) {
-        tracing::info!("Discovering current market...");
         match self.discovery.discover().await {
             Ok(active) => {
-                tracing::info!(
-                    "Market: {} | Ends: {}",
-                    active.market.slug, active.end_date
-                );
+                tracing::info!("[MKT] {} ends {}", active.market.slug, active.end_date);
                 *self.active_token_yes.write().await = active.token_id_yes.clone();
                 *self.active_token_no.write().await = active.token_id_no.clone();
                 *self.active_settlement_ms.write().await = active.end_date.timestamp_millis();
             }
             Err(e) => {
-                tracing::warn!("Market discovery failed: {}", e);
+                tracing::warn!("[MKT] discovery failed: {}", e);
             }
         }
     }
 
-    fn start_settlement_checker(&self) {
+    fn start_settlement_checker(&self) -> tokio::task::JoinHandle<()> {
         let settler = self.settler.clone();
         let account = self.account.clone();
         let price_source = self.price_source.clone();
+        let btc_tiebreaker_usd = self.config.strategy.btc_tiebreaker_usd;
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(15));
@@ -386,30 +358,27 @@ impl Bot {
                     None => continue,
                 };
 
-                let results = settler.write().await.check_settlements(btc_price);
+                let results = settler.write().await.check_settlements(btc_price, btc_tiebreaker_usd);
                 if !results.is_empty() {
                     let mut acc = account.write().await;
-                    let total_payout: f64 = results.iter().map(|r| r.payout).sum();
-
                     for r in &results {
                         acc.record_settlement(r);
                     }
 
                     tracing::info!(
-                        "[BALANCE] Settled {} | Payout: ${:.2} | Balance: ${:.2} | Daily PnL: ${:+.2}",
-                        results.len(), total_payout, acc.balance, acc.daily_pnl,
+                        "[BAL] ${:.2} pnl=${:+.2} settled={}",
+                        acc.balance, acc.daily_pnl, results.len(),
                     );
 
-                    // Persist balance to disk
                     let bal = acc.balance;
-                    drop(acc); // release lock before file I/O
-                    let data = serde_json::json!({"balance": bal, "updated": chrono::Utc::now().to_rfc3339()});
-                    if let Ok(content) = serde_json::to_string(&data) {
-                        let _ = std::fs::write("balance.json", content);
-                    }
+                    drop(acc);
+                    let _ = std::fs::write(
+                        Path::new(LOG_DIR).join("balance"),
+                        format!("{:.2}", bal),
+                    );
                 }
             }
-        });
+        })
     }
 }
 
@@ -417,19 +386,25 @@ impl Bot {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    std::fs::create_dir_all(LOG_DIR).ok();
+
+    let file_appender = tracing_appender::rolling::never(LOG_DIR, "bot.log");
+    let (file_writer, _guard) = tracing_appender::non_blocking(file_appender);
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info".into()),
         )
+        .with_writer(file_writer.and(std::io::stderr))
+        .with_ansi(false)
         .init();
+    tracing::info!("polybot v0.3.0");
 
-    tracing::info!("Polymarket 5m Bot v0.3.0 — Pipeline Architecture");
-
-    let config_path = std::path::Path::new("config.json");
+    let config_path = Path::new("config.json");
     let config = if config_path.exists() {
         Config::load(config_path).unwrap_or_else(|e| {
-            tracing::warn!("Failed to load config: {}, using defaults", e);
+            tracing::warn!("[INIT] Failed to load config: {}, using defaults", e);
             Config::default()
         })
     } else {

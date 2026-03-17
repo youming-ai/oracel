@@ -31,6 +31,7 @@ pub struct GammaMarket {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ActiveMarket {
     pub market: GammaMarket,
     pub token_id_yes: String,
@@ -44,6 +45,7 @@ pub struct ActiveMarket {
 // ─── Discovery Config ───
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct DiscoveryConfig {
     pub series_id: String,
     pub gamma_api_url: String,
@@ -66,11 +68,12 @@ impl Default for DiscoveryConfig {
 
 pub struct MarketDiscovery {
     config: DiscoveryConfig,
+    client: reqwest::Client,
 }
 
 impl MarketDiscovery {
     pub fn new(config: DiscoveryConfig) -> Self {
-        Self { config }
+        Self { config, client: reqwest::Client::new() }
     }
 
     /// Generate slug for a given timestamp window
@@ -88,7 +91,6 @@ impl MarketDiscovery {
 
     /// Find the next active market by searching slug patterns
     pub async fn discover(&self) -> Result<ActiveMarket> {
-        let client = reqwest::Client::new();
         let base = &self.config.gamma_api_url;
         let window_ts = Self::current_window_ts();
         
@@ -98,7 +100,7 @@ impl MarketDiscovery {
             let slug = Self::generate_slug(&self.config.series_id, ts);
             
             let url = format!("{}/events?slug={}&limit=1", base, slug);
-            if let Ok(resp) = client.get(&url).send().await {
+            if let Ok(resp) = self.client.get(&url).send().await {
                 if resp.status().is_success() {
                     if let Ok(data) = resp.json::<serde_json::Value>().await {
                         if let Some(events) = data.as_array() {
@@ -107,10 +109,7 @@ impl MarketDiscovery {
                                     for market_json in markets {
                                         if let Ok(market) = serde_json::from_value::<GammaMarket>(market_json.clone()) {
                                             if let Ok(active) = Self::parse_active_market(&market) {
-                                                tracing::info!(
-                                                    "Found: {} (ends: {})",
-                                                    slug, active.end_date
-                                                );
+                                                tracing::info!("[MKT] found {} ends {}", slug, active.end_date);
                                                 return Ok(active);
                                             }
                                         }
