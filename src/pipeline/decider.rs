@@ -5,7 +5,7 @@
 //! Edge = 0.50 - cheap_side_price (our fair value minus market's extreme price).
 //! Direction is determined purely by market price, not BTC trend.
 
-use crate::pipeline::signal::{Signal, Direction};
+use crate::pipeline::signal::Direction;
 
 #[derive(Debug, Clone)]
 pub enum Decision {
@@ -29,16 +29,28 @@ pub struct DeciderConfig {
     pub cooldown_ms: i64,
     /// Account balance fraction to risk per trade (Half-Kelly cap)
     pub max_risk_fraction: f64,
+    /// Market price threshold to consider "extreme" (e.g. 0.80)
+    pub extreme_threshold: f64,
+    /// Fair value assumption for binary outcome (e.g. 0.50)
+    pub fair_value: f64,
+    /// Maximum consecutive losses before circuit breaker
+    pub max_consecutive_losses: u32,
+    /// Maximum daily loss as fraction of balance (e.g. 0.10 = 10%)
+    pub max_daily_loss_pct: f64,
 }
 
 impl Default for DeciderConfig {
     fn default() -> Self {
         Self {
-            edge_threshold: 0.15,   // 15% minimum edge
+            edge_threshold: 0.15,
             max_position: 50.0,
             min_position: 5.0,
             cooldown_ms: 5_000,
-            max_risk_fraction: 0.10,  // Max 10% of balance per trade
+            max_risk_fraction: 0.10,
+            extreme_threshold: 0.80,
+            fair_value: 0.50,
+            max_consecutive_losses: 8,
+            max_daily_loss_pct: 0.10,
         }
     }
 }
@@ -51,12 +63,11 @@ struct DirectionStats {
 }
 
 impl DirectionStats {
-    fn new() -> Self { Self { wins: 0, losses: 0 } }
-    fn total(&self) -> u32 { self.wins + self.losses }
-    fn win_rate(&self) -> f64 {
-        let t = self.total();
-        if t == 0 { return 0.5; }
-        self.wins as f64 / t as f64
+    fn new() -> Self {
+        Self { wins: 0, losses: 0 }
+    }
+    fn total(&self) -> u32 {
+        self.wins + self.losses
     }
 }
 
@@ -98,21 +109,31 @@ impl AccountState {
     }
 
     fn can_trade(&self, cfg: &DeciderConfig) -> bool {
-        if self.balance <= 0.0 { return false; }
-        
+        if self.balance <= 0.0 {
+            return false;
+        }
+
         // Check cooldown
         let now = chrono::Utc::now().timestamp_millis();
-        if now - self.last_trade_time_ms < cfg.cooldown_ms { return false; }
-        
+        if now - self.last_trade_time_ms < cfg.cooldown_ms {
+            return false;
+        }
+
         // Check if we're in a pause period
-        if now < self.pause_until_ms { return false; }
-        
-        // Hard stop: 8 consecutive losses (circuit breaker)
-        if self.consecutive_losses >= 8 { return false; }
-        
-        // Daily loss limit: -10% of balance
-        if self.daily_pnl <= -self.balance * 0.10 { return false; }
-        
+        if now < self.pause_until_ms {
+            return false;
+        }
+
+        // Hard stop: circuit breaker
+        if self.consecutive_losses >= cfg.max_consecutive_losses {
+            return false;
+        }
+
+        // Daily loss limit
+        if self.daily_pnl <= -self.balance * cfg.max_daily_loss_pct {
+            return false;
+        }
+
         true
     }
 
@@ -120,10 +141,10 @@ impl AccountState {
     /// Returns pause duration in ms, or 0 if no pause needed
     fn loss_pause_duration(&self) -> i64 {
         match self.consecutive_losses {
-            0..=3 => 0,           // No pause
-            4..=5 => 60_000,      // 1 minute pause
-            6..=7 => 300_000,     // 5 minutes pause
-            _ => 0,               // Hard stop handled elsewhere
+            0..=3 => 0,       // No pause
+            4..=5 => 60_000,  // 1 minute pause
+            6..=7 => 300_000, // 5 minutes pause
+            _ => 0,           // Hard stop handled elsewhere
         }
     }
 
@@ -135,7 +156,7 @@ impl AccountState {
     pub fn record_settlement(&mut self, result: &crate::pipeline::settler::SettlementResult) {
         self.balance += result.payout;
         self.daily_pnl += result.pnl;
-        
+
         if result.won {
             self.consecutive_wins += 1;
             self.consecutive_losses = 0;
@@ -150,14 +171,15 @@ impl AccountState {
                 Direction::Up => self.up_stats.losses += 1,
                 Direction::Down => self.down_stats.losses += 1,
             }
-            
+
             // Set pause if needed
             let pause_ms = self.loss_pause_duration();
             if pause_ms > 0 {
                 self.pause_until_ms = chrono::Utc::now().timestamp_millis() + pause_ms;
                 tracing::warn!(
                     "[RISK] {} consecutive losses, pausing for {}s",
-                    self.consecutive_losses, pause_ms / 1000
+                    self.consecutive_losses,
+                    pause_ms / 1000
                 );
             }
         }
@@ -167,13 +189,14 @@ impl AccountState {
     fn overall_win_rate(&self) -> f64 {
         let total_wins = self.up_stats.wins + self.down_stats.wins;
         let total = self.up_stats.total() + self.down_stats.total();
-        if total == 0 { return 0.5; }
+        if total == 0 {
+            return 0.5;
+        }
         total_wins as f64 / total as f64
     }
 }
 
 pub fn decide(
-    signal: &Signal,
     market_yes: Option<f64>,
     market_no: Option<f64>,
     settlement_ms: i64,
@@ -187,7 +210,7 @@ pub fn decide(
 
     // 2. Risk check
     if !account.can_trade(cfg) {
-        if account.consecutive_losses >= 8 {
+        if account.consecutive_losses >= cfg.max_consecutive_losses {
             return Decision::Pass("circuit_breaker".into());
         }
         if chrono::Utc::now().timestamp_millis() < account.pause_until_ms {
@@ -204,23 +227,20 @@ pub fn decide(
     };
 
     let total = yes + no;
-    if total <= 0.0 { return Decision::Pass("no_liquidity".into()); }
-    
+    if total <= 0.0 {
+        return Decision::Pass("no_liquidity".into());
+    }
+
     let mkt_up = yes / total;
-    
+
     // 4. Market extreme check + edge calculation
-    const EXTREME_THRESHOLD: f64 = 0.80;
-    const FAIR_VALUE: f64 = 0.50;
-    
-    let (edge, direction) = if mkt_up > EXTREME_THRESHOLD {
-        // Market extremely bullish → bet DOWN
-        let cheap_price = no / total;  // NO is cheap
-        let edge = FAIR_VALUE - cheap_price;
+    let (edge, direction) = if mkt_up > cfg.extreme_threshold {
+        let cheap_price = no / total;
+        let edge = cfg.fair_value - cheap_price;
         (edge, Direction::Down)
-    } else if mkt_up < (1.0 - EXTREME_THRESHOLD) {
-        // Market extremely bearish → bet UP
-        let cheap_price = yes / total;  // YES is cheap
-        let edge = FAIR_VALUE - cheap_price;
+    } else if mkt_up < (1.0 - cfg.extreme_threshold) {
+        let cheap_price = yes / total;
+        let edge = cfg.fair_value - cheap_price;
         (edge, Direction::Up)
     } else {
         return Decision::Pass(format!("not_extreme_{:.0}%", mkt_up * 100.0));
@@ -228,7 +248,11 @@ pub fn decide(
 
     // 5. Edge threshold
     if edge < cfg.edge_threshold {
-        return Decision::Pass(format!("edge_{:.0}%<{:.0}%", edge * 100.0, cfg.edge_threshold * 100.0));
+        return Decision::Pass(format!(
+            "edge_{:.0}%<{:.0}%",
+            edge * 100.0,
+            cfg.edge_threshold * 100.0
+        ));
     }
 
     // 6. Direction is determined purely by market price extremes.
@@ -241,13 +265,17 @@ pub fn decide(
     let win_rate = account.overall_win_rate().clamp(0.50, 0.75);
     let kelly_fraction = (2.0 * win_rate - 1.0).max(0.05);
     let half_kelly = kelly_fraction * 0.5;
-    
+
     // Scale by edge strength: 15% edge = 1x, 30% edge = 1.5x, 45%+ = 2x
     let edge_multiplier = (1.0 + (edge - 0.15) / 0.15).clamp(1.0, 2.0);
-    
+
     let size = (account.balance * half_kelly * edge_multiplier)
         .clamp(cfg.min_position, cfg.max_position)
         .min(account.balance * cfg.max_risk_fraction);
 
-    Decision::Trade { direction, size_usdc: size, edge }
+    Decision::Trade {
+        direction,
+        size_usdc: size,
+        edge,
+    }
 }
