@@ -1,6 +1,6 @@
 {
   "trading": {
-    "mode": "paper"
+    "mode": "live"
   },
   "market": {
     "event_url": "https://polymarket.com/event/btc-updown-5m-1773364500",
