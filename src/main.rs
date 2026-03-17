@@ -605,6 +605,8 @@ async fn redeem_all() -> Result<()> {
             Ok(tx) => {
                 eprintln!("OK tx={}", tx);
                 success += 1;
+                // Wait for tx confirmation before next redeem to avoid nonce conflicts
+                tokio::time::sleep(Duration::from_secs(5)).await;
             }
             Err(e) => {
                 let msg = e.to_string();
