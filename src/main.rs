@@ -20,7 +20,7 @@ const LOG_DIR: &str = "logs";
 
 use data::coinbase::CoinbaseClient;
 use data::market_discovery::{DiscoveryConfig, MarketDiscovery};
-use data::polymarket::{PolymarketClient, AuthenticatedPolyClient};
+use data::polymarket::{PolymarketClient, AuthenticatedPolyClient, CtfRedeemer};
 
 use pipeline::price_source::PriceSource;
 use pipeline::signal;
@@ -58,9 +58,11 @@ struct Bot {
     account: Arc<RwLock<AccountState>>,
     settler: Arc<RwLock<Settler>>,
     executor: Executor,
+    redeemer: Option<Arc<CtfRedeemer>>,
     // Dynamic market data
     active_token_yes: Arc<RwLock<String>>,
     active_token_no: Arc<RwLock<String>>,
+    active_condition_id: Arc<RwLock<String>>,
     active_settlement_ms: Arc<RwLock<i64>>,
 }
 
@@ -102,6 +104,15 @@ impl Bot {
             auth_client,
         );
 
+        // Create CTF redeemer for live mode
+        let redeemer = if config.trading.mode != "paper" && !config.trading.private_key.is_empty() {
+            let rpc = data::chainlink::rpc_url(&config.trading.mode);
+            tracing::info!("[INIT] CTF redeemer enabled for on-chain redemption");
+            Some(Arc::new(CtfRedeemer::new(config.trading.private_key.clone(), rpc)))
+        } else {
+            None
+        };
+
         // Load balance from file or use default
         let initial_balance = Self::load_balance().unwrap_or(1000.0);
         tracing::info!("[INIT] Starting balance: ${:.2}", initial_balance);
@@ -115,8 +126,10 @@ impl Bot {
             account: Arc::new(RwLock::new(AccountState::new(initial_balance))),
             settler: Arc::new(RwLock::new(Settler::new())),
             executor,
+            redeemer,
             active_token_yes: Arc::new(RwLock::new(String::new())),
             active_token_no: Arc::new(RwLock::new(String::new())),
+            active_condition_id: Arc::new(RwLock::new(String::new())),
             active_settlement_ms: Arc::new(RwLock::new(0)),
         })
     }
@@ -168,6 +181,7 @@ impl Bot {
         let discovery = self.discovery.clone();
         let token_yes = self.active_token_yes.clone();
         let token_no = self.active_token_no.clone();
+        let condition_id = self.active_condition_id.clone();
         let settle_ms = self.active_settlement_ms.clone();
 
         tokio::spawn(async move {
@@ -181,6 +195,7 @@ impl Bot {
                             tracing::info!("[MKT] {} ends {}", active.market.slug, active.end_date);
                             *token_yes.write().await = active.token_id_yes;
                             *token_no.write().await = active.token_id_no;
+                            *condition_id.write().await = active.condition_id;
                             *settle_ms.write().await = active.end_date.timestamp_millis();
                         }
                     }
@@ -310,6 +325,7 @@ impl Bot {
                     }
 
                     // Add to settler
+                    let cid = self.active_condition_id.read().await.clone();
                     self.settler.write().await.add_position(PendingPosition {
                         direction: order.direction,
                         size_usdc: order.size_usdc,
@@ -317,6 +333,7 @@ impl Bot {
                         cost: order.cost,
                         settlement_time_ms: order.settlement_time_ms,
                         entry_btc_price: order.entry_btc_price,
+                        condition_id: cid,
                     });
 
                     // Log to file
@@ -344,9 +361,10 @@ impl Bot {
     async fn refresh_market(&self) {
         match self.discovery.discover().await {
             Ok(active) => {
-                tracing::info!("[MKT] {} ends {}", active.market.slug, active.end_date);
+                tracing::info!("[MKT] {} ends {} cid={}", active.market.slug, active.end_date, &active.condition_id[..8.min(active.condition_id.len())]);
                 *self.active_token_yes.write().await = active.token_id_yes.clone();
                 *self.active_token_no.write().await = active.token_id_no.clone();
+                *self.active_condition_id.write().await = active.condition_id.clone();
                 *self.active_settlement_ms.write().await = active.end_date.timestamp_millis();
             }
             Err(e) => {
@@ -361,6 +379,7 @@ impl Bot {
         let price_source = self.price_source.clone();
         let btc_tiebreaker_usd = self.config.strategy.btc_tiebreaker_usd;
         let rpc = data::chainlink::rpc_url(&self.config.trading.mode);
+        let redeemer = self.redeemer.clone();
 
         tokio::spawn(async move {
             let http = reqwest::Client::new();
@@ -398,6 +417,18 @@ impl Bot {
                         Path::new(LOG_DIR).join("balance"),
                         format!("{:.2}", bal),
                     );
+
+                    // Redeem winning positions on-chain
+                    if let Some(ref redeemer) = redeemer {
+                        for r in &results {
+                            if r.won && !r.condition_id.is_empty() {
+                                match redeemer.redeem(&r.condition_id).await {
+                                    Ok(tx) => tracing::info!("[REDEEM] {} tx={}", r.direction.as_str(), tx),
+                                    Err(e) => tracing::warn!("[REDEEM] failed {}: {}", r.direction.as_str(), e),
+                                }
+                            }
+                        }
+                    }
                 }
             }
         })

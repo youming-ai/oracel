@@ -106,14 +106,21 @@ impl AuthenticatedPolyClient {
 /// USDC on Polygon mainnet
 const POLYGON_USDC: alloy::primitives::Address = address!("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174");
 
-/// On-chain CTF client for redeeming winning outcome tokens.
+/// On-chain CTF redeemer for winning outcome tokens.
+/// Creates ephemeral provider per redeem (wins are infrequent).
 pub struct CtfRedeemer {
-    client: ctf::Client<alloy::providers::fillers::FillProvider<alloy::providers::fillers::JoinFill<alloy::providers::fillers::JoinFill<alloy::providers::fillers::JoinFill<alloy::providers::Identity, alloy::providers::fillers::JoinFill<alloy::providers::fillers::RecommendedFillers, alloy::providers::fillers::WalletFiller<alloy::network::EthereumWallet>>>, alloy::providers::fillers::ChainIdFiller>, alloy::providers::fillers::NonceFiller>, alloy::providers::RootProvider>>,
+    private_key: String,
+    rpc_url: String,
 }
 
 impl CtfRedeemer {
-    pub async fn new(private_key: &str, rpc_url: &str) -> Result<Self> {
-        let key_hex = private_key.strip_prefix("0x").unwrap_or(private_key);
+    pub fn new(private_key: String, rpc_url: String) -> Self {
+        Self { private_key, rpc_url }
+    }
+
+    /// Redeem winning tokens for a binary market condition back to USDC.
+    pub async fn redeem(&self, condition_id_hex: &str) -> Result<String> {
+        let key_hex = self.private_key.strip_prefix("0x").unwrap_or(&self.private_key);
         let signer: PrivateKeySigner = LocalSigner::from_str(key_hex)
             .context("Invalid private key for CTF")?
             .with_chain_id(Some(POLYGON));
@@ -121,24 +128,19 @@ impl CtfRedeemer {
         let wallet = alloy::network::EthereumWallet::from(signer);
         let provider = ProviderBuilder::new()
             .wallet(wallet)
-            .connect(rpc_url)
+            .connect(&self.rpc_url)
             .await
-            .context("Failed to connect to Polygon RPC")?;
+            .context("Failed to connect to Polygon RPC for redeem")?;
 
         let client = ctf::Client::new(provider, POLYGON)
             .map_err(|e| anyhow::anyhow!("CTF client init failed: {}", e))?;
 
-        Ok(Self { client })
-    }
-
-    /// Redeem winning tokens for a binary market condition back to USDC.
-    pub async fn redeem(&self, condition_id_hex: &str) -> Result<String> {
         let hex = condition_id_hex.strip_prefix("0x").unwrap_or(condition_id_hex);
         let cid = B256::from_str(hex)
             .map_err(|e| anyhow::anyhow!("Invalid condition_id: {}", e))?;
 
         let req = RedeemPositionsRequest::for_binary_market(POLYGON_USDC, cid);
-        let resp = self.client.redeem_positions(&req).await
+        let resp = client.redeem_positions(&req).await
             .map_err(|e| anyhow::anyhow!("Redeem failed: {}", e))?;
 
         Ok(format!("{:#x}", resp.transaction_hash))

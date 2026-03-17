@@ -14,6 +14,7 @@ pub struct PendingPosition {
     pub cost: f64,
     pub settlement_time_ms: i64,
     pub entry_btc_price: f64,
+    pub condition_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -22,6 +23,7 @@ pub struct SettlementResult {
     pub payout: f64,
     pub pnl: f64,
     pub won: bool,
+    pub condition_id: String,
 }
 
 pub struct Settler {
@@ -86,7 +88,7 @@ impl Settler {
                 );
             }
 
-            results.push(SettlementResult { direction: pos.direction, payout, pnl, won });
+            results.push(SettlementResult { direction: pos.direction, payout, pnl, won, condition_id: pos.condition_id });
         }
 
         results
