@@ -196,12 +196,25 @@ impl AccountState {
     }
 }
 
+/// Calculate BTC momentum: % change over recent prices.
+/// Returns None if not enough data.
+fn btc_momentum(prices: &[f64]) -> Option<f64> {
+    // Use last 60 ticks (~2 min at 2s interval)
+    let lookback = 60.min(prices.len().saturating_sub(1));
+    if lookback < 10 { return None; }
+    let past = prices[prices.len() - 1 - lookback];
+    let now = prices[prices.len() - 1];
+    if past <= 0.0 { return None; }
+    Some((now - past) / past)
+}
+
 pub fn decide(
     market_yes: Option<f64>,
     market_no: Option<f64>,
     settlement_ms: i64,
     account: &AccountState,
     cfg: &DeciderConfig,
+    btc_prices: &[f64],
 ) -> Decision {
     // 1. One trade per market window
     if account.already_traded_market(settlement_ms) {
@@ -255,9 +268,18 @@ pub fn decide(
         ));
     }
 
-    // 6. Direction is determined purely by market price extremes.
-    //    No BTC trend filter - the signal decides direction,
-    //    not momentum. If market >80% confident, bet against it.
+    // 6. Momentum filter: don't bet against a strong BTC trend
+    //    >0.1% in 2min = strong trend
+    if let Some(momentum) = btc_momentum(btc_prices) {
+        let strong = 0.001; // 0.1%
+        let against_trend = match direction {
+            Direction::Down => momentum > strong,   // BTC pumping, don't short
+            Direction::Up => momentum < -strong,     // BTC dumping, don't long
+        };
+        if against_trend {
+            return Decision::Pass("against_trend".into());
+        }
+    }
 
     // 7. Position sizing: Half-Kelly based on edge
     // Kelly = edge / (1 - edge) simplified for binary outcome
