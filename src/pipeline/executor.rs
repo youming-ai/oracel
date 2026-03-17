@@ -76,7 +76,8 @@ impl Executor {
     async fn place_live_order(&self, token_id: &str, price: f64, size_usdc: f64) -> Result<String> {
         let client = self.auth_client.as_ref()
             .ok_or_else(|| anyhow::anyhow!("No authenticated client — run with PRIVATE_KEY set"))?;
-        let shares = size_usdc / price;
+        // Truncate to 2 decimal places (LOT_SIZE_SCALE) — floor to never over-order
+        let shares = ((size_usdc / price) * 100.0).floor() / 100.0;
         client.place_order(token_id, "BUY", price, shares).await
     }
 }

@@ -90,8 +90,7 @@ impl Bot {
                     Some(c)
                 }
                 Err(e) => {
-                    tracing::error!("[INIT] CLOB auth failed: {} — orders will fail", e);
-                    None
+                    anyhow::bail!("[INIT] CLOB auth failed: {} — cannot run in live mode", e);
                 }
             }
         } else {
@@ -500,31 +499,12 @@ async fn derive_api_keys() -> Result<()> {
     let secret = creds.secret().expose_secret().to_string();
     let passphrase = creds.passphrase().expose_secret().to_string();
 
-    // Update .env file
-    let env_path = ".env";
-    let content = std::fs::read_to_string(env_path).unwrap_or_default();
-    let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
-
-    fn update_env_line(lines: &mut Vec<String>, key: &str, value: &str) {
-        let prefix = format!("{}=", key);
-        if let Some(line) = lines.iter_mut().find(|l| l.starts_with(&prefix)) {
-            *line = format!("{}{}", prefix, value);
-        } else {
-            lines.push(format!("{}{}", prefix, value));
-        }
-    }
-
-    update_env_line(&mut lines, "POLY_API_KEY", &api_key);
-    update_env_line(&mut lines, "POLY_API_SECRET", &secret);
-    update_env_line(&mut lines, "POLY_PASSPHRASE", &passphrase);
-
-    std::fs::write(env_path, lines.join("\n") + "\n")?;
-
-    eprintln!("✅ API credentials saved to .env");
+    eprintln!("Derived API credentials (not persisted to disk):");
     eprintln!("   POLY_API_KEY={}", api_key);
-    eprintln!("   POLY_API_SECRET=****");
-    eprintln!("   POLY_PASSPHRASE=****");
-    eprintln!("\nYou can now run the bot in live mode.");
+    eprintln!("   POLY_API_SECRET={}", secret);
+    eprintln!("   POLY_PASSPHRASE={}", passphrase);
+    eprintln!("\nThese credentials are derived on-the-fly during auth.");
+    eprintln!("No secrets written to .env.");
 
     Ok(())
 }
