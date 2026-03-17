@@ -4,7 +4,7 @@
 use anyhow::Result;
 use crate::pipeline::decider::Decision;
 use crate::pipeline::signal::Direction;
-use crate::data::polymarket::PolymarketClient;
+use crate::data::polymarket::AuthenticatedPolyClient;
 
 #[derive(Debug, Clone)]
 pub struct OrderResult {
@@ -19,13 +19,12 @@ pub struct OrderResult {
 
 pub struct Executor {
     mode: String,
-    private_key: String,
-    polymarket: PolymarketClient,
+    auth_client: Option<AuthenticatedPolyClient>,
 }
 
 impl Executor {
-    pub fn new(mode: String, private_key: String, polymarket: PolymarketClient) -> Self {
-        Self { mode, private_key, polymarket }
+    pub fn new(mode: String, auth_client: Option<AuthenticatedPolyClient>) -> Self {
+        Self { mode, auth_client }
     }
 
     pub async fn execute(
@@ -75,13 +74,9 @@ impl Executor {
     }
 
     async fn place_live_order(&self, token_id: &str, price: f64, size_usdc: f64) -> Result<String> {
+        let client = self.auth_client.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No authenticated client — run with PRIVATE_KEY set"))?;
         let shares = size_usdc / price;
-        self.polymarket.place_order(
-            &self.private_key,
-            token_id,
-            "BUY",
-            price,
-            shares,
-        ).await
+        client.place_order(token_id, "BUY", price, shares).await
     }
 }

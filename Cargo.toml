@@ -23,13 +23,12 @@ anyhow = "1"
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 futures-util = "0.3"
-ethers = { version = "2", features = ["ws"] }
-hmac = "0.12"
-sha2 = "0.10"
-hex = "0.4"
-base64 = "0.22"
 rust_decimal = { version = "1", features = ["serde"] }
 rand = "0.8"
+polymarket-client-sdk = { version = "0.4", features = ["clob"] }
+alloy = { version = "1.6", default-features = false, features = ["signer-local", "signers"] }
+secrecy = "0.10"
+rustls = { version = "0.23", features = ["ring"] }
 
 [profile.release]
 opt-level = 3

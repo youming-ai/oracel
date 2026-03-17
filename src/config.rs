@@ -20,6 +20,8 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradingConfig {
     pub mode: String,
+    /// Loaded from PRIVATE_KEY env var (not stored in config.json)
+    #[serde(skip)]
     pub private_key: String,
 }
 
@@ -30,8 +32,6 @@ pub struct MarketConfig {
     #[serde(default)]
     pub event_url: String,
     pub series_id: String,
-    pub token_id_yes: String,
-    pub token_id_no: String,
     pub window_minutes: f64,
 }
 
@@ -130,6 +130,7 @@ impl Default for Config {
     }
 }
 
+
 impl Default for TradingConfig {
     fn default() -> Self {
         Self {
@@ -144,8 +145,6 @@ impl Default for MarketConfig {
         Self {
             event_url: String::new(),
             series_id: String::new(),
-            token_id_yes: String::new(),
-            token_id_no: String::new(),
             window_minutes: 5.0,
         }
     }
@@ -241,7 +240,11 @@ impl MarketConfig {
 impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let content = fs::read_to_string(path)?;
-        let config: Config = serde_json::from_str(&content)?;
+        let mut config: Config = serde_json::from_str(&content)?;
+        // Load private key from env (not stored in config.json)
+        if let Ok(pk) = std::env::var("PRIVATE_KEY") {
+            config.trading.private_key = pk;
+        }
         Ok(config)
     }
 

@@ -5,7 +5,6 @@
 mod config;
 mod data;
 mod pipeline;
-mod signing;
 
 use anyhow::Result;
 use chrono::Utc;
@@ -21,7 +20,7 @@ const LOG_DIR: &str = "logs";
 
 use data::coinbase::CoinbaseClient;
 use data::market_discovery::{DiscoveryConfig, MarketDiscovery};
-use data::polymarket::PolymarketClient;
+use data::polymarket::{PolymarketClient, AuthenticatedPolyClient};
 
 use pipeline::price_source::PriceSource;
 use pipeline::signal;
@@ -84,10 +83,24 @@ impl Bot {
         };
         let discovery = Arc::new(MarketDiscovery::new(discovery_cfg));
 
+        let auth_client = if config.trading.mode != "paper" && !config.trading.private_key.is_empty() {
+            match AuthenticatedPolyClient::new(&config.trading.private_key).await {
+                Ok(c) => {
+                    tracing::info!("[INIT] Authenticated with Polymarket CLOB");
+                    Some(c)
+                }
+                Err(e) => {
+                    tracing::error!("[INIT] CLOB auth failed: {} — orders will fail", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let executor = Executor::new(
             config.trading.mode.clone(),
-            config.trading.private_key.clone(),
-            PolymarketClient::new(),
+            auth_client,
         );
 
         // Load balance from file or use default
@@ -408,7 +421,17 @@ fn load_dotenv() {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     load_dotenv();
+
+    // Handle --derive-keys before full bot init
+    if std::env::args().any(|a| a == "--derive-keys") {
+        return derive_api_keys().await;
+    }
+
     std::fs::create_dir_all(LOG_DIR).ok();
 
     let file_appender = tracing_appender::rolling::never(LOG_DIR, "bot.log");
@@ -436,8 +459,72 @@ async fn main() -> Result<()> {
         cfg
     };
 
+    // Validate credentials for live mode
+    if config.trading.mode == "live" {
+        if config.trading.private_key.is_empty() {
+            anyhow::bail!("PRIVATE_KEY not set in .env — required for live trading");
+        }
+    }
+
     let mut bot = Bot::new(config).await?;
     bot.run().await?;
+
+    Ok(())
+}
+
+/// Derive CLOB API credentials from wallet using the SDK and write to .env
+async fn derive_api_keys() -> Result<()> {
+    use std::str::FromStr;
+    use polymarket_client_sdk::auth::{LocalSigner, Signer as _};
+    use polymarket_client_sdk::clob;
+    use polymarket_client_sdk::POLYGON;
+    use secrecy::ExposeSecret;
+
+    eprintln!("🔑 Deriving Polymarket CLOB API credentials...");
+
+    let private_key = std::env::var("PRIVATE_KEY")
+        .map_err(|_| anyhow::anyhow!("PRIVATE_KEY not set in .env"))?;
+    let key_hex = private_key.strip_prefix("0x").unwrap_or(&private_key);
+
+    let signer = LocalSigner::from_str(key_hex)
+        .map_err(|_| anyhow::anyhow!("Invalid PRIVATE_KEY in .env"))?
+        .with_chain_id(Some(POLYGON));
+
+    // Create or derive API key via SDK
+    let client = clob::Client::default();
+    let creds = client.create_or_derive_api_key(&signer, None)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to derive API key: {}", e))?;
+
+    let api_key = creds.key().to_string();
+    let secret = creds.secret().expose_secret().to_string();
+    let passphrase = creds.passphrase().expose_secret().to_string();
+
+    // Update .env file
+    let env_path = ".env";
+    let content = std::fs::read_to_string(env_path).unwrap_or_default();
+    let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+
+    fn update_env_line(lines: &mut Vec<String>, key: &str, value: &str) {
+        let prefix = format!("{}=", key);
+        if let Some(line) = lines.iter_mut().find(|l| l.starts_with(&prefix)) {
+            *line = format!("{}{}", prefix, value);
+        } else {
+            lines.push(format!("{}{}", prefix, value));
+        }
+    }
+
+    update_env_line(&mut lines, "POLY_API_KEY", &api_key);
+    update_env_line(&mut lines, "POLY_API_SECRET", &secret);
+    update_env_line(&mut lines, "POLY_PASSPHRASE", &passphrase);
+
+    std::fs::write(env_path, lines.join("\n") + "\n")?;
+
+    eprintln!("✅ API credentials saved to .env");
+    eprintln!("   POLY_API_KEY={}", api_key);
+    eprintln!("   POLY_API_SECRET=****");
+    eprintln!("   POLY_PASSPHRASE=****");
+    eprintln!("\nYou can now run the bot in live mode.");
 
     Ok(())
 }
