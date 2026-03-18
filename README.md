@@ -98,7 +98,7 @@ cargo run --release -- --redeem-all
 
 ### Paper
 
-- Default mode; `trading.mode` in `config.json` defaults to `paper`
+- Default mode; `TRADING_MODE` in `.env` defaults to `paper`
 - Does not require `PRIVATE_KEY`
 - Uses a locally generated order ID instead of placing a real order
 - Uses local settlement simulation: Chainlink BTC/USD when available, and the latest Coinbase price if Chainlink fails
@@ -119,6 +119,7 @@ The program reads `.env` from the repository root at startup.
 | --- | --- | --- |
 | `PRIVATE_KEY` | Required in live mode | Wallet private key used for CLOB auth and CTF redeem |
 | `ALCHEMY_KEY` | Optional | Polygon RPC key for faster Chainlink queries and redeem calls in live mode |
+| `TRADING_MODE` | Optional | Runtime mode; set to `paper` or `live`. Overrides legacy `trading.mode` if both are present |
 
 `--derive-keys` derives `POLY_API_KEY`, `POLY_API_SECRET`, and `POLY_PASSPHRASE` from `PRIVATE_KEY`, but only prints them to the terminal and does not write them back to `.env`.
 
@@ -128,7 +129,6 @@ See `config.json` for the current sample config and `src/config.rs` for the full
 
 | Field | Default | Description |
 | --- | --- | --- |
-| `trading.mode` | `paper` | Runtime mode |
 | `market.event_url` | `""` | Polymarket event URL used to derive `series_id` automatically |
 | `market.series_id` | `""` | Event series ID; if `event_url` is set, the URL-derived value wins |
 | `market.window_minutes` | `5.0` | Market window length |
@@ -153,7 +153,7 @@ See `config.json` for the current sample config and `src/config.rs` for the full
 | `risk.max_risk_fraction` | `0.10` | Maximum fraction of balance allowed per trade |
 | `polling.signal_interval_ms` | `1000` | Main signal loop interval |
 
-Note: the checked-in `config.json` is a current sample runtime config, not necessarily the same as the code defaults.
+Note: the checked-in `config.json` is a current sample runtime config, not necessarily the same as the code defaults. `TRADING_MODE` now comes from `.env` instead of `config.json`; older `trading.mode` values are only used as a fallback during migration.
 
 ## Data Sources
 
