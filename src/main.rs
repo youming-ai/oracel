@@ -19,7 +19,7 @@ use tracing_subscriber::fmt::writer::MakeWriterExt;
 const LOG_DIR: &str = "logs";
 
 use data::coinbase::CoinbaseClient;
-use data::market_discovery::{DiscoveryConfig, MarketDiscovery};
+use data::market_discovery::{DiscoveryConfig, MarketDiscovery, ResolutionState, infer_resolution_state};
 use data::polymarket::{PolymarketClient, AuthenticatedPolyClient, CtfRedeemer};
 
 use pipeline::price_source::PriceSource;
@@ -63,6 +63,7 @@ struct Bot {
     active_token_yes: Arc<RwLock<String>>,
     active_token_no: Arc<RwLock<String>>,
     active_condition_id: Arc<RwLock<String>>,
+    active_market_slug: Arc<RwLock<String>>,
     active_settlement_ms: Arc<RwLock<i64>>,
 }
 
@@ -130,6 +131,7 @@ impl Bot {
             active_token_yes: Arc::new(RwLock::new(String::new())),
             active_token_no: Arc::new(RwLock::new(String::new())),
             active_condition_id: Arc::new(RwLock::new(String::new())),
+            active_market_slug: Arc::new(RwLock::new(String::new())),
             active_settlement_ms: Arc::new(RwLock::new(0)),
         })
     }
@@ -190,6 +192,7 @@ impl Bot {
         let token_yes = self.active_token_yes.clone();
         let token_no = self.active_token_no.clone();
         let condition_id = self.active_condition_id.clone();
+        let market_slug = self.active_market_slug.clone();
         let settle_ms = self.active_settlement_ms.clone();
 
         tokio::spawn(async move {
@@ -204,6 +207,7 @@ impl Bot {
                             *token_yes.write().await = active.token_id_yes;
                             *token_no.write().await = active.token_id_no;
                             *condition_id.write().await = active.condition_id;
+                            *market_slug.write().await = active.market.slug;
                             *settle_ms.write().await = active.end_date.timestamp_millis();
                         }
                     }
@@ -394,6 +398,7 @@ impl Bot {
 
                     // Add to settler
                     let cid = self.active_condition_id.read().await.clone();
+                    let market_slug = self.active_market_slug.read().await.clone();
                     self.settler.write().await.add_position(PendingPosition {
                         direction: order.direction,
                         size_usdc: order.size_usdc,
@@ -402,6 +407,7 @@ impl Bot {
                         settlement_time_ms: order.settlement_time_ms,
                         entry_btc_price: order.entry_btc_price,
                         condition_id: cid,
+                        market_slug,
                     });
 
                     // Log to file
@@ -438,6 +444,7 @@ impl Bot {
                 *self.active_token_yes.write().await = active.token_id_yes.clone();
                 *self.active_token_no.write().await = active.token_id_no.clone();
                 *self.active_condition_id.write().await = active.condition_id.clone();
+                *self.active_market_slug.write().await = active.market.slug.clone();
                 *self.active_settlement_ms.write().await = active.end_date.timestamp_millis();
             }
             Err(e) => {
@@ -450,8 +457,10 @@ impl Bot {
         let settler = self.settler.clone();
         let account = self.account.clone();
         let price_source = self.price_source.clone();
+        let discovery = self.discovery.clone();
         let btc_tiebreaker_usd = self.config.strategy.btc_tiebreaker_usd;
         let rpc = data::chainlink::rpc_url(&self.config.trading.mode);
+        let mode = self.config.trading.mode.clone();
         let redeemer = self.redeemer.clone();
 
         tokio::spawn(async move {
@@ -466,19 +475,53 @@ impl Bot {
             loop {
                 interval.tick().await;
 
-                let btc_price = match data::chainlink::fetch_btc_price(&http, &rpc).await {
-                    Ok(p) => p,
-                    Err(e) => {
-                        // Fallback to Coinbase if Chainlink fails
-                        tracing::debug!("[SETTLE] Chainlink failed: {}, using Coinbase", e);
-                        match price_source.latest().await {
-                            Some(p) => p,
-                            None => continue,
+                let results = if mode == "paper" {
+                    let btc_price = match data::chainlink::fetch_btc_price(&http, &rpc).await {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::debug!("[SETTLE] Chainlink failed: {}, using Coinbase", e);
+                            match price_source.latest().await {
+                                Some(p) => p,
+                                None => continue,
+                            }
+                        }
+                    };
+
+                    settler.write().await.check_settlements(btc_price, btc_tiebreaker_usd)
+                } else {
+                    let mut results = Vec::new();
+                    loop {
+                        let Some(pos) = settler.read().await.first_due_position() else {
+                            break;
+                        };
+
+                        let market = match discovery.fetch_market_by_slug(&pos.market_slug).await {
+                            Ok(market) => market,
+                            Err(e) => {
+                                tracing::debug!("[SETTLE] Gamma fetch failed for {}: {}", pos.market_slug, e);
+                                break;
+                            }
+                        };
+
+                        match infer_resolution_state(&market) {
+                            Some(ResolutionState::Resolved(winner)) => {
+                                let won = pos.direction == winner;
+                                if let Some(result) = settler.write().await.settle_first_resolved(won) {
+                                    results.push(result);
+                                } else {
+                                    break;
+                                }
+                            }
+                            Some(ResolutionState::Pending) => break,
+                            None => {
+                                tracing::debug!("[SETTLE] resolution unclear for {}", pos.market_slug);
+                                break;
+                            }
                         }
                     }
+                    results
                 };
 
-                let results = settler.write().await.check_settlements(btc_price, btc_tiebreaker_usd);
                 if !results.is_empty() {
                     let mut acc = account.write().await;
                     for r in &results {

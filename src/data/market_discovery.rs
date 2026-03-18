@@ -10,6 +10,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::pipeline::signal::Direction;
+
 // ─── Gamma API Types ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +30,20 @@ pub struct GammaMarket {
     pub clob_token_ids: Option<serde_json::Value>,
     #[serde(rename = "conditionId", default)]
     pub condition_id: Option<String>,
+    #[serde(default)]
+    pub closed: Option<bool>,
+    #[serde(rename = "umaResolutionStatus", default)]
+    pub uma_resolution_status: Option<String>,
+    #[serde(default)]
+    pub outcomes: Option<String>,
+    #[serde(rename = "outcomePrices", default)]
+    pub outcome_prices: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolutionState {
+    Pending,
+    Resolved(Direction),
 }
 
 #[derive(Debug, Clone)]
@@ -148,6 +164,21 @@ impl MarketDiscovery {
         anyhow::bail!("No active market found for series: {}", self.config.series_id)
     }
 
+    pub async fn fetch_market_by_slug(&self, slug: &str) -> Result<GammaMarket> {
+        let url = format!("{}/markets/slug/{}", self.config.gamma_api_url, slug);
+        let market = self.client
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("Gamma request failed for slug {}", slug))?
+            .error_for_status()
+            .with_context(|| format!("Gamma returned non-success for slug {}", slug))?
+            .json::<GammaMarket>()
+            .await
+            .with_context(|| format!("Gamma parse failed for slug {}", slug))?;
+        Ok(market)
+    }
+
     /// Parse a GammaMarket into an ActiveMarket
     fn parse_active_market(market: &GammaMarket) -> Result<ActiveMarket> {
         let token_ids = parse_string_array(&market.clob_token_ids);
@@ -227,11 +258,49 @@ fn extract_price_to_beat(text: &str) -> Option<f64> {
     None
 }
 
+fn parse_json_string_array(value: &Option<String>) -> Option<Vec<String>> {
+    let raw = value.as_ref()?;
+    serde_json::from_str::<Vec<String>>(raw).ok()
+}
+
+pub fn infer_resolution_state(market: &GammaMarket) -> Option<ResolutionState> {
+    let status = market.uma_resolution_status.as_deref()?.to_ascii_lowercase();
+    if !status.contains("resolved") {
+        return Some(ResolutionState::Pending);
+    }
+
+    if market.closed != Some(true) {
+        return Some(ResolutionState::Pending);
+    }
+
+    let outcomes = parse_json_string_array(&market.outcomes)?;
+    let prices = parse_json_string_array(&market.outcome_prices)?;
+    if outcomes.len() != prices.len() {
+        return None;
+    }
+
+    for (outcome, price) in outcomes.iter().zip(prices.iter()) {
+        let parsed = price.parse::<f64>().ok()?;
+        let normalized = outcome.to_ascii_lowercase();
+        if parsed >= 0.999 {
+            if normalized == "yes" {
+                return Some(ResolutionState::Resolved(Direction::Up));
+            }
+            if normalized == "no" {
+                return Some(ResolutionState::Resolved(Direction::Down));
+            }
+        }
+    }
+
+    None
+}
+
 // ─── Tests ───
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::signal::Direction;
 
     #[test]
     fn test_generate_slug() {
@@ -247,5 +316,68 @@ mod tests {
             parse_string_array(&Some(serde_json::json!(["t1", "t2"]))),
             vec!["t1", "t2"]
         );
+    }
+
+    #[test]
+    fn test_infer_resolved_direction_yes_wins() {
+        let market = GammaMarket {
+            slug: "btc-updown-5m-1".into(),
+            question: None,
+            title: None,
+            end_date: String::new(),
+            event_start_time: None,
+            clob_token_ids: None,
+            condition_id: None,
+            closed: Some(true),
+            uma_resolution_status: Some("resolved".into()),
+            outcomes: Some("[\"Yes\",\"No\"]".into()),
+            outcome_prices: Some("[\"1\",\"0\"]".into()),
+        };
+
+        assert_eq!(
+            infer_resolution_state(&market),
+            Some(ResolutionState::Resolved(Direction::Up))
+        );
+    }
+
+    #[test]
+    fn test_infer_resolved_direction_no_wins() {
+        let market = GammaMarket {
+            slug: "btc-updown-5m-1".into(),
+            question: None,
+            title: None,
+            end_date: String::new(),
+            event_start_time: None,
+            clob_token_ids: None,
+            condition_id: None,
+            closed: Some(true),
+            uma_resolution_status: Some("resolved".into()),
+            outcomes: Some("[\"Yes\",\"No\"]".into()),
+            outcome_prices: Some("[\"0\",\"1\"]".into()),
+        };
+
+        assert_eq!(
+            infer_resolution_state(&market),
+            Some(ResolutionState::Resolved(Direction::Down))
+        );
+    }
+
+    #[test]
+    fn test_infer_resolved_direction_none_when_unresolved() {
+        let market = GammaMarket {
+            slug: "btc-updown-5m-1".into(),
+            question: None,
+            title: None,
+            end_date: String::new(),
+            event_start_time: None,
+            clob_token_ids: None,
+            condition_id: None,
+            closed: Some(false),
+            uma_resolution_status: Some("pending".into()),
+            outcomes: Some("[\"Yes\",\"No\"]".into()),
+            outcome_prices: Some("[\"1\",\"0\"]".into()),
+        };
+
+        assert_eq!(infer_resolution_state(&market), Some(ResolutionState::Pending));
     }
 }

@@ -15,6 +15,7 @@ pub struct PendingPosition {
     pub settlement_time_ms: i64,
     pub entry_btc_price: f64,
     pub condition_id: String,
+    pub market_slug: String,
 }
 
 #[derive(Debug, Clone)]
@@ -49,6 +50,20 @@ impl Settler {
         self.pending.len()
     }
 
+    pub fn first_due_position(&self) -> Option<PendingPosition> {
+        let now = Utc::now().timestamp_millis();
+        let pos = self.pending.front()?;
+        if pos.settlement_time_ms > now {
+            return None;
+        }
+        Some(pos.clone())
+    }
+
+    pub fn settle_first_resolved(&mut self, won: bool) -> Option<SettlementResult> {
+        let pos = self.pending.pop_front()?;
+        Some(self.finish_settlement(pos, won, None))
+    }
+
     pub fn check_settlements(
         &mut self,
         current_btc_price: f64,
@@ -78,26 +93,38 @@ impl Settler {
             };
 
             tracing::debug!("[SETTLEMENT] Local simulation - may not match Polymarket resolution");
+            results.push(self.finish_settlement(pos, won, Some(current_btc_price)));
+        }
 
-            let shares = pos.size_usdc / pos.entry_price;
-            let payout = if won { shares } else { 0.0 };
-            let pnl = payout - pos.cost;
+        results
+    }
 
-            if won {
-                self.total_wins += 1;
-            } else {
-                self.total_losses += 1;
-            }
+    fn finish_settlement(
+        &mut self,
+        pos: PendingPosition,
+        won: bool,
+        current_btc_price: Option<f64>,
+    ) -> SettlementResult {
+        let shares = pos.size_usdc / pos.entry_price;
+        let payout = if won { shares } else { 0.0 };
+        let pnl = payout - pos.cost;
 
-            tracing::info!(
-                "[SETTLED] {} {} pnl={:+.2} {}W/{}L",
-                if won { "WIN" } else { "LOSS" },
-                pos.direction.as_str(),
-                pnl,
-                self.total_wins,
-                self.total_losses,
-            );
+        if won {
+            self.total_wins += 1;
+        } else {
+            self.total_losses += 1;
+        }
 
+        tracing::info!(
+            "[SETTLED] {} {} pnl={:+.2} {}W/{}L",
+            if won { "WIN" } else { "LOSS" },
+            pos.direction.as_str(),
+            pnl,
+            self.total_wins,
+            self.total_losses,
+        );
+
+        if let Some(price) = current_btc_price {
             if let Ok(mut file) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -111,21 +138,56 @@ impl Settler {
                     pos.direction.as_str(),
                     pnl,
                     pos.entry_btc_price,
-                    current_btc_price,
+                    price,
                 ) {
                     tracing::debug!("[LOG] trade csv write failed: {}", e);
                 }
             }
-
-            results.push(SettlementResult {
-                direction: pos.direction,
-                payout,
-                pnl,
-                won,
-                condition_id: pos.condition_id,
-            });
         }
 
-        results
+        SettlementResult {
+            direction: pos.direction,
+            payout,
+            pnl,
+            won,
+            condition_id: pos.condition_id,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_pending() -> PendingPosition {
+        PendingPosition {
+            direction: Direction::Up,
+            size_usdc: 5.0,
+            entry_price: 0.20,
+            cost: 5.0,
+            settlement_time_ms: 0,
+            entry_btc_price: 70000.0,
+            condition_id: "cid".into(),
+            market_slug: "btc-updown-5m-1".into(),
+        }
+    }
+
+    #[test]
+    fn test_settle_first_resolved_win() {
+        let mut settler = Settler::new();
+        settler.add_position(sample_pending());
+
+        let result = settler.settle_first_resolved(true).unwrap();
+
+        assert!(result.won);
+        assert_eq!(result.payout, 25.0);
+        assert_eq!(result.pnl, 20.0);
+        assert_eq!(settler.pending_count(), 0);
+    }
+
+    #[test]
+    fn test_settle_first_resolved_none_when_empty() {
+        let mut settler = Settler::new();
+        assert!(settler.settle_first_resolved(true).is_none());
     }
 }
