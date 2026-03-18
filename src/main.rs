@@ -147,6 +147,7 @@ impl Bot {
 
         let mut settlement_handle = self.start_settlement_checker();
         let mut refresher_handle = self.start_market_refresher();
+        let mut status_handle = self.start_status_printer();
 
         let mut tick = interval(Duration::from_millis(self.config.polling.signal_interval_ms));
 
@@ -168,6 +169,13 @@ impl Bot {
                     match result {
                         Ok(()) => tracing::error!("[BOT] Market refresher exited unexpectedly"),
                         Err(e) => tracing::error!("[BOT] Market refresher panicked: {}", e),
+                    }
+                    break;
+                }
+                result = &mut status_handle => {
+                    match result {
+                        Ok(()) => tracing::error!("[BOT] Status printer exited unexpectedly"),
+                        Err(e) => tracing::error!("[BOT] Status printer panicked: {}", e),
                     }
                     break;
                 }
@@ -207,17 +215,67 @@ impl Bot {
         })
     }
 
+    fn start_status_printer(&self) -> tokio::task::JoinHandle<()> {
+        let price_source = self.price_source.clone();
+        let account = self.account.clone();
+        let settler = self.settler.clone();
+        let settle_ms = self.active_settlement_ms.clone();
+        let mode = self.config.trading.mode.clone();
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+
+                let btc = price_source.latest().await.unwrap_or(0.0);
+                let acc = account.read().await;
+                let pending = settler.read().await.pending_count();
+                let settle = *settle_ms.read().await;
+
+                let ttl = if settle > 0 {
+                    let remaining_s = (settle - Utc::now().timestamp_millis()) / 1000;
+                    if remaining_s > 0 {
+                        format!("{}m{}s", remaining_s / 60, remaining_s % 60)
+                    } else {
+                        "expired".into()
+                    }
+                } else {
+                    "?".into()
+                };
+
+                tracing::info!(
+                    "[STATUS] {} | BTC=${:.0} | bal=${:.2} pnl={:+.2} | {}W/{}L streak={} | pending={} | ttl={}",
+                    mode, btc, acc.balance, acc.daily_pnl,
+                    acc.consecutive_wins, acc.consecutive_losses,
+                    if acc.consecutive_wins > 0 { format!("+{}", acc.consecutive_wins) }
+                    else if acc.consecutive_losses > 0 { format!("-{}", acc.consecutive_losses) }
+                    else { "0".into() },
+                    pending, ttl,
+                );
+            }
+        })
+    }
+
     async fn tick(&self) -> Result<()> {
         // 1. Get latest price
         let prices = self.price_source.history().await;
         let closes: Vec<f64> = prices.iter().map(|p| p.price).collect();
         let btc_price = match self.price_source.latest().await {
             Some(p) => p,
-            None => return Ok(()), // No price data yet
+            None => return Ok(()),
         };
 
         if closes.len() < 60 {
-            return Ok(()); // Need more data
+            return Ok(());
+        }
+
+        const STALE_THRESHOLD_MS: i64 = 30_000;
+        if let Some(last_ts) = self.price_source.last_tick_ms().await {
+            let age = Utc::now().timestamp_millis() - last_ts;
+            if age > STALE_THRESHOLD_MS {
+                tracing::warn!("[PRICE] BTC data stale ({}s), skipping trade", age / 1000);
+                return Ok(());
+            }
         }
 
         // 2. Get market data FIRST (signal depends on it)
@@ -227,11 +285,18 @@ impl Bot {
             let settle = *self.active_settlement_ms.read().await;
 
             if token_yes.is_empty() || token_no.is_empty() {
-                // Log buffer status for debugging
                 if closes.len() % 30 == 0 {
                     tracing::debug!("[DEBUG] Waiting for market tokens | buffer={}", closes.len());
                 }
                 return Ok(());
+            }
+
+            const MIN_TTL_MS: i64 = 30_000;
+            if settle > 0 {
+                let remaining = settle - Utc::now().timestamp_millis();
+                if remaining < MIN_TTL_MS {
+                    return Ok(());
+                }
             }
 
             let yes = self.polymarket.fetch_mid_price(&token_yes).await;
@@ -261,21 +326,24 @@ impl Bot {
             edge_threshold: self.config.edge.edge_threshold_early,
             max_position: self.config.strategy.max_position_size,
             min_position: self.config.strategy.min_order_size,
-            cooldown_ms: 5_000,
-            max_risk_fraction: 0.10,
+            cooldown_ms: self.config.risk.cooldown_ms,
+            max_risk_fraction: self.config.risk.max_risk_fraction,
             extreme_threshold: self.config.strategy.extreme_threshold,
             fair_value: self.config.strategy.fair_value,
             max_consecutive_losses: self.config.risk.max_consecutive_losses,
             max_daily_loss_pct: self.config.risk.max_daily_loss_pct,
+            momentum_threshold: self.config.strategy.momentum_threshold,
+            momentum_lookback_ms: self.config.strategy.momentum_lookback_ms,
         };
 
+        let timed_prices: Vec<(f64, i64)> = prices.iter().map(|p| (p.price, p.timestamp_ms)).collect();
         let decision = decider::decide(
             poly_yes,
             poly_no,
             settlement_ms,
             &account_read,
             &decider_cfg,
-            &closes,
+            &timed_prices,
         );
 
         // 6. Execute trade (Stage 4)
@@ -338,18 +406,23 @@ impl Bot {
 
                     // Log to file
                     let bal = self.account.read().await.balance;
-                    if let Ok(mut file) = std::fs::OpenOptions::new()
+                    match std::fs::OpenOptions::new()
                         .create(true).append(true).open(Path::new(LOG_DIR).join("trades.csv"))
                     {
-                        let _ = writeln!(file, "{},{},{},{:.3},{:.2},{:.1},{:.2}",
-                            Utc::now().format("%H:%M:%S"),
-                            order.direction.as_str(),
-                            &order.order_id[..8],
-                            order.entry_price,
-                            order.cost,
-                            edge * 100.0,
-                            bal,
-                        );
+                        Ok(mut file) => {
+                            if let Err(e) = writeln!(file, "{},{},{},{:.3},{:.2},{:.1},{:.2}",
+                                Utc::now().format("%H:%M:%S"),
+                                order.direction.as_str(),
+                                &order.order_id[..8],
+                                order.entry_price,
+                                order.cost,
+                                edge * 100.0,
+                                bal,
+                            ) {
+                                tracing::debug!("[LOG] trades.csv write failed: {}", e);
+                            }
+                        }
+                        Err(e) => tracing::debug!("[LOG] trades.csv open failed: {}", e),
                     }
                 }
             }
@@ -382,7 +455,10 @@ impl Bot {
         let redeemer = self.redeemer.clone();
 
         tokio::spawn(async move {
-            let http = reqwest::Client::new();
+            let http = reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new());
             let mut interval = tokio::time::interval(Duration::from_secs(15));
             // Retry queue: (condition_id, direction_str, attempts_left)
             let mut redeem_queue: Vec<(String, String, u32)> = Vec::new();
@@ -416,10 +492,13 @@ impl Bot {
 
                     let bal = acc.balance;
                     drop(acc);
-                    let _ = std::fs::write(
-                        Path::new(LOG_DIR).join("balance"),
-                        format!("{:.2}", bal),
-                    );
+                    let tmp = Path::new(LOG_DIR).join("balance.tmp");
+                    let dst = Path::new(LOG_DIR).join("balance");
+                    if std::fs::write(&tmp, format!("{:.2}", bal)).is_ok() {
+                        if let Err(e) = std::fs::rename(&tmp, &dst) {
+                            tracing::debug!("[LOG] balance rename failed: {}", e);
+                        }
+                    }
 
                     // Queue winning positions for on-chain redeem
                     for r in &results {

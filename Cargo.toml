@@ -32,6 +32,6 @@ rustls = { version = "0.23", features = ["ring"] }
 
 [profile.release]
 opt-level = 3
-lto = true
-codegen-units = 1
+lto = "thin"
+codegen-units = 16
 strip = true

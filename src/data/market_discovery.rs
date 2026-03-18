@@ -73,7 +73,11 @@ pub struct MarketDiscovery {
 
 impl MarketDiscovery {
     pub fn new(config: DiscoveryConfig) -> Self {
-        Self { config, client: reqwest::Client::new() }
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        Self { config, client }
     }
 
     /// Generate slug for a given timestamp window
@@ -100,20 +104,39 @@ impl MarketDiscovery {
             let slug = Self::generate_slug(&self.config.series_id, ts);
             
             let url = format!("{}/events?slug={}&limit=1", base, slug);
-            if let Ok(resp) = self.client.get(&url).send().await {
-                if resp.status().is_success() {
-                    if let Ok(data) = resp.json::<serde_json::Value>().await {
-                        if let Some(events) = data.as_array() {
-                            if let Some(event) = events.first() {
-                                if let Some(markets) = event.get("markets").and_then(|m| m.as_array()) {
-                                    for market_json in markets {
-                                        if let Ok(market) = serde_json::from_value::<GammaMarket>(market_json.clone()) {
-                                            if let Ok(active) = Self::parse_active_market(&market) {
-                                                tracing::info!("[MKT] found {} ends {}", slug, active.end_date);
-                                                return Ok(active);
-                                            }
-                                        }
-                                    }
+            
+            // HTTP request
+            let resp = match self.client.get(&url).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::debug!("[MKT] {} request failed: {}", slug, e);
+                    continue;
+                }
+            };
+            
+            // Status check
+            if !resp.status().is_success() {
+                tracing::debug!("[MKT] {} status {}", slug, resp.status());
+                continue;
+            }
+            
+            // JSON parse
+            let data: serde_json::Value = match resp.json().await {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::debug!("[MKT] {} parse failed: {}", slug, e);
+                    continue;
+                }
+            };
+            
+            if let Some(events) = data.as_array() {
+                if let Some(event) = events.first() {
+                    if let Some(markets) = event.get("markets").and_then(|m| m.as_array()) {
+                        for market_json in markets {
+                            if let Ok(market) = serde_json::from_value::<GammaMarket>(market_json.clone()) {
+                                if let Ok(active) = Self::parse_active_market(&market) {
+                                    tracing::info!("[MKT] found {} ends {}", slug, active.end_date);
+                                    return Ok(active);
                                 }
                             }
                         }

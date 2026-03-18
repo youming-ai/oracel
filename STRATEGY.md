@@ -34,7 +34,8 @@ else:             → 不交易 (市场没有极端偏差)
    - 日亏损 < 余额 10%
 3. 市场是否极端？ → mkt_up > 80% 或 < 20%
 4. Edge 是否足够？ → edge > 15%
-5. 通过 → 下单
+5. Momentum filter → skip when BTC moves >0.1% in 2min against trade direction
+6. 通过 → 下单
 ```
 
 ## 4. 仓位管理
@@ -76,7 +77,25 @@ if btc_change < 0:     → DOWN 赢
 输 → payout = 0,         pnl = -cost
 ```
 
-## 7. 关键假设
+## 7. Momentum Filter
+
+The core strategy assumes 50/50 fair value, but during strong trends the market's
+extreme pricing may be justified. The momentum filter acts as a safety valve:
+skip trades when short-term BTC movement strongly opposes the trade direction.
+
+```
+momentum = (current_price - lookback_start_price) / lookback_start_price
+lookback = momentum_lookback_ms (default 120s, time-based window)
+
+if shorting && momentum > +0.1%:  → skip (BTC pumping, don't bet against)
+if longing  && momentum < -0.1%:  → skip (BTC dumping, don't bet against)
+else:                              → pass
+```
+
+Both threshold and lookback window are configurable via `config.json`:
+`strategy.momentum_threshold` and `strategy.momentum_lookback_ms`.
+
+## 8. 关键假设
 
 1. **50/50 公平价值** — 5 分钟内 BTC 涨跌概率接近均等
 2. **均值回归** — 市场极端定价倾向于修正

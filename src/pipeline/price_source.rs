@@ -9,6 +9,7 @@ use crate::data::coinbase::CoinbaseClient;
 #[derive(Debug, Clone)]
 pub struct PriceTick {
     pub price: f64,
+    pub timestamp_ms: i64,
 }
 
 pub struct PriceSource {
@@ -24,6 +25,10 @@ impl PriceSource {
 
     pub async fn latest(&self) -> Option<f64> {
         self.buffer.read().await.back().map(|t| t.price)
+    }
+
+    pub async fn last_tick_ms(&self) -> Option<i64> {
+        self.buffer.read().await.back().map(|t| t.timestamp_ms)
     }
 
     pub async fn history(&self) -> Vec<PriceTick> {
@@ -46,7 +51,10 @@ impl PriceSource {
         tokio::spawn(async move {
             loop {
                 while let Ok(ticker) = rx.try_recv() {
-                    let tick = PriceTick { price: ticker.price };
+                    let tick = PriceTick {
+                        price: ticker.price,
+                        timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                    };
                     let mut h = buf.write().await;
                     h.push_back(tick);
                     if h.len() > max { h.pop_front(); }

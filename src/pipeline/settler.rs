@@ -34,11 +34,19 @@ pub struct Settler {
 
 impl Settler {
     pub fn new() -> Self {
-        Self { pending: VecDeque::new(), total_wins: 0, total_losses: 0 }
+        Self {
+            pending: VecDeque::new(),
+            total_wins: 0,
+            total_losses: 0,
+        }
     }
 
     pub fn add_position(&mut self, pos: PendingPosition) {
         self.pending.push_back(pos);
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
     }
 
     pub fn check_settlements(
@@ -50,8 +58,12 @@ impl Settler {
         let mut results = Vec::new();
 
         while let Some(pos) = self.pending.front() {
-            if pos.settlement_time_ms > now { break; }
-            let pos = self.pending.pop_front().unwrap();
+            if pos.settlement_time_ms > now {
+                break;
+            }
+            let Some(pos) = self.pending.pop_front() else {
+                break;
+            };
 
             let btc_change = current_btc_price - pos.entry_btc_price;
             let btc_went_up = if btc_change.abs() < btc_tiebreaker_usd {
@@ -65,30 +77,52 @@ impl Settler {
                 Direction::Down => !btc_went_up,
             };
 
+            tracing::debug!("[SETTLEMENT] Local simulation - may not match Polymarket resolution");
+
             let payout = if won { pos.size_usdc } else { 0.0 };
             let pnl = payout - pos.cost;
 
-            if won { self.total_wins += 1; } else { self.total_losses += 1; }
+            if won {
+                self.total_wins += 1;
+            } else {
+                self.total_losses += 1;
+            }
 
             tracing::info!(
                 "[SETTLED] {} {} pnl={:+.2} {}W/{}L",
                 if won { "WIN" } else { "LOSS" },
-                pos.direction.as_str(), pnl, self.total_wins, self.total_losses,
+                pos.direction.as_str(),
+                pnl,
+                self.total_wins,
+                self.total_losses,
             );
 
             if let Ok(mut file) = std::fs::OpenOptions::new()
-                .create(true).append(true)
+                .create(true)
+                .append(true)
                 .open(std::path::Path::new("logs").join("trades.csv"))
             {
-                let _ = writeln!(file, "{},{},{},{:+.2},{:.0},{:.0}",
+                if let Err(e) = writeln!(
+                    file,
+                    "{},{},{},{:+.2},{:.0},{:.0}",
                     Utc::now().format("%H:%M:%S"),
                     if won { "WIN" } else { "LOSS" },
                     pos.direction.as_str(),
-                    pnl, pos.entry_btc_price, current_btc_price,
-                );
+                    pnl,
+                    pos.entry_btc_price,
+                    current_btc_price,
+                ) {
+                    tracing::debug!("[LOG] trade csv write failed: {}", e);
+                }
             }
 
-            results.push(SettlementResult { direction: pos.direction, payout, pnl, won, condition_id: pos.condition_id });
+            results.push(SettlementResult {
+                direction: pos.direction,
+                payout,
+                pnl,
+                won,
+                condition_id: pos.condition_id,
+            });
         }
 
         results

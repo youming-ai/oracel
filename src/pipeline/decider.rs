@@ -3,7 +3,8 @@
 //!
 //! Core logic: When market is extremely overconfident (>80%), bet against it.
 //! Edge = 0.50 - cheap_side_price (our fair value minus market's extreme price).
-//! Direction is determined purely by market price, not BTC trend.
+//! Direction is determined by market price extremes, with a BTC momentum filter
+//! to avoid betting against strong short-term trends.
 
 use crate::pipeline::signal::Direction;
 
@@ -37,6 +38,10 @@ pub struct DeciderConfig {
     pub max_consecutive_losses: u32,
     /// Maximum daily loss as fraction of balance (e.g. 0.10 = 10%)
     pub max_daily_loss_pct: f64,
+    /// BTC momentum threshold to skip trade (e.g. 0.001 = 0.1%)
+    pub momentum_threshold: f64,
+    /// Momentum lookback window in milliseconds (e.g. 120_000 = 2 min)
+    pub momentum_lookback_ms: i64,
 }
 
 impl Default for DeciderConfig {
@@ -51,6 +56,8 @@ impl Default for DeciderConfig {
             fair_value: 0.50,
             max_consecutive_losses: 8,
             max_daily_loss_pct: 0.10,
+            momentum_threshold: 0.001,
+            momentum_lookback_ms: 120_000,
         }
     }
 }
@@ -196,16 +203,24 @@ impl AccountState {
     }
 }
 
-/// Calculate BTC momentum: % change over recent prices.
-/// Returns None if not enough data.
-fn btc_momentum(prices: &[f64]) -> Option<f64> {
-    // Use last 60 ticks (~2 min at 2s interval)
-    let lookback = 60.min(prices.len().saturating_sub(1));
-    if lookback < 10 { return None; }
-    let past = prices[prices.len() - 1 - lookback];
-    let now = prices[prices.len() - 1];
-    if past <= 0.0 { return None; }
-    Some((now - past) / past)
+fn btc_momentum(prices: &[(f64, i64)], lookback_ms: i64) -> Option<f64> {
+    if prices.len() < 2 {
+        return None;
+    }
+    let (now_price, now_ts) = prices[prices.len() - 1];
+    let cutoff = now_ts - lookback_ms;
+
+    let past = prices
+        .iter()
+        .rev()
+        .find(|(_, ts)| *ts <= cutoff)
+        .map(|(p, _)| *p);
+
+    let past_price = past?;
+    if past_price <= 0.0 {
+        return None;
+    }
+    Some((now_price - past_price) / past_price)
 }
 
 pub fn decide(
@@ -214,7 +229,7 @@ pub fn decide(
     settlement_ms: i64,
     account: &AccountState,
     cfg: &DeciderConfig,
-    btc_prices: &[f64],
+    btc_prices: &[(f64, i64)],
 ) -> Decision {
     // 1. One trade per market window
     if account.already_traded_market(settlement_ms) {
@@ -268,20 +283,17 @@ pub fn decide(
         ));
     }
 
-    // 6. Momentum filter: don't bet against a strong BTC trend
-    //    >0.1% in 2min = strong trend
-    if let Some(momentum) = btc_momentum(btc_prices) {
-        let strong = 0.001; // 0.1%
+    if let Some(momentum) = btc_momentum(btc_prices, cfg.momentum_lookback_ms) {
         let against_trend = match direction {
-            Direction::Down => momentum > strong,   // BTC pumping, don't short
-            Direction::Up => momentum < -strong,     // BTC dumping, don't long
+            Direction::Down => momentum > cfg.momentum_threshold,
+            Direction::Up => momentum < -cfg.momentum_threshold,
         };
         if against_trend {
-            return Decision::Pass("against_trend".into());
+            return Decision::Pass(format!("against_trend_{:+.2}%", momentum * 100.0));
         }
     }
 
-    // 7. Position sizing: Half-Kelly based on edge
+    // 6. Position sizing: Half-Kelly based on edge
     // Kelly = edge / (1 - edge) simplified for binary outcome
     // But we cap at max_risk_fraction
     let win_rate = account.overall_win_rate().clamp(0.50, 0.75);

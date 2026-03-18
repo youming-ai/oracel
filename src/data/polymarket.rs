@@ -86,7 +86,7 @@ impl AuthenticatedPolyClient {
             .side(sdk_side)
             .price(price_dec)
             .size(size_dec)
-            .order_type(OrderType::GTC)
+            .order_type(OrderType::FOK)
             .build()
             .await
             .context("Failed to build order")?;

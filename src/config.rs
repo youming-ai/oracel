@@ -54,6 +54,10 @@ pub struct StrategyConfig {
     pub fair_value: f64,
     #[serde(default = "default_btc_tiebreaker_usd")]
     pub btc_tiebreaker_usd: f64,
+    #[serde(default = "default_momentum_threshold")]
+    pub momentum_threshold: f64,
+    #[serde(default = "default_momentum_lookback_ms")]
+    pub momentum_lookback_ms: i64,
 }
 
 fn default_extreme_threshold() -> f64 {
@@ -64,6 +68,12 @@ fn default_fair_value() -> f64 {
 }
 fn default_btc_tiebreaker_usd() -> f64 {
     5.0
+}
+fn default_momentum_threshold() -> f64 {
+    0.001
+}
+fn default_momentum_lookback_ms() -> i64 {
+    120_000
 }
 
 // ─── Edge Thresholds ───
@@ -101,9 +111,19 @@ pub struct RiskConfig {
     pub max_consecutive_losses: u32,
     #[serde(default = "default_max_daily_loss_pct")]
     pub max_daily_loss_pct: f64,
+    #[serde(default = "default_cooldown_ms")]
+    pub cooldown_ms: i64,
+    #[serde(default = "default_max_risk_fraction")]
+    pub max_risk_fraction: f64,
 }
 
 fn default_max_daily_loss_pct() -> f64 {
+    0.10
+}
+fn default_cooldown_ms() -> i64 {
+    5_000
+}
+fn default_max_risk_fraction() -> f64 {
     0.10
 }
 
@@ -129,7 +149,6 @@ impl Default for Config {
         }
     }
 }
-
 
 impl Default for TradingConfig {
     fn default() -> Self {
@@ -166,6 +185,8 @@ impl Default for StrategyConfig {
             extreme_threshold: 0.80,
             fair_value: 0.50,
             btc_tiebreaker_usd: 5.0,
+            momentum_threshold: 0.001,
+            momentum_lookback_ms: 120_000,
         }
     }
 }
@@ -189,6 +210,8 @@ impl Default for RiskConfig {
             max_daily_loss_usdc: 100.0,
             max_consecutive_losses: 8,
             max_daily_loss_pct: 0.10,
+            cooldown_ms: 5_000,
+            max_risk_fraction: 0.10,
         }
     }
 }
