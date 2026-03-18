@@ -50,15 +50,23 @@ impl Executor {
                     return None;
                 }
 
-                let cost = size_usdc * price;
-                let order_id = uuid::Uuid::new_v4().to_string();
-
-                if self.mode != "paper" {
-                    if let Err(e) = self.place_live_order(token_id, price, *size_usdc).await {
-                        tracing::error!("[EXEC] order failed: {}", e);
-                        return None;
+                let cost = *size_usdc;
+                let order_id = if self.mode != "paper" {
+                    match self.place_live_order(token_id, price, *size_usdc).await {
+                        Ok(id) => id,
+                        Err(e) => {
+                            let msg = e.to_string();
+                            if msg.contains("not matched") || msg.contains("FOK") || msg.contains("no fill") {
+                                tracing::warn!("[EXEC] FOK rejected (no liquidity at {:.3}): {}", price, msg);
+                            } else {
+                                tracing::error!("[EXEC] order failed: {}", msg);
+                            }
+                            return None;
+                        }
                     }
-                }
+                } else {
+                    uuid::Uuid::new_v4().to_string()
+                };
 
                 Some(OrderResult {
                     order_id,

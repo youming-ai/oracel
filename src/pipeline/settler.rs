@@ -79,7 +79,8 @@ impl Settler {
 
             tracing::debug!("[SETTLEMENT] Local simulation - may not match Polymarket resolution");
 
-            let payout = if won { pos.size_usdc } else { 0.0 };
+            let shares = pos.size_usdc / pos.entry_price;
+            let payout = if won { shares } else { 0.0 };
             let pnl = payout - pos.cost;
 
             if won {
