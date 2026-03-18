@@ -58,6 +58,7 @@ struct Bot {
     account: Arc<RwLock<AccountState>>,
     settler: Arc<RwLock<Settler>>,
     executor: Executor,
+    auth_client: Arc<Option<AuthenticatedPolyClient>>,
     redeemer: Option<Arc<CtfRedeemer>>,
     // Dynamic market data
     active_token_yes: Arc<RwLock<String>>,
@@ -86,23 +87,23 @@ impl Bot {
         };
         let discovery = Arc::new(MarketDiscovery::new(discovery_cfg));
 
-        let auth_client = if config.trading.mode != "paper" && !config.trading.private_key.is_empty() {
+        let auth_client: Arc<Option<AuthenticatedPolyClient>> = if config.trading.mode != "paper" && !config.trading.private_key.is_empty() {
             match AuthenticatedPolyClient::new(&config.trading.private_key).await {
                 Ok(c) => {
                     tracing::info!("[INIT] Authenticated with Polymarket CLOB");
-                    Some(c)
+                    Arc::new(Some(c))
                 }
                 Err(e) => {
                     anyhow::bail!("[INIT] CLOB auth failed: {} — cannot run in live mode", e);
                 }
             }
         } else {
-            None
+            Arc::new(None)
         };
 
         let executor = Executor::new(
             config.trading.mode.clone(),
-            auth_client,
+            auth_client.clone(),
         );
 
         // Create CTF redeemer for live mode
@@ -127,6 +128,7 @@ impl Bot {
             account: Arc::new(RwLock::new(AccountState::new(initial_balance))),
             settler: Arc::new(RwLock::new(Settler::new())),
             executor,
+            auth_client,
             redeemer,
             active_token_yes: Arc::new(RwLock::new(String::new())),
             active_token_no: Arc::new(RwLock::new(String::new())),
@@ -194,6 +196,7 @@ impl Bot {
         let condition_id = self.active_condition_id.clone();
         let market_slug = self.active_market_slug.clone();
         let settle_ms = self.active_settlement_ms.clone();
+        let auth_client = self.auth_client.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(60));
@@ -203,6 +206,11 @@ impl Bot {
                     Ok(active) => {
                         let current_yes = token_yes.read().await.clone();
                         if current_yes != active.token_id_yes {
+                            if let Some(client) = auth_client.as_ref() {
+                                if let Err(e) = client.cancel_all().await {
+                                    tracing::warn!("[MKT] cancel stale orders failed: {}", e);
+                                }
+                            }
                             tracing::info!("[MKT] {} ends {}", active.market.slug, active.end_date);
                             *token_yes.write().await = active.token_id_yes;
                             *token_no.write().await = active.token_id_no;
@@ -610,6 +618,9 @@ async fn main() -> Result<()> {
     if std::env::args().any(|a| a == "--redeem-all") {
         return redeem_all().await;
     }
+    if std::env::args().any(|a| a == "--cancel-all") {
+        return cancel_all_orders().await;
+    }
 
     std::fs::create_dir_all(LOG_DIR).ok();
 
@@ -651,7 +662,24 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Redeem all winning outcome tokens for recent markets in the series.
+async fn cancel_all_orders() -> Result<()> {
+    let config_path = Path::new("config.json");
+    let config = if config_path.exists() {
+        Config::load(config_path)?
+    } else {
+        anyhow::bail!("config.json not found");
+    };
+
+    if config.trading.private_key.is_empty() {
+        anyhow::bail!("PRIVATE_KEY not set in .env");
+    }
+
+    let client = AuthenticatedPolyClient::new(&config.trading.private_key).await?;
+    let count = client.cancel_all().await?;
+    eprintln!("Cancelled {} open orders", count);
+    Ok(())
+}
+
 async fn redeem_all() -> Result<()> {
     eprintln!("Scanning recent markets for redeemable positions...\n");
 

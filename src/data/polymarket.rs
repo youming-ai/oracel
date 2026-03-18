@@ -75,10 +75,21 @@ impl AuthenticatedPolyClient {
         price: f64,
         size: f64,
     ) -> Result<String> {
+        tracing::info!(
+            "[CLOB] placing order: token={} side={} price={:.4} size={:.2}",
+            &token_id[..16.min(token_id.len())], side, price, size
+        );
+        
         let tid = U256::from_str(token_id).context("Invalid token_id")?;
         let sdk_side = if side == "BUY" { Side::Buy } else { Side::Sell };
-        let price_dec = Decimal::try_from(price).context("Invalid price")?;
-        let size_dec = Decimal::try_from(size).context("Invalid size")?;
+        
+        // Round to avoid floating-point precision issues in Decimal conversion
+        // Price: 4 decimals, Size: 2 decimals (per Polymarket API requirements)
+        let price_rounded = (price * 10000.0).round() / 10000.0;
+        let size_rounded = (size * 100.0).round() / 100.0;
+        
+        let price_dec = Decimal::try_from(price_rounded).context("Invalid price")?;
+        let size_dec = Decimal::try_from(size_rounded).context("Invalid size")?;
 
         let order = self.client
             .limit_order()
@@ -86,7 +97,7 @@ impl AuthenticatedPolyClient {
             .side(sdk_side)
             .price(price_dec)
             .size(size_dec)
-            .order_type(OrderType::FOK)
+            .order_type(OrderType::GTC)
             .build()
             .await
             .context("Failed to build order")?;
@@ -97,9 +108,27 @@ impl AuthenticatedPolyClient {
 
         let result = self.client.post_order(signed)
             .await
-            .context("Failed to post order")?;
+            .map_err(|e| {
+                tracing::error!(
+                    "[CLOB] post_order failed: token={} price={:.4} size={:.2} error={:?}",
+                    token_id, price, size, e
+                );
+                anyhow::anyhow!("Failed to post order: {:?}", e)
+            })?;
 
+        tracing::info!("[CLOB] order placed: id={}", result.order_id);
         Ok(result.order_id)
+    }
+
+    pub async fn cancel_all(&self) -> Result<usize> {
+        let resp = self.client.cancel_all_orders()
+            .await
+            .context("Failed to cancel all orders")?;
+        let count = resp.canceled.len();
+        if count > 0 {
+            tracing::info!("[CLOB] cancelled {} orders", count);
+        }
+        Ok(count)
     }
 }
 

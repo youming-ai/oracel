@@ -1,6 +1,7 @@
 //! Stage 4: Order Executor
 //! Places orders (paper or live).
 
+use std::sync::Arc;
 use anyhow::Result;
 use crate::pipeline::decider::Decision;
 use crate::pipeline::signal::Direction;
@@ -19,11 +20,11 @@ pub struct OrderResult {
 
 pub struct Executor {
     mode: String,
-    auth_client: Option<AuthenticatedPolyClient>,
+    auth_client: Arc<Option<AuthenticatedPolyClient>>,
 }
 
 impl Executor {
-    pub fn new(mode: String, auth_client: Option<AuthenticatedPolyClient>) -> Self {
+    pub fn new(mode: String, auth_client: Arc<Option<AuthenticatedPolyClient>>) -> Self {
         Self { mode, auth_client }
     }
 
@@ -82,10 +83,16 @@ impl Executor {
     }
 
     async fn place_live_order(&self, token_id: &str, price: f64, size_usdc: f64) -> Result<String> {
-        let client = self.auth_client.as_ref()
+        let client = self.auth_client.as_ref().as_ref()
             .ok_or_else(|| anyhow::anyhow!("No authenticated client — run with PRIVATE_KEY set"))?;
-        // Truncate to 2 decimal places (LOT_SIZE_SCALE) — floor to never over-order
-        let shares = ((size_usdc / price) * 100.0).floor() / 100.0;
+        
+        // Polymarket requires integer shares, minimum 5
+        let shares = (size_usdc / price).floor();
+        
+        if shares < 5.0 {
+            anyhow::bail!("Shares too small: {:.0} (min 5) — size={:.2} price={:.4}", shares, size_usdc, price);
+        }
+        
         client.place_order(token_id, "BUY", price, shares).await
     }
 }

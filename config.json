@@ -20,7 +20,8 @@
     "min_prob_late": 0.5
   },
   "risk": {
-    "max_daily_loss_usdc": 10.0,
+    "max_daily_loss_usdc": 100.0,
+    "max_daily_loss_pct": 0.10,
     "max_consecutive_losses": 5
   },
   "polling": {
