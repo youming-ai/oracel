@@ -36,7 +36,7 @@ while true; do
     END_SHORT=$(echo "$END" | sed -n 's/^[0-9-]* \([0-9:]*\) UTC/\1 UTC/p')
 
     if [ "$MODE" = "live" ]; then
-        MODE_FMT="${BR} LIVE ${N}"
+        MODE_FMT="${R}LIVE${N}"
     else
         MODE_FMT="${D}PAPER${N}"
     fi
