@@ -58,9 +58,16 @@ deploy/
 `- polybot.service          # systemd service file
 
 logs/                       # Generated at runtime
-|- bot.log                  # Main log file
-|- trades.csv               # Trade entry and settlement records
-`- balance                  # Current balance snapshot
+|- paper/                   # Paper mode data
+|  |- bot.log
+|  |- trades.csv
+|  |- balance
+|  `- state.json
+`- live/                    # Live mode data
+   |- bot.log
+   |- trades.csv
+   |- balance
+   `- state.json
 ```
 
 ## Quick Start
@@ -76,7 +83,8 @@ cp config.example.json config.json
 cargo run --release
 
 # 4. Monitor logs
-scripts/watch.sh
+scripts/watch.sh          # paper mode (default)
+scripts/watch.sh live     # live mode
 ```
 
 ## CLI
@@ -130,8 +138,6 @@ The market series (`btc-updown-5m`) is hardcoded. See `config.example.json` for 
 | --- | --- | --- |
 | `market.window_minutes` | `5.0` | Market window length |
 | `polyclob.gamma_api_url` | `https://gamma-api.polymarket.com` | Gamma API base URL |
-| `strategy.max_position_size` | `50.0` | Maximum position size per trade (USDC) |
-| `strategy.min_order_size` | `5.0` | Minimum position size per trade (USDC) |
 | `strategy.extreme_threshold` | `0.80` | Extreme sentiment threshold |
 | `strategy.fair_value` | `0.50` | Fair-value assumption |
 | `strategy.btc_tiebreaker_usd` | `5.0` | Settlement tie-break threshold when BTC price change is very small |
@@ -141,7 +147,6 @@ The market series (`btc-updown-5m`) is hardcoded. See `config.example.json` for 
 | `risk.max_consecutive_losses` | `8` | Circuit-breaker threshold for consecutive losses |
 | `risk.max_daily_loss_pct` | `0.10` | Daily loss percentage limit |
 | `risk.cooldown_ms` | `5000` | Cooldown between trades |
-| `risk.max_risk_fraction` | `0.10` | Maximum fraction of balance allowed per trade |
 | `polling.signal_interval_ms` | `1000` | Main signal loop interval |
 
 Note: the checked-in `config.json` is a current sample runtime config, not necessarily the same as the code defaults. `TRADING_MODE` in `.env` overrides `trading.mode` in `config.json`.
@@ -155,10 +160,10 @@ Note: the checked-in `config.json` is a current sample runtime config, not neces
 
 ## Logs and Monitoring
 
-- `logs/bot.log`: main runtime log
-- `logs/trades.csv`: appended on both trade entry and settlement
-- `logs/balance`: current balance snapshot
-- `scripts/watch.sh`: terminal monitor built around `logs/bot.log`
+- `logs/<mode>/bot.log`: main runtime log (paper or live)
+- `logs/<mode>/trades.csv`: appended on both trade entry and settlement
+- `logs/<mode>/balance`: current balance snapshot
+- `scripts/watch.sh [mode]`: terminal monitor (defaults to `paper`)
 - periodic `[STATUS]` log line: built-in runtime summary printed every 10 seconds
 
 ## Deployment
