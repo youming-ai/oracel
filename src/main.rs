@@ -150,10 +150,13 @@ impl Bot {
             None
         };
 
-        // Load balance from file or use default
-        let initial_balance = Self::load_balance(&log_dir)
-            .await
-            .unwrap_or_else(|| decimal("1000.0"));
+        let initial_balance = if config.trading.mode.is_paper() {
+            Self::load_balance(&log_dir)
+                .await
+                .unwrap_or_else(|| decimal("100"))
+        } else {
+            Self::load_balance(&log_dir).await.unwrap_or(Decimal::ZERO)
+        };
         tracing::info!("[INIT] Starting balance: ${:.2}", initial_balance);
 
         let mut settler = Settler::new();
@@ -396,6 +399,26 @@ impl Bot {
 
     async fn tick(&self) -> Result<()> {
         self.account.write().await.check_daily_reset();
+
+        if self.config.trading.mode.is_live() {
+            let rpc = data::chainlink::rpc_url(self.config.trading.mode);
+            if let Some(ref redeemer) = self.redeemer {
+                match redeemer.wallet_address() {
+                    Ok(wallet) => match data::polymarket::query_usdc_balance(&rpc, wallet).await {
+                        Ok(on_chain_bal) => {
+                            self.account.write().await.balance = on_chain_bal;
+                        }
+                        Err(e) => {
+                            tracing::warn!("[BAL] Failed to query on-chain USDC balance: {}", e);
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!("[BAL] Failed to derive wallet address: {}", e);
+                    }
+                }
+            }
+        }
+
         let mkt = self.market_state.read().await.clone();
 
         // 1. Get latest price
