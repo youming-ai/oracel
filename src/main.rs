@@ -8,7 +8,7 @@ mod pipeline;
 
 use anyhow::Result;
 use chrono::Utc;
-use config::Config;
+use config::{Config, TradingMode};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use secrecy::{ExposeSecret, SecretString};
@@ -101,7 +101,7 @@ impl Bot {
         };
         let discovery = Arc::new(MarketDiscovery::new(discovery_cfg));
 
-        let auth_client = if config.trading.mode != "paper"
+        let auth_client = if config.trading.mode.is_live()
             && !config.trading.private_key.expose_secret().is_empty()
         {
             match AuthenticatedPolyClient::new(config.trading.private_key.expose_secret()).await {
@@ -117,13 +117,13 @@ impl Bot {
             None
         };
 
-        let executor = Executor::new(config.trading.mode.clone(), auth_client);
+        let executor = Executor::new(config.trading.mode, auth_client);
 
         // Create CTF redeemer for live mode
-        let redeemer = if config.trading.mode != "paper"
+        let redeemer = if config.trading.mode.is_live()
             && !config.trading.private_key.expose_secret().is_empty()
         {
-            let rpc = data::chainlink::rpc_url(&config.trading.mode);
+            let rpc = data::chainlink::rpc_url(config.trading.mode);
             tracing::info!("[INIT] CTF redeemer enabled for on-chain redemption");
             Some(Arc::new(CtfRedeemer::new(
                 config.trading.private_key.expose_secret().to_owned(),
@@ -280,7 +280,7 @@ impl Bot {
         let account = self.account.clone();
         let settler = self.settler.clone();
         let settle_ms = self.active_settlement_ms.clone();
-        let mode = self.config.trading.mode.clone();
+        let mode = self.config.trading.mode;
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(10));
@@ -564,8 +564,8 @@ impl Bot {
         let price_source = self.price_source.clone();
         let discovery = self.discovery.clone();
         let btc_tiebreaker_usd = self.config.strategy.btc_tiebreaker_usd;
-        let rpc = data::chainlink::rpc_url(&self.config.trading.mode);
-        let mode = self.config.trading.mode.clone();
+        let rpc = data::chainlink::rpc_url(self.config.trading.mode);
+        let mode = self.config.trading.mode;
         let redeemer = self.redeemer.clone();
 
         tokio::spawn(async move {
@@ -580,7 +580,7 @@ impl Bot {
             loop {
                 interval.tick().await;
 
-                let (results, settlement_btc_price) = if mode == "paper" {
+                let (results, settlement_btc_price) = if mode.is_paper() {
                     let btc_price = match data::chainlink::fetch_btc_price(&http, &rpc).await {
                         Ok(p) => p,
                         Err(e) => {
@@ -810,14 +810,14 @@ async fn main() -> Result<()> {
 
     config.validate()?;
 
-    if config.trading.mode == "live" && config.is_default_non_trading() {
+    if config.trading.mode.is_live() && config.is_default_non_trading() {
         tracing::warn!(
             "[INIT] Running live mode with default config values; review config.json before trading"
         );
     }
 
     // Validate credentials for live mode
-    if config.trading.mode == "live" && config.trading.private_key.expose_secret().is_empty() {
+    if config.trading.mode.is_live() && config.trading.private_key.expose_secret().is_empty() {
         anyhow::bail!("PRIVATE_KEY not set in .env — required for live trading");
     }
 
@@ -844,10 +844,10 @@ async fn redeem_all() -> Result<()> {
         anyhow::bail!("PRIVATE_KEY not set in .env");
     };
 
-    let mode = if config.trading.mode == "paper" {
-        "live"
+    let mode = if config.trading.mode.is_paper() {
+        TradingMode::Live
     } else {
-        &config.trading.mode
+        config.trading.mode
     };
     let rpc = data::chainlink::rpc_url(mode);
     let redeemer = data::polymarket::CtfRedeemer::new(private_key, rpc);

@@ -19,17 +19,40 @@ pub(crate) struct Config {
 
 // ─── Trading ───
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum TradingMode {
+    #[default]
+    Paper,
+    Live,
+}
+
+impl TradingMode {
+    pub(crate) fn is_paper(self) -> bool {
+        matches!(self, Self::Paper)
+    }
+
+    pub(crate) fn is_live(self) -> bool {
+        matches!(self, Self::Live)
+    }
+}
+
+impl std::fmt::Display for TradingMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Paper => write!(f, "paper"),
+            Self::Live => write!(f, "live"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct TradingConfig {
-    #[serde(default = "default_trading_mode")]
-    pub mode: String,
+    #[serde(default)]
+    pub mode: TradingMode,
     /// Loaded from PRIVATE_KEY env var (not stored in config.json)
     #[serde(skip, default = "default_private_key")]
     pub private_key: SecretString,
-}
-
-fn default_trading_mode() -> String {
-    "paper".to_string()
 }
 
 fn default_private_key() -> SecretString {
@@ -150,7 +173,7 @@ pub(crate) struct PollingConfig {
 impl Default for TradingConfig {
     fn default() -> Self {
         Self {
-            mode: "paper".to_string(),
+            mode: TradingMode::default(),
             private_key: default_private_key(),
         }
     }
@@ -395,5 +418,30 @@ mod tests {
         let cfg = Config::default();
 
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_trading_mode_serde_roundtrip() {
+        let json = r#"{"mode":"live"}"#;
+        let cfg: TradingConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.mode, TradingMode::Live);
+
+        let json = r#"{"mode":"paper"}"#;
+        let cfg: TradingConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.mode, TradingMode::Paper);
+    }
+
+    #[test]
+    fn test_trading_mode_default_is_paper() {
+        let cfg = TradingConfig::default();
+        assert_eq!(cfg.mode, TradingMode::Paper);
+    }
+
+    #[test]
+    fn test_trading_mode_is_paper_and_live() {
+        assert!(TradingMode::Paper.is_paper());
+        assert!(!TradingMode::Paper.is_live());
+        assert!(TradingMode::Live.is_live());
+        assert!(!TradingMode::Live.is_paper());
     }
 }

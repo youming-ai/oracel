@@ -1,6 +1,7 @@
 //! Stage 4: Order Executor
 //! Places orders (paper or live).
 
+use crate::config::TradingMode;
 use crate::data::polymarket::AuthenticatedPolyClient;
 use crate::pipeline::decider::Decision;
 use crate::pipeline::signal::Direction;
@@ -21,7 +22,7 @@ pub(crate) struct OrderResult {
 }
 
 pub(crate) struct Executor {
-    mode: String,
+    mode: TradingMode,
     auth_client: Option<AuthenticatedPolyClient>,
 }
 
@@ -36,7 +37,7 @@ pub(crate) struct ExecuteContext<'a> {
 }
 
 impl Executor {
-    pub(crate) fn new(mode: String, auth_client: Option<AuthenticatedPolyClient>) -> Self {
+    pub(crate) fn new(mode: TradingMode, auth_client: Option<AuthenticatedPolyClient>) -> Self {
         Self { mode, auth_client }
     }
 
@@ -60,7 +61,7 @@ impl Executor {
 
                 let filled_shares = Self::compute_filled_shares(*size_usdc, price);
                 let cost = filled_shares * price;
-                let order_id = if self.mode != "paper" {
+                let order_id = if self.mode.is_live() {
                     match self.place_live_order(token_id, price, filled_shares).await {
                         Ok(id) => id,
                         Err(e) => {
@@ -134,7 +135,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_tracks_filled_shares_and_effective_cost() {
-        let executor = Executor::new("paper".to_string(), None);
+        let executor = Executor::new(TradingMode::Paper, None);
         let decision = Decision::Trade {
             direction: Direction::Up,
             size_usdc: d("5.00"),
