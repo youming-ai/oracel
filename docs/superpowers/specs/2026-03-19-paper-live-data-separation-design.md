@@ -56,7 +56,7 @@ logs/
 
 - On startup, read `logs/paper/balance`. If present, use it (supports session continuity).
 - If absent (first run or after cleanup), initialize to 100 USDC.
-- Add `const PAPER_INITIAL_BALANCE: Decimal = dec("100")` in an appropriate location (not in `config.json`).
+- Add `const PAPER_INITIAL_BALANCE: Decimal = dec("100")` in `main.rs` (alongside other bot constants).
 - Balance updates continue to be tracked locally via PnL and written to `logs/paper/balance`.
 
 #### Live Mode
@@ -71,7 +71,7 @@ pub(crate) async fn query_usdc_balance(rpc_url: &str, wallet: Address) -> Result
 }
 ```
 
-- Uses the existing `POLYGON_USDC` address constant and the same RPC URL selection logic as `CtfRedeemer` (Alchemy if available, else public Polygon RPC).
+- RPC URL is resolved at the call site using `chainlink::rpc_url(mode)` (same logic as `CtfRedeemer`: Alchemy if `ALCHEMY_KEY` set, else public Polygon RPC). The function itself takes the URL as a parameter.
 - The queried balance replaces the locally-tracked balance in `AccountState` before each decision cycle.
 - `logs/live/balance` is still written (for monitoring/`watch.sh`) but is never read as the source of truth.
 
@@ -120,12 +120,13 @@ Fixed 1% of balance, floor at 1 USDC. No edge scaling, no Kelly, no win-rate tra
 
 | File | Changes |
 |---|---|
-| `src/main.rs` | Remove `LOG_DIR` const; add `log_dir` field to `Bot`; update all path references; paper balance default 100; live balance refresh from chain before each cycle |
+| `src/main.rs` | Remove `LOG_DIR` const; add `log_dir` field to `Bot`; update all path references; paper balance default 100; live balance refresh from chain before each cycle; `redeem.log` path also routes through `log_dir` |
 | `src/config.rs` | Remove `max_position_size`, `min_order_size` from `StrategyConfig`; remove `max_risk_fraction` from `RiskConfig`; update defaults, validation, `is_default_non_trading` |
 | `src/pipeline/decider.rs` | Replace Half-Kelly sizing block with `balance/100` (min 1); remove `max_position`, `min_position`, `max_risk_fraction` from `DeciderConfig`; update tests |
 | `src/data/polymarket.rs` | Add `query_usdc_balance()` function using existing `POLYGON_USDC` address |
 | `config.json` | Remove three fields |
 | `config.example.json` | Remove three fields |
+| `scripts/watch.sh` | Update hardcoded `logs/bot.log` path to accept mode parameter or default to `logs/paper/bot.log` |
 
 ## Out of Scope
 
