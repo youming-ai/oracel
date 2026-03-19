@@ -4,3 +4,5 @@ config.json
 .env
 *.swp
 *.tmp
+.worktrees/
+.sisyphus/
