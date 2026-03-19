@@ -98,8 +98,6 @@ impl Bot {
         let discovery_cfg = DiscoveryConfig {
             series_id: resolved_series_id,
             gamma_api_url: config.polyclob.gamma_api_url.clone(),
-            refresh_interval_sec: 60,
-            window_minutes: config.market.window_minutes,
         };
         let discovery = Arc::new(MarketDiscovery::new(discovery_cfg));
 
