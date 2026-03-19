@@ -1,73 +1,87 @@
 # Polymarket 5m Bot
 
-An automated trading bot for Polymarket BTC 5-minute up/down markets. It uses Coinbase for live BTC prices, Polymarket for 5-minute market quotes, bets against extreme market sentiment, and supports on-chain redemption in live mode.
+An automated trading bot for Polymarket BTC 5-minute up/down markets. It monitors live BTC prices via Coinbase WebSocket, fetches market quotes from the Polymarket CLOB, and bets against extreme market sentiment. Supports both paper trading (simulated) and live trading with on-chain order placement and CTF redemption.
 
 ## Strategy Overview
 
-- Buy `DOWN` when the market becomes extremely bullish
-- Buy `UP` when the market becomes extremely bearish
-- Use `0.50` as the approximate fair value for a 5-minute window
-- Only place a trade when edge, risk checks, and the momentum filter all pass
+- Buy `DOWN` when the market becomes extremely bullish (>80%)
+- Buy `UP` when the market becomes extremely bearish (<20%)
+- Fair value assumption: `0.50` for a 5-minute binary outcome
+- Only trade when edge, risk checks, and momentum filter all pass
+- Position size: 1% of balance per trade, $1 minimum
 
-See `STRATEGY.md` for the full strategy logic.
+See [STRATEGY.md](STRATEGY.md) for the full strategy logic, decision flow, and risk controls.
 
 ## Architecture
 
 ```text
-Coinbase WS -> Live BTC price (signal input)
-                |
-Polymarket REST -> Yes/No prices
-                |
-          +-------------------------+
-          | Pipeline                |
-          | 1. PriceSource          |
-          | 2. Signal               |
-          | 3. Decider              |
-          | 4. Executor             |
-          | 5. Settler              |
-          +-------------------------+
-                |
-Paper: Chainlink Oracle -> BTC settlement price (Polygon)
-Live: Gamma API -> real market resolution status
-                |
-CTF Redeemer -> On-chain redemption in live mode
+Coinbase WS ──────────► BTC price buffer (1s ticks)
+                              │
+Polymarket CLOB REST ──► Yes/No mid prices
+                              │
+                    ┌─────────┴─────────┐
+                    │     Pipeline       │
+                    │  1. PriceSource    │  BTC price history
+                    │  2. Signal         │  Extreme market detection
+                    │  3. Decider        │  Edge, risk, momentum checks
+                    │  4. Executor       │  Paper UUID / Live FOK order
+                    │  5. Settler        │  Expiry settlement + PnL
+                    └─────────┬─────────┘
+                              │
+              ┌───────────────┼───────────────┐
+              │ Paper                         │ Live
+              │ Chainlink Oracle ──► BTC      │ Gamma API ──► market resolution
+              │ settlement price              │ CTF Redeemer ──► on-chain redeem
+              └───────────────────────────────┘
 ```
+
+### Background Tasks
+
+The main loop runs four concurrent tasks:
+
+| Task | Interval | Purpose |
+| --- | --- | --- |
+| Signal tick | 1s | Fetch prices, evaluate signal, decide and execute |
+| Settlement checker | 15s | Settle expired positions (paper: BTC price, live: Gamma resolution) |
+| Market refresher | 60s | Discover the current active 5-minute market via Gamma API |
+| Status printer | 10s | Log runtime summary (balance, PnL, streak, pending, TTL) |
 
 ## Repository Layout
 
 ```text
 src/
-|- main.rs                  # Main loop, CLI, and logging setup
-|- config.rs                # Config definitions and defaults
-|- data/
-|  |- chainlink.rs          # Chainlink BTC/USD oracle RPC access
-|  |- coinbase.rs           # Coinbase Advanced Trade WebSocket client
-|  |- market_discovery.rs   # Gamma API market discovery
-|  `- polymarket.rs         # CLOB client and CTF redeem logic
-`- pipeline/
-   |- price_source.rs       # BTC price buffer
-   |- signal.rs             # Market signal calculation
-   |- decider.rs            # Trade decision and risk control
-   |- executor.rs           # Paper/live order execution
-   `- settler.rs            # Expiry settlement and trade logging
+├── main.rs                  # Main loop, bot state, CLI, persistence
+├── config.rs                # Config definitions, defaults, validation
+├── data/
+│   ├── chainlink.rs         # Chainlink BTC/USD oracle (Polygon RPC)
+│   ├── coinbase.rs          # Coinbase Advanced Trade WebSocket client
+│   ├── market_discovery.rs  # Gamma API market discovery and resolution
+│   └── polymarket.rs        # CLOB client, order placement, CTF redemption
+└── pipeline/
+    ├── mod.rs               # Pipeline module
+    ├── price_source.rs      # BTC price buffer with history
+    ├── signal.rs            # Extreme market detection
+    ├── decider.rs           # Trade decision, risk controls, account state
+    ├── executor.rs          # Paper/live order execution
+    └── settler.rs           # Position settlement and PnL calculation
 
 scripts/
-`- watch.sh                 # Real-time terminal monitor
+└── watch.sh                 # Real-time terminal log monitor
 
 deploy/
-`- polybot.service          # systemd service file
+└── polybot.service          # systemd service template
 
-logs/                       # Generated at runtime
-|- paper/                   # Paper mode data
-|  |- bot.log
-|  |- trades.csv
-|  |- balance
-|  `- state.json
-`- live/                    # Live mode data
-   |- bot.log
-   |- trades.csv
-   |- balance
-   `- state.json
+logs/                        # Generated at runtime (gitignored)
+├── paper/                   # Paper mode data
+│   ├── bot.log              # Runtime log
+│   ├── trades.csv           # Trade entries and settlements
+│   ├── balance              # Current balance snapshot
+│   └── state.json           # Persisted bot state
+└── live/                    # Live mode data
+    ├── bot.log
+    ├── trades.csv
+    ├── balance
+    └── state.json
 ```
 
 ## Quick Start
@@ -79,7 +93,7 @@ cargo build --release
 # 2. Create config
 cp config.example.json config.json
 
-# 3. Run in paper mode
+# 3. Run in paper mode (default)
 cargo run --release
 
 # 4. Monitor logs
@@ -90,33 +104,39 @@ scripts/watch.sh live     # live mode
 ## CLI
 
 ```bash
-# Run the bot normally
+# Run the bot (mode determined by config.json)
 cargo run --release
 
-# Derive Polymarket CLOB API credentials
-# Prints to the terminal and does not write back to .env
+# Derive Polymarket CLOB API credentials from PRIVATE_KEY
+# Prints to terminal only, does not persist to disk
 cargo run --release -- --derive-keys
 
-# Scan the last 24 hours of markets and try on-chain redemption
+# Scan the last 24 hours of markets and redeem winning positions on-chain
 cargo run --release -- --redeem-all
+
+# Redeem a specific market by slug
+cargo run --release -- --redeem btc-updown-5m-1773926700
 ```
 
 ## Runtime Modes
 
 ### Paper
 
-- Default mode; `TRADING_MODE` in `.env` defaults to `paper`
+- Default mode (`trading.mode = "paper"` in `config.json`)
 - Does not require `PRIVATE_KEY`
-- Uses a locally generated order ID instead of placing a real order
-- Uses local settlement simulation: Chainlink BTC/USD when available, and the latest Coinbase price if Chainlink fails
+- Generates a local UUID as the order ID instead of placing a real order
+- Settlement uses Chainlink BTC/USD oracle on Polygon, with Coinbase price as fallback
+- Starts with $1,000 simulated balance (or restores from `logs/paper/balance`)
 
 ### Live
 
+- Set `trading.mode` to `"live"` in `config.json`
 - Requires `PRIVATE_KEY` in `.env`
-- Creates an authenticated Polymarket client and places real orders
-- Enables the CTF redeemer for on-chain redemption of redeemable positions
-- Prefers `ALCHEMY_KEY` for Polygon RPC and falls back to the public Polygon RPC otherwise
-- Uses Gamma market resolution data to decide local win/loss accounting instead of BTC-price simulation
+- Authenticates with the Polymarket CLOB and places real FOK limit orders
+- Balance is synced from the on-chain USDC wallet every tick
+- Settlement uses Gamma API market resolution (not BTC price simulation)
+- Enables CTF redeemer for automatic on-chain redemption of winning positions
+- Uses Alchemy RPC when `ALCHEMY_KEY` is set, otherwise falls back to public Polygon RPC
 
 ## Environment Variables
 
@@ -124,66 +144,86 @@ The program reads `.env` from the repository root at startup.
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `PRIVATE_KEY` | Required in live mode | Wallet private key used for CLOB auth and CTF redeem |
-| `ALCHEMY_KEY` | Optional | Polygon RPC key for faster Chainlink queries and redeem calls in live mode |
-| `TRADING_MODE` | Optional | Runtime mode; set to `paper` or `live`. Overrides `trading.mode` in `config.json` if both are present |
-
-`--derive-keys` derives `POLY_API_KEY`, `POLY_API_SECRET`, and `POLY_PASSPHRASE` from `PRIVATE_KEY`, but only prints them to the terminal and does not write them back to `.env`.
+| `PRIVATE_KEY` | Live mode | Wallet private key for CLOB authentication and CTF redemption |
+| `ALCHEMY_KEY` | Optional | Alchemy API key for Polygon RPC; improves reliability for Chainlink queries and on-chain operations |
 
 ## Configuration
 
-The market series (`btc-updown-5m`) is hardcoded. See `config.example.json` for a sample config and `src/config.rs` for the full code defaults.
+Trading mode and all strategy parameters are configured in `config.json`. See `config.example.json` for a sample and `src/config.rs` for code defaults.
 
 | Field | Default | Description |
 | --- | --- | --- |
-| `market.window_minutes` | `5.0` | Market window length |
+| `trading.mode` | `"paper"` | Runtime mode: `"paper"` or `"live"` |
+| `market.window_minutes` | `5.0` | Market window length in minutes |
 | `polyclob.gamma_api_url` | `https://gamma-api.polymarket.com` | Gamma API base URL |
-| `strategy.extreme_threshold` | `0.80` | Extreme sentiment threshold |
-| `strategy.fair_value` | `0.50` | Fair-value assumption |
-| `strategy.btc_tiebreaker_usd` | `5.0` | Settlement tie-break threshold when BTC price change is very small |
-| `strategy.momentum_threshold` | `0.001` | Momentum filter threshold (0.1%) |
-| `strategy.momentum_lookback_ms` | `120000` | Momentum lookback window (2 minutes) |
-| `edge.edge_threshold_early` | `0.15` | Minimum edge required to place a trade |
-| `risk.max_consecutive_losses` | `8` | Circuit-breaker threshold for consecutive losses |
-| `risk.max_daily_loss_pct` | `0.10` | Daily loss percentage limit |
-| `risk.cooldown_ms` | `5000` | Cooldown between trades |
-| `polling.signal_interval_ms` | `1000` | Main signal loop interval |
-
-Note: the checked-in `config.json` is a current sample runtime config, not necessarily the same as the code defaults. `TRADING_MODE` in `.env` overrides `trading.mode` in `config.json`.
+| `strategy.extreme_threshold` | `0.80` | Market bias threshold to consider sentiment extreme |
+| `strategy.fair_value` | `0.50` | Fair-value assumption for a binary 5-minute outcome |
+| `strategy.btc_tiebreaker_usd` | `5.0` | BTC price change below this is treated as a tie in paper settlement |
+| `strategy.momentum_threshold` | `0.001` | BTC momentum threshold (0.1%) to filter counter-trend trades |
+| `strategy.momentum_lookback_ms` | `120000` | Momentum lookback window in milliseconds (2 minutes) |
+| `edge.edge_threshold_early` | `0.15` | Minimum edge required to place a trade (15%) |
+| `risk.max_consecutive_losses` | `8` | Circuit breaker: stop trading after N consecutive losses |
+| `risk.max_daily_loss_pct` | `0.10` | Daily loss limit as fraction of balance (10%) |
+| `risk.cooldown_ms` | `5000` | Minimum milliseconds between trades |
+| `polling.signal_interval_ms` | `1000` | Main signal loop interval in milliseconds |
 
 ## Data Sources
 
-- Coinbase Advanced Trade WS: live BTC pricing
-- Polymarket CLOB REST: Yes/No quotes and live order placement
-- Gamma API: discovery of the current 5-minute market and live-mode resolution checks
-- Chainlink BTC/USD Oracle on Polygon: paper-mode settlement pricing and redeem-related on-chain reads
+| Source | Protocol | Purpose |
+| --- | --- | --- |
+| Coinbase Advanced Trade | WebSocket | Live BTC/USD price stream (1-second ticks) |
+| Polymarket CLOB | REST | Yes/No mid prices and live order placement |
+| Gamma API | REST | Market discovery, slug lookup, live-mode resolution checks |
+| Chainlink BTC/USD Oracle | Polygon RPC | Paper-mode settlement pricing |
+| CTF Contract | Polygon RPC | On-chain position balance queries and redemption |
 
 ## Logs and Monitoring
 
-- `logs/<mode>/bot.log`: main runtime log (paper or live)
-- `logs/<mode>/trades.csv`: appended on both trade entry and settlement
-- `logs/<mode>/balance`: current balance snapshot
-- `scripts/watch.sh [mode]`: terminal monitor (defaults to `paper`)
-- periodic `[STATUS]` log line: built-in runtime summary printed every 10 seconds
+All logs are written to `logs/<mode>/` where mode is `paper` or `live`.
+
+| File | Content |
+| --- | --- |
+| `bot.log` | Full runtime log with `[INIT]`, `[MKT]`, `[IDLE]`, `[SKIP]`, `[TRADE]`, `[SETTLED]`, `[STATUS]` prefixes |
+| `trades.csv` | One row per trade entry and one row per settlement |
+| `balance` | Current balance as a plain decimal (atomically updated) |
+| `state.json` | Pending positions, streak counters, daily PnL, pause timer |
+
+Log tag reference:
+
+| Tag | Meaning |
+| --- | --- |
+| `[IDLE]` | Pre-signal filter rejected (buffer filling, not extreme, TTL too short) |
+| `[SKIP]` | Decider rejected (already traded, against trend, edge too low) |
+| `[TRADE]` | Order placed (direction, price, edge, BTC price) |
+| `[SETTLED]` | Position settled (WIN/LOSS, PnL, running W/L count) |
+| `[STATUS]` | Periodic summary (mode, BTC, balance, PnL, streak, pending, TTL) |
+
+Terminal monitoring:
+
+```bash
+scripts/watch.sh          # paper mode (default)
+scripts/watch.sh live     # live mode
+```
 
 ## Deployment
 
-The repository includes `deploy/polybot.service`, a systemd service template. Edit the `WorkingDirectory` and `ExecStart` paths to match your actual install location before enabling the service.
+The repository includes `deploy/polybot.service`, a systemd service template.
 
 ```bash
-# Example setup
+# Edit paths in polybot.service to match your install location, then:
 sudo cp deploy/polybot.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now polybot
 ```
 
-The bot handles `SIGINT` and `SIGTERM` for graceful shutdown: it flushes the current balance to disk and exits cleanly.
+The bot handles `SIGINT` and `SIGTERM` for graceful shutdown: it persists state and balance to disk before exiting.
 
-## Recent Changes
+## Safety Features
 
-- **Security**: `PRIVATE_KEY` is wrapped in `SecretString`; `--derive-keys` masks secret output
-- **Precision**: All financial calculations use `rust_decimal::Decimal` instead of `f64`
-- **Network resilience**: All network calls have explicit timeouts; WebSocket reconnects with exponential backoff
-- **Graceful shutdown**: Handles `SIGINT`/`SIGTERM` with balance flush
+- **Secret handling**: `PRIVATE_KEY` wrapped in `SecretString`; `--derive-keys` masks secret output
+- **Decimal precision**: All financial calculations use `rust_decimal::Decimal`, never `f64`
+- **Network resilience**: All HTTP/RPC calls have explicit timeouts (10–30s); WebSocket reconnects with exponential backoff
+- **Graceful shutdown**: `SIGINT`/`SIGTERM` flush balance and state to disk
 - **Config validation**: Bounds-checked on startup; invalid configs are rejected immediately
+- **Atomic file writes**: Balance and state files use write-to-temp + rename to prevent corruption
 - **CI**: GitHub Actions pipeline with build, clippy, rustfmt, and `cargo audit`

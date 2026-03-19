@@ -221,27 +221,9 @@ impl Config {
     pub(crate) fn load(path: &Path) -> anyhow::Result<Self> {
         let content = fs::read_to_string(path)?;
         let mut config: Config = serde_json::from_str(&content)?;
-        // Load secrets and runtime overrides from env (not stored in config.json)
+        // Load secrets from env (not stored in config.json)
         if let Ok(pk) = std::env::var("PRIVATE_KEY") {
             config.trading.private_key = SecretString::new(pk.into());
-        }
-        if let Ok(mode) = std::env::var("TRADING_MODE") {
-            match mode.to_lowercase().as_str() {
-                "live" => {
-                    config.trading.mode = TradingMode::Live;
-                    tracing::info!("[INIT] TRADING_MODE override: live");
-                }
-                "paper" => {
-                    config.trading.mode = TradingMode::Paper;
-                    tracing::info!("[INIT] TRADING_MODE override: paper");
-                }
-                other => {
-                    anyhow::bail!(
-                        "Invalid TRADING_MODE '{}' in .env — must be 'paper' or 'live'",
-                        other
-                    );
-                }
-            }
         }
         Ok(config)
     }
