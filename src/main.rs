@@ -714,22 +714,40 @@ impl Bot {
                 if let Some(ref redeemer) = redeemer {
                     let mut still_pending = Vec::new();
                     for (cid, dir, attempts) in redeem_queue.drain(..) {
-                        match redeemer.redeem(&cid).await {
-                            Ok(tx) => {
-                                tracing::info!("[REDEEM] {} tx={}", dir, tx);
+                        match redeemer.has_redeemable_position(&cid).await {
+                            Ok(true) => match redeemer.redeem(&cid).await {
+                                Ok(tx) => {
+                                    tracing::info!("[REDEEM] {} tx={}", dir, tx);
+                                }
+                                Err(e) => {
+                                    tracing::warn!("[REDEEM] {} failed: {}", dir, e);
+                                }
+                            },
+                            Ok(false) if attempts > 1 => {
+                                tracing::debug!(
+                                    "[REDEEM] {} not redeemable yet, {} retries left",
+                                    dir,
+                                    attempts - 1
+                                );
+                                still_pending.push((cid, dir, attempts - 1));
+                            }
+                            Ok(false) => {
+                                tracing::debug!(
+                                    "[REDEEM] {} no redeemable position, dropping",
+                                    dir
+                                );
+                            }
+                            Err(e) if attempts > 1 => {
+                                tracing::debug!(
+                                    "[REDEEM] {} check failed: {}, {} retries left",
+                                    dir,
+                                    e,
+                                    attempts - 1
+                                );
+                                still_pending.push((cid, dir, attempts - 1));
                             }
                             Err(e) => {
-                                let msg = e.to_string();
-                                if msg.contains("not received yet") && attempts > 1 {
-                                    tracing::debug!(
-                                        "[REDEEM] {} waiting for oracle, {} retries left",
-                                        dir,
-                                        attempts - 1
-                                    );
-                                    still_pending.push((cid, dir, attempts - 1));
-                                } else {
-                                    tracing::warn!("[REDEEM] failed {}: {}", dir, msg);
-                                }
+                                tracing::warn!("[REDEEM] {} check failed, dropping: {}", dir, e);
                             }
                         }
                     }
@@ -885,38 +903,42 @@ async fn redeem_all() -> Result<()> {
         }
     }
 
-    eprintln!("Found {} markets with condition IDs\n", condition_ids.len());
+    eprintln!(
+        "Found {} markets with condition IDs. Checking positions...",
+        condition_ids.len()
+    );
+
+    let redeemable = redeemer.find_redeemable(&condition_ids, 20).await?;
+
+    if redeemable.is_empty() {
+        eprintln!("No redeemable positions found.");
+        return Ok(());
+    }
+
+    eprintln!(
+        "{} redeemable positions found. Redeeming...\n",
+        redeemable.len()
+    );
 
     let mut success = 0u32;
     let mut failed = 0u32;
-    let mut skipped = 0u32;
 
-    for (cid, slug) in &condition_ids {
+    for (cid, slug) in &redeemable {
         eprint!("  {} ({})... ", &cid[..10.min(cid.len())], slug);
         match redeemer.redeem(cid).await {
             Ok(tx) => {
                 eprintln!("OK tx={}", tx);
                 success += 1;
-                // Wait for tx confirmation before next redeem to avoid nonce conflicts
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
             Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("nothing to redeem") || msg.contains("revert") {
-                    eprintln!("skip (no position)");
-                    skipped += 1;
-                } else {
-                    eprintln!("FAIL: {}", msg);
-                    failed += 1;
-                }
+                eprintln!("FAIL: {}", e);
+                failed += 1;
             }
         }
     }
 
-    eprintln!(
-        "\nDone: {} redeemed, {} skipped, {} failed",
-        success, skipped, failed
-    );
+    eprintln!("\nDone: {} redeemed, {} failed", success, failed);
     Ok(())
 }
 
