@@ -29,8 +29,20 @@ fn decimal(value: &str) -> Decimal {
     Decimal::from_str_exact(value).expect("valid decimal literal")
 }
 
-fn decimal_from_f64(value: f64) -> Option<Decimal> {
-    Decimal::from_str_exact(&value.to_string()).ok()
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct PersistState {
+    pending_positions: Vec<PendingPosition>,
+    last_traded_settlement_ms: i64,
+    #[serde(default)]
+    consecutive_losses: u32,
+    #[serde(default)]
+    consecutive_wins: u32,
+    #[serde(default)]
+    pause_until_ms: i64,
+    #[serde(default)]
+    daily_pnl: String,
+    #[serde(default)]
+    pnl_reset_date: String,
 }
 
 use data::coinbase::CoinbaseClient;
@@ -144,14 +156,39 @@ impl Bot {
             .unwrap_or_else(|| decimal("1000.0"));
         tracing::info!("[INIT] Starting balance: ${:.2}", initial_balance);
 
+        let mut settler = Settler::new();
+        let mut account = AccountState::new(initial_balance);
+
+        let saved = Self::load_state().await;
+        if !saved.pending_positions.is_empty() {
+            tracing::info!(
+                "[INIT] Restored {} pending position(s) from state.json",
+                saved.pending_positions.len()
+            );
+            settler.restore_positions(saved.pending_positions);
+        }
+        if saved.last_traded_settlement_ms > 0 {
+            account.record_trade_for_market(saved.last_traded_settlement_ms);
+        }
+        account.consecutive_losses = saved.consecutive_losses;
+        account.consecutive_wins = saved.consecutive_wins;
+        account.pause_until_ms = saved.pause_until_ms;
+        if let Ok(pnl) = Decimal::from_str_exact(&saved.daily_pnl) {
+            account.daily_pnl = pnl;
+        }
+        if !saved.pnl_reset_date.is_empty() {
+            account.pnl_reset_date = saved.pnl_reset_date;
+        }
+        account.check_daily_reset();
+
         Ok(Self {
             config,
             price_source,
             polymarket,
             discovery,
             state: Arc::new(RwLock::new(BotState::new())),
-            account: Arc::new(RwLock::new(AccountState::new(initial_balance))),
-            settler: Arc::new(RwLock::new(Settler::new())),
+            account: Arc::new(RwLock::new(account)),
+            settler: Arc::new(RwLock::new(settler)),
             executor,
             redeemer,
             market_state: Arc::new(RwLock::new(MarketState::default())),
@@ -163,6 +200,35 @@ impl Bot {
             .await
             .ok()?;
         content.trim().parse().ok()
+    }
+
+    async fn load_state() -> PersistState {
+        let path = Path::new(LOG_DIR).join("state.json");
+        match tokio::fs::read_to_string(&path).await {
+            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+            Err(_) => PersistState::default(),
+        }
+    }
+
+    async fn save_state(settler: &Arc<RwLock<Settler>>, account: &Arc<RwLock<AccountState>>) {
+        let positions = settler.read().await.pending_positions();
+        let acc = account.read().await;
+        let state = PersistState {
+            pending_positions: positions,
+            last_traded_settlement_ms: acc.last_traded_settlement_ms,
+            consecutive_losses: acc.consecutive_losses,
+            consecutive_wins: acc.consecutive_wins,
+            pause_until_ms: acc.pause_until_ms,
+            daily_pnl: acc.daily_pnl.to_string(),
+            pnl_reset_date: acc.pnl_reset_date.clone(),
+        };
+        drop(acc);
+        let tmp = Path::new(LOG_DIR).join("state.json.tmp");
+        let dst = Path::new(LOG_DIR).join("state.json");
+        if let Ok(json) = serde_json::to_string(&state) {
+            let _ = tokio::fs::write(&tmp, &json).await;
+            let _ = tokio::fs::rename(&tmp, &dst).await;
+        }
     }
 
     async fn run(&mut self) -> Result<()> {
@@ -316,6 +382,7 @@ impl Bot {
     }
 
     async fn tick(&self) -> Result<()> {
+        self.account.write().await.check_daily_reset();
         let mkt = self.market_state.read().await.clone();
 
         // 1. Get latest price
@@ -374,15 +441,18 @@ impl Bot {
         let poly_no = no.ok();
         let settlement_ms = mkt.settlement_ms;
 
-        // Convert quotes to Decimal once — this is the single canonical boundary
-        let poly_yes_dec = poly_yes.and_then(decimal_from_f64);
-        let poly_no_dec = poly_no.and_then(decimal_from_f64);
+        let poly_yes_dec = poly_yes.and_then(|v| Decimal::try_from(v).ok());
+        let poly_no_dec = poly_no.and_then(|v| Decimal::try_from(v).ok());
 
-        // 3. Compute signal based on market prices (Stage 2)
-        // Signal pre-filter uses f64 derived from canonical Decimal
-        let yes_f64 = poly_yes_dec.and_then(|d| d.to_f64());
-        let no_f64 = poly_no_dec.and_then(|d| d.to_f64());
-        if !signal::is_market_extreme(yes_f64, no_f64, self.config.strategy.extreme_threshold) {
+        let yes_f64 = poly_yes;
+        let no_f64 = poly_no;
+        let extreme_f64 = self
+            .config
+            .strategy
+            .extreme_threshold
+            .to_f64()
+            .unwrap_or(0.80);
+        if !signal::is_market_extreme(yes_f64, no_f64, extreme_f64) {
             return Ok(());
         }
 
@@ -390,24 +460,16 @@ impl Bot {
         let account_read = self.account.read().await.clone();
 
         let decider_cfg = DeciderConfig {
-            edge_threshold: decimal_from_f64(self.config.edge.edge_threshold_early)
-                .unwrap_or_else(|| decimal("0.15")),
-            max_position: decimal_from_f64(self.config.strategy.max_position_size)
-                .unwrap_or_else(|| decimal("50.0")),
-            min_position: decimal_from_f64(self.config.strategy.min_order_size)
-                .unwrap_or_else(|| decimal("5.0")),
+            edge_threshold: self.config.edge.edge_threshold_early,
+            max_position: self.config.strategy.max_position_size,
+            min_position: self.config.strategy.min_order_size,
             cooldown_ms: self.config.risk.cooldown_ms,
-            max_risk_fraction: decimal_from_f64(self.config.risk.max_risk_fraction)
-                .unwrap_or_else(|| decimal("0.10")),
-            extreme_threshold: decimal_from_f64(self.config.strategy.extreme_threshold)
-                .unwrap_or_else(|| decimal("0.80")),
-            fair_value: decimal_from_f64(self.config.strategy.fair_value)
-                .unwrap_or_else(|| decimal("0.50")),
+            max_risk_fraction: self.config.risk.max_risk_fraction,
+            extreme_threshold: self.config.strategy.extreme_threshold,
+            fair_value: self.config.strategy.fair_value,
             max_consecutive_losses: self.config.risk.max_consecutive_losses,
-            max_daily_loss_pct: decimal_from_f64(self.config.risk.max_daily_loss_pct)
-                .unwrap_or_else(|| decimal("0.10")),
-            momentum_threshold: decimal_from_f64(self.config.strategy.momentum_threshold)
-                .unwrap_or_else(|| decimal("0.001")),
+            max_daily_loss_pct: self.config.risk.max_daily_loss_pct,
+            momentum_threshold: self.config.strategy.momentum_threshold,
             momentum_lookback_ms: self.config.strategy.momentum_lookback_ms,
         };
 
@@ -461,7 +523,7 @@ impl Bot {
                     btc_price,
                 );
 
-                if let Some(order) = self
+                let order = self
                     .executor
                     .execute(&ExecuteContext {
                         decision: &decision,
@@ -472,14 +534,15 @@ impl Bot {
                         settlement_time_ms: settlement_ms,
                         btc_price,
                     })
+                    .await;
+
+                self.account
+                    .write()
                     .await
-                {
-                    // Update account
-                    {
-                        let mut acc = self.account.write().await;
-                        acc.record_trade(order.cost);
-                        acc.record_trade_for_market(settlement_ms);
-                    }
+                    .record_trade_for_market(settlement_ms);
+
+                if let Some(order) = order {
+                    self.account.write().await.record_trade(order.cost);
 
                     // Add to settler
                     self.settler.write().await.add_position(PendingPosition {
@@ -493,6 +556,8 @@ impl Bot {
                         condition_id: mkt.condition_id.clone(),
                         market_slug: mkt.market_slug.clone(),
                     });
+
+                    Self::save_state(&self.settler, &self.account).await;
 
                     // Log to file
                     let bal = self.account.read().await.balance;
@@ -595,20 +660,17 @@ impl Bot {
                     )
                 } else {
                     let mut results = Vec::new();
-                    loop {
-                        let Some(pos) = settler.read().await.first_due_position() else {
-                            break;
-                        };
-
+                    let due = settler.read().await.due_positions();
+                    for pos in due {
                         let market = match discovery.fetch_market_by_slug(&pos.market_slug).await {
                             Ok(market) => market,
                             Err(e) => {
-                                tracing::debug!(
+                                tracing::warn!(
                                     "[SETTLE] Gamma fetch failed for {}: {}",
                                     pos.market_slug,
                                     e
                                 );
-                                break;
+                                continue;
                             }
                         };
 
@@ -616,20 +678,17 @@ impl Bot {
                             Some(ResolutionState::Resolved(winner)) => {
                                 let won = pos.direction == winner;
                                 if let Some(result) =
-                                    settler.write().await.settle_first_resolved(won)
+                                    settler.write().await.settle_by_slug(&pos.market_slug, won)
                                 {
                                     results.push(result);
-                                } else {
-                                    break;
                                 }
                             }
-                            Some(ResolutionState::Pending) => break,
+                            Some(ResolutionState::Pending) => {}
                             None => {
-                                tracing::debug!(
+                                tracing::warn!(
                                     "[SETTLE] resolution unclear for {}",
                                     pos.market_slug
                                 );
-                                break;
                             }
                         }
                     }
@@ -652,6 +711,8 @@ impl Bot {
 
                     let bal = acc.balance;
                     drop(acc);
+
+                    Bot::save_state(&settler, &account).await;
 
                     if let Some(btc_price) = settlement_btc_price {
                         let mut log_lines = String::new();
@@ -760,18 +821,10 @@ impl Bot {
 
 // ─── Main ───
 
-/// Note: `std::env::set_var` becomes unsafe in future Rust editions;
-/// migrate this loader to `dotenvy`.
 fn load_dotenv() {
-    if let Ok(content) = std::fs::read_to_string(".env") {
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if let Some((k, v)) = line.split_once('=') {
-                std::env::set_var(k.trim(), v.trim());
-            }
+    if let Err(e) = dotenvy::dotenv() {
+        if !e.not_found() {
+            eprintln!("Warning: failed to load .env: {}", e);
         }
     }
 }
@@ -792,6 +845,9 @@ async fn main() -> Result<()> {
     if std::env::args().any(|a| a == "--redeem-all") {
         return redeem_all().await;
     }
+    if let Some(slug) = std::env::args().skip_while(|a| a != "--redeem").nth(1) {
+        return redeem_one(&slug).await;
+    }
 
     tokio::fs::create_dir_all(LOG_DIR).await.ok();
 
@@ -805,7 +861,7 @@ async fn main() -> Result<()> {
         .with_writer(file_writer.and(std::io::stderr))
         .with_ansi(false)
         .init();
-    tracing::info!("polybot v0.3.0");
+    tracing::info!("polybot v{}", env!("CARGO_PKG_VERSION"));
 
     let config_path = Path::new("config.json");
     let config = if config_path.exists() {
@@ -908,7 +964,7 @@ async fn redeem_all() -> Result<()> {
         condition_ids.len()
     );
 
-    let redeemable = redeemer.find_redeemable(&condition_ids, 20).await?;
+    let redeemable = redeemer.find_redeemable(&condition_ids, 5).await?;
 
     if redeemable.is_empty() {
         eprintln!("No redeemable positions found.");
@@ -929,16 +985,89 @@ async fn redeem_all() -> Result<()> {
             Ok(tx) => {
                 eprintln!("OK tx={}", tx);
                 success += 1;
-                tokio::time::sleep(Duration::from_secs(5)).await;
             }
             Err(e) => {
                 eprintln!("FAIL: {}", e);
                 failed += 1;
             }
         }
+        tokio::time::sleep(Duration::from_secs(5)).await;
     }
 
     eprintln!("\nDone: {} redeemed, {} failed", success, failed);
+    Ok(())
+}
+
+async fn redeem_one(slug: &str) -> Result<()> {
+    let config_path = Path::new("config.json");
+    let config = Config::load(config_path)?;
+
+    let private_key = if !config.trading.private_key.expose_secret().is_empty() {
+        config.trading.private_key.expose_secret().to_owned()
+    } else {
+        anyhow::bail!("PRIVATE_KEY not set in .env");
+    };
+
+    let mode = if config.trading.mode.is_paper() {
+        TradingMode::Live
+    } else {
+        config.trading.mode
+    };
+    let rpc = data::chainlink::rpc_url(mode);
+    let redeemer = data::polymarket::CtfRedeemer::new(private_key, rpc);
+
+    let gamma_url = &config.polyclob.gamma_api_url;
+    let http = reqwest::Client::new();
+    let url = format!("{}/events?slug={}&limit=1", gamma_url, slug);
+
+    let resp = http.get(&url).send().await?.error_for_status()?;
+    let data: serde_json::Value = resp.json().await?;
+
+    let cid = data
+        .as_array()
+        .and_then(|events| events.first())
+        .and_then(|event| event.get("markets"))
+        .and_then(|m| m.as_array())
+        .and_then(|markets| markets.first())
+        .and_then(|market| market.get("conditionId"))
+        .and_then(|c| c.as_str())
+        .ok_or_else(|| anyhow::anyhow!("No conditionId found for slug: {}", slug))?
+        .to_string();
+
+    let market_json = data
+        .as_array()
+        .and_then(|events| events.first())
+        .and_then(|event| event.get("markets"))
+        .and_then(|m| m.as_array())
+        .and_then(|markets| markets.first());
+
+    let resolution = market_json.and_then(|m| {
+        let state = data::market_discovery::infer_resolution_state(
+            &serde_json::from_value::<data::market_discovery::GammaMarket>(m.clone()).ok()?,
+        )?;
+        Some(state)
+    });
+
+    eprintln!("Slug: {}", slug);
+    eprintln!("Condition ID: {}", cid);
+    match &resolution {
+        Some(ResolutionState::Resolved(winner)) => eprintln!("Result: {} won", winner.as_str()),
+        Some(ResolutionState::Pending) => eprintln!("Result: pending"),
+        None => eprintln!("Result: unknown"),
+    }
+
+    match redeemer.has_redeemable_position(&cid).await {
+        Ok(true) => {
+            eprint!("Redeeming... ");
+            match redeemer.redeem(&cid).await {
+                Ok(tx) => eprintln!("OK tx={}", tx),
+                Err(e) => eprintln!("FAIL: {}", e),
+            }
+        }
+        Ok(false) => eprintln!("No winning position to redeem."),
+        Err(e) => eprintln!("Check failed: {}", e),
+    }
+
     Ok(())
 }
 

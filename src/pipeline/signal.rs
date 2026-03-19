@@ -1,6 +1,6 @@
 //! Stage 2: Signal — detect market extreme pricing.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Direction {
     Up,
     Down,

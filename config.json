@@ -8,8 +8,8 @@
   "strategy": {
     "max_position_size": 10.0,
     "min_order_size": 1.0,
-    "extreme_threshold": 0.80,
-    "fair_value": 0.50,
+    "extreme_threshold": 0.8,
+    "fair_value": 0.5,
     "btc_tiebreaker_usd": 5.0,
     "momentum_threshold": 0.001,
     "momentum_lookback_ms": 120000
@@ -18,10 +18,10 @@
     "edge_threshold_early": 0.15
   },
   "risk": {
-    "max_daily_loss_pct": 0.25,
-    "max_consecutive_losses": 8,
+    "max_consecutive_losses": 5,
+    "max_daily_loss_pct": 0.15,
     "cooldown_ms": 5000,
-    "max_risk_fraction": 0.10
+    "max_risk_fraction": 0.1
   },
   "polling": {
     "signal_interval_ms": 1000

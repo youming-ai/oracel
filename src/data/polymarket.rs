@@ -33,6 +33,7 @@ alloy::sol! {
         function getPositionId(address collateralToken, bytes32 collectionId) external pure returns (uint256);
         function balanceOf(address account, uint256 id) external view returns (uint256);
         function payoutDenominator(bytes32 conditionId) external view returns (uint256);
+        function payoutNumerators(bytes32 conditionId, uint256 outcomeIndex) external view returns (uint256);
     }
 }
 
@@ -98,13 +99,13 @@ impl AuthenticatedPolyClient {
         &self,
         token_id: &str,
         side: &str,
-        price: f64,
-        size: f64,
+        price: Decimal,
+        size: Decimal,
     ) -> Result<String> {
         let tid = U256::from_str(token_id).context("Invalid token_id")?;
         let sdk_side = if side == "BUY" { Side::Buy } else { Side::Sell };
-        let price_dec = Decimal::try_from(price).context("Invalid price")?;
-        let size_dec = Decimal::try_from(size).context("Invalid size")?;
+        let price_dec = price.round_dp(2);
+        let size_dec = size.trunc();
 
         let order = self
             .client
@@ -200,7 +201,7 @@ impl CtfRedeemer {
                 async move {
                     let result = Self::check_single(&provider, wallet_addr, &cid).await;
                     let n = checked.fetch_add(1, Ordering::Relaxed) + 1;
-                    if n % 50 == 0 || n == total {
+                    if n.is_multiple_of(50) || n == total {
                         eprint!("\r  Checked {}/{}", n, total);
                     }
                     match result {
@@ -239,7 +240,18 @@ impl CtfRedeemer {
             return Ok(false);
         }
 
-        for index_set in [U256::from(1), U256::from(2)] {
+        for (index_set, outcome_index) in
+            [(U256::from(1), U256::ZERO), (U256::from(2), U256::from(1))]
+        {
+            let payout_num = ctf
+                .payoutNumerators(cid, outcome_index)
+                .call()
+                .await
+                .map_err(|e| anyhow::anyhow!("payoutNumerators failed: {}", e))?;
+            if payout_num.is_zero() {
+                continue;
+            }
+
             let col = ctf
                 .getCollectionId(B256::ZERO, cid, index_set)
                 .call()

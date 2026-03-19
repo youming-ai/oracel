@@ -94,10 +94,10 @@ pub(crate) struct AccountState {
     pub consecutive_wins: u32,
     pub last_trade_time_ms: i64,
     pub daily_pnl: Decimal,
+    pub pnl_reset_date: String,
     up_stats: DirectionStats,
     down_stats: DirectionStats,
     pub last_traded_settlement_ms: i64,
-    /// Timestamp when we started pausing (0 = not pausing)
     pub pause_until_ms: i64,
 }
 
@@ -109,10 +109,24 @@ impl AccountState {
             consecutive_wins: 0,
             last_trade_time_ms: 0,
             daily_pnl: Decimal::ZERO,
+            pnl_reset_date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
             up_stats: DirectionStats::new(),
             down_stats: DirectionStats::new(),
             last_traded_settlement_ms: 0,
             pause_until_ms: 0,
+        }
+    }
+
+    pub(crate) fn check_daily_reset(&mut self) {
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        if today != self.pnl_reset_date {
+            tracing::info!(
+                "[RISK] New day ({}), resetting daily_pnl from {:+.2}",
+                today,
+                self.daily_pnl
+            );
+            self.daily_pnl = Decimal::ZERO;
+            self.pnl_reset_date = today;
         }
     }
 

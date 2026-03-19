@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 
 use crate::pipeline::signal::Direction;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PendingPosition {
     pub direction: Direction,
     pub size_usdc: Decimal,
@@ -44,6 +44,16 @@ impl Settler {
         }
     }
 
+    pub(crate) fn restore_positions(&mut self, positions: Vec<PendingPosition>) {
+        for pos in positions {
+            self.pending.push_back(pos);
+        }
+    }
+
+    pub(crate) fn pending_positions(&self) -> Vec<PendingPosition> {
+        self.pending.iter().cloned().collect()
+    }
+
     pub(crate) fn add_position(&mut self, pos: PendingPosition) {
         self.pending.push_back(pos);
     }
@@ -52,17 +62,18 @@ impl Settler {
         self.pending.len()
     }
 
-    pub(crate) fn first_due_position(&self) -> Option<PendingPosition> {
+    pub(crate) fn due_positions(&self) -> Vec<PendingPosition> {
         let now = Utc::now().timestamp_millis();
-        let pos = self.pending.front()?;
-        if pos.settlement_time_ms > now {
-            return None;
-        }
-        Some(pos.clone())
+        self.pending
+            .iter()
+            .filter(|p| p.settlement_time_ms <= now)
+            .cloned()
+            .collect()
     }
 
-    pub(crate) fn settle_first_resolved(&mut self, won: bool) -> Option<SettlementResult> {
-        let pos = self.pending.pop_front()?;
+    pub(crate) fn settle_by_slug(&mut self, slug: &str, won: bool) -> Option<SettlementResult> {
+        let idx = self.pending.iter().position(|p| p.market_slug == slug)?;
+        let pos = self.pending.remove(idx)?;
         Some(self.finish_settlement(pos, won))
     }
 
@@ -159,11 +170,11 @@ mod tests {
     }
 
     #[test]
-    fn test_settle_first_resolved_win() {
+    fn test_settle_by_slug_win() {
         let mut settler = Settler::new();
         settler.add_position(sample_pending());
 
-        let result = settler.settle_first_resolved(true).unwrap();
+        let result = settler.settle_by_slug("btc-updown-5m-1", true).unwrap();
 
         assert!(result.won);
         assert_eq!(result.payout, d("25.0"));
@@ -178,15 +189,15 @@ mod tests {
         pos.filled_shares = d("24.99");
         settler.add_position(pos);
 
-        let result = settler.settle_first_resolved(true).unwrap();
+        let result = settler.settle_by_slug("btc-updown-5m-1", true).unwrap();
 
         assert_eq!(result.payout, d("24.99"));
         assert_eq!(result.pnl, d("19.99"));
     }
 
     #[test]
-    fn test_settle_first_resolved_none_when_empty() {
+    fn test_settle_by_slug_none_when_empty() {
         let mut settler = Settler::new();
-        assert!(settler.settle_first_resolved(true).is_none());
+        assert!(settler.settle_by_slug("nonexistent", true).is_none());
     }
 }

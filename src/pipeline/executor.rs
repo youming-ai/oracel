@@ -6,7 +6,6 @@ use crate::data::polymarket::AuthenticatedPolyClient;
 use crate::pipeline::decider::Decision;
 use crate::pipeline::signal::Direction;
 use anyhow::Result;
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 
 #[derive(Debug, Clone)]
@@ -62,21 +61,50 @@ impl Executor {
                 let filled_shares = Self::compute_filled_shares(*size_usdc, price);
                 let cost = filled_shares * price;
                 let order_id = if self.mode.is_live() {
-                    match self.place_live_order(token_id, price, filled_shares).await {
-                        Ok(id) => id,
-                        Err(e) => {
-                            let msg = e.to_string();
-                            if msg.contains("not matched")
-                                || msg.contains("FOK")
-                                || msg.contains("no fill")
+                    let mut last_err = String::new();
+                    let mut succeeded = None;
+                    for attempt in 0..3u32 {
+                        if attempt > 0 {
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        }
+                        match self.place_live_order(token_id, price, filled_shares).await {
+                            Ok(id) => {
+                                succeeded = Some(id);
+                                break;
+                            }
+                            Err(e) => {
+                                last_err = format!("{:#}", e);
+                                let is_fok = last_err.contains("not matched")
+                                    || last_err.contains("FOK")
+                                    || last_err.contains("no fill")
+                                    || last_err.contains("fully filled");
+                                if is_fok {
+                                    tracing::warn!(
+                                        "[EXEC] FOK rejected (no liquidity at {:.3}): {}",
+                                        price,
+                                        last_err
+                                    );
+                                    break;
+                                }
+                                if attempt < 2 {
+                                    tracing::warn!(
+                                        "[EXEC] order failed (attempt {}), retrying: {}",
+                                        attempt + 1,
+                                        last_err
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    match succeeded {
+                        Some(id) => id,
+                        None => {
+                            if !last_err.contains("FOK")
+                                && !last_err.contains("not matched")
+                                && !last_err.contains("no fill")
+                                && !last_err.contains("fully filled")
                             {
-                                tracing::warn!(
-                                    "[EXEC] FOK rejected (no liquidity at {:.3}): {}",
-                                    price,
-                                    msg
-                                );
-                            } else {
-                                tracing::error!("[EXEC] order failed: {}", msg);
+                                tracing::error!("[EXEC] order failed after retries: {}", last_err);
                             }
                             return None;
                         }
@@ -100,7 +128,9 @@ impl Executor {
     }
 
     fn compute_filled_shares(size_usdc: Decimal, price: Decimal) -> Decimal {
-        ((size_usdc / price) * Decimal::new(100, 0)).floor() / Decimal::new(100, 0)
+        // Floor to whole shares so that maker_amount (= price × shares) stays
+        // within the CLOB's 2-decimal-place limit for market buy orders.
+        (size_usdc / price).floor()
     }
 
     async fn place_live_order(
@@ -113,15 +143,7 @@ impl Executor {
             .auth_client
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No authenticated client — run with PRIVATE_KEY set"))?;
-        let price_f64 = price
-            .to_f64()
-            .ok_or_else(|| anyhow::anyhow!("Failed to convert decimal price for order"))?;
-        let shares_f64 = shares
-            .to_f64()
-            .ok_or_else(|| anyhow::anyhow!("Failed to convert decimal shares for order"))?;
-        client
-            .place_order(token_id, "BUY", price_f64, shares_f64)
-            .await
+        client.place_order(token_id, "BUY", price, shares).await
     }
 }
 
@@ -155,8 +177,8 @@ mod tests {
             .await
             .expect("expected paper order");
 
-        assert_eq!(result.filled_shares, d("24.87"));
-        assert_eq!(result.cost, d("4.99887"));
+        assert_eq!(result.filled_shares, d("24"));
+        assert_eq!(result.cost, d("4.824"));
         assert!(result.cost <= d("5.00"));
     }
 }

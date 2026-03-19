@@ -254,10 +254,10 @@ pub(crate) fn infer_resolution_state(market: &GammaMarket) -> Option<ResolutionS
         let parsed = price.parse::<f64>().ok()?;
         let normalized = outcome.to_ascii_lowercase();
         if parsed >= 0.999 {
-            if normalized == "yes" {
+            if normalized == "yes" || normalized == "up" {
                 return Some(ResolutionState::Resolved(Direction::Up));
             }
-            if normalized == "no" {
+            if normalized == "no" || normalized == "down" {
                 return Some(ResolutionState::Resolved(Direction::Down));
             }
         }
@@ -324,6 +324,50 @@ mod tests {
             closed: Some(true),
             uma_resolution_status: Some("resolved".into()),
             outcomes: Some("[\"Yes\",\"No\"]".into()),
+            outcome_prices: Some("[\"0\",\"1\"]".into()),
+        };
+
+        assert_eq!(
+            infer_resolution_state(&market),
+            Some(ResolutionState::Resolved(Direction::Down))
+        );
+    }
+
+    #[test]
+    fn test_infer_resolved_direction_up_wins() {
+        let market = GammaMarket {
+            slug: "btc-updown-5m-1".into(),
+            question: None,
+            title: None,
+            end_date: String::new(),
+            event_start_time: None,
+            clob_token_ids: None,
+            condition_id: None,
+            closed: Some(true),
+            uma_resolution_status: Some("resolved".into()),
+            outcomes: Some("[\"Up\",\"Down\"]".into()),
+            outcome_prices: Some("[\"1\",\"0\"]".into()),
+        };
+
+        assert_eq!(
+            infer_resolution_state(&market),
+            Some(ResolutionState::Resolved(Direction::Up))
+        );
+    }
+
+    #[test]
+    fn test_infer_resolved_direction_down_wins() {
+        let market = GammaMarket {
+            slug: "btc-updown-5m-1".into(),
+            question: None,
+            title: None,
+            end_date: String::new(),
+            event_start_time: None,
+            clob_token_ids: None,
+            condition_id: None,
+            closed: Some(true),
+            uma_resolution_status: Some("resolved".into()),
+            outcomes: Some("[\"Up\",\"Down\"]".into()),
             outcome_prices: Some("[\"0\",\"1\"]".into()),
         };
 

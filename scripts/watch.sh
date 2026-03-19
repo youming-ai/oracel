@@ -1,83 +1,130 @@
 #!/bin/bash
-# Real-time polybot monitor
+# Usage: scripts/watch.sh [logfile] [refresh_seconds]
+set -euo pipefail
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LOG="${1:-${ROOT}/logs/bot.log}"
 SEC="${2:-3}"
 
-# Use $'...' so colors are literal bytes, no escape interpretation needed
 G=$'\033[32m'; R=$'\033[31m'; Y=$'\033[33m'; C=$'\033[36m'
-B=$'\033[1m'; D=$'\033[2m'; N=$'\033[0m'
+B=$'\033[1m'; D=$'\033[2m'; N=$'\033[0m'; BR=$'\033[41;37m'
 
-val() { echo "$2" | sed -n "s/.*${1}\([^ |]*\).*/\1/p"; }
-ts() { echo "$1" | sed -n 's/^[0-9-]*T\([0-9:]*\)\..*/\1/p'; }
-# printf %s — no escape interpretation, no % issues
-out() { printf '%s\n' "$*"; }
+field() { echo "$1" | sed -n "s/.*${2}\([^ |]*\).*/\1/p"; }
+logtime() { echo "$1" | sed -n 's/^[0-9-]*T\([0-9:]*\)\..*/\1/p'; }
 
-clear; trap 'tput cnorm; exit' INT
+clear; trap 'tput cnorm; exit' INT TERM
 
 while true; do
     tput cup 0 0; tput civis
 
-    # ── Market ──
-    MKT=$(grep '\[MKT\]' "$LOG" 2>/dev/null | tail -1)
-    SLUG=$(echo "$MKT" | sed -n 's/.*\[MKT\] found \([^ ]*\).*/\1/p')
-    END=$(echo "$MKT" | sed -n 's/.*ends \([-0-9]* [0-9:]* UTC\).*/\1/p')
-    if [ -n "$END" ]; then
-        ET=$(date -j -u -f "%Y-%m-%d %H:%M:%S" "${END% UTC}" "+%s" 2>/dev/null || echo 0)
-        R_SEC=$(( ET - $(date -u "+%s") ))
-        [ "$R_SEC" -gt 0 ] && TTL="${G}$((R_SEC/60))m$((R_SEC%60))s${N}" || TTL="${D}expired${N}"
-    fi
-
-    out "${B}Polymarket 5m Bot${N}  ${D}$(date +%H:%M:%S)${N}"
-    out "${C}${SLUG:-discovering...}${N}  ends ${END:-?}  (${TTL:-?})"
-    out ""
-
-    # ── Latest BTC + Signal ──
-    LAST=$(grep -E '\[SKIP\]|\[TRADE\]' "$LOG" 2>/dev/null | tail -1)
-    PRICE=$(val 'BTC=\$' "$LAST")
-
+    STATUS=$(grep '\[STATUS\]' "$LOG" 2>/dev/null | tail -1)
+    MKT=$(grep '\[MKT\].*found\|cid=' "$LOG" 2>/dev/null | tail -1)
     TRADE=$(grep '\[TRADE\]' "$LOG" 2>/dev/null | tail -1)
-    if [ -n "$TRADE" ]; then
-        DIR=$(echo "$TRADE" | sed -n 's/.*\[TRADE\] *\([A-Z]*\).*/\1/p')
-        EDGE=$(echo "$TRADE" | sed -n 's/.*edge=\([0-9]*\).*/\1/p')
-        ENTRY=$(echo "$TRADE" | sed -n 's/.*@ *\([0-9.]*\).*/\1/p')
-        out "BTC ${G}\$${PRICE}${N}  Last: ${B}${DIR}${N} @ ${ENTRY}  edge ${Y}${EDGE}%${N}"
+    BALANCE=$(cat "${ROOT}/logs/balance" 2>/dev/null || echo "?")
+
+    MODE=$(grep '\[INIT\] mode=' "$LOG" 2>/dev/null | tail -1 | sed -n 's/.*mode=\([a-z]*\).*/\1/p')
+    MODE=${MODE:-paper}
+
+    BTC=$(field "$STATUS" 'BTC=\$')
+    PNL=$(field "$STATUS" 'pnl=')
+    PENDING=$(field "$STATUS" 'pending=')
+    TTL=$(field "$STATUS" 'ttl=')
+    WL=$(echo "$STATUS" | sed -n 's/.*| \([0-9]*W\/[0-9]*L\).*/\1/p')
+    STREAK=$(field "$STATUS" 'streak=')
+
+    SLUG=$(echo "$MKT" | sed -n 's/.*\(btc-updown-5m[^ ]*\).*/\1/p')
+    END=$(echo "$MKT" | sed -n 's/.*ends \([0-9-]* [0-9:]* UTC\).*/\1/p')
+    END_SHORT=$(echo "$END" | sed -n 's/^[0-9-]* \([0-9:]*\) UTC/\1 UTC/p')
+
+    if [ "$MODE" = "live" ]; then
+        MODE_FMT="${BR} LIVE ${N}"
     else
-        out "BTC ${G}\$${PRICE:-?}${N}  ${D}no trades yet${N}"
+        MODE_FMT="${D}PAPER${N}"
     fi
-    out ""
 
-    # ── Balance (from balance.json + log) ──
-    BALANCE=$(cat "${ROOT}/logs/balance" 2>/dev/null)
-    BAL_LINE=$(grep '\[BAL\]' "$LOG" 2>/dev/null | tail -1)
-    PNL=$(echo "$BAL_LINE" | sed -n 's/.*pnl=\([^ ]*\).*/\1/p')
-    W=$(grep '\[SETTLED\]' "$LOG" 2>/dev/null | grep -c 'WIN'); W=${W:-0}
-    L=$(grep '\[SETTLED\]' "$LOG" 2>/dev/null | grep -c 'LOSS'); L=${L:-0}
+    if [ -n "$PNL" ]; then
+        case "$PNL" in
+            +*) PNL_FMT="${G}${PNL}${N}" ;;
+            -*)  PNL_FMT="${R}${PNL}${N}" ;;
+            *)   PNL_FMT="${PNL}" ;;
+        esac
+    else
+        PNL_FMT="${D}0.00${N}"
+    fi
 
-    out "Balance ${B}\$${BALANCE:-1000.00}${N}  PnL ${PNL:-0.00}  W/L ${G}${W}${N}/${R}${L}${N}"
-    out ""
+    if [ -n "$BTC" ] && [ "$BTC" != "0" ]; then
+        BTC_FMT=$(printf "%'d" "${BTC%.*}" 2>/dev/null || echo "$BTC")
+    else
+        BTC_FMT="${D}waiting${N}"
+    fi
 
-    # ── Recent Activity (last 8) ──
-    out "${D}── Activity ──${N}"
-    tail -300 "$LOG" 2>/dev/null | \
-        grep -E '\[SETTLED\]|\[TRADE\]|\[MKT\] found' | tail -8 | \
-        while IFS= read -r line; do
-            TIME=$(ts "$line")
+    printf '%s  %s  %s\n\n' "${B}POLYBOT${N}" "${MODE_FMT}" "${D}$(date +%H:%M:%S)${N}"
+
+    printf '  %s  $%s %28s\n' "${B}BTC${N}" "${BTC_FMT}" "${C}${SLUG:-discovering...}${N}"
+    printf '  %s  %s %32s\n\n' "${B}TTL${N}" "${G}${TTL:-?}${N}" "${D}ends ${END_SHORT:-?}${N}"
+
+    printf '  Balance  %s        P&L  %s\n' "${B}\$${BALANCE}${N}" "${PNL_FMT}"
+    printf '  Record   %s      Streak  %s\n' "${G}${WL:-0W/0L}${N}" "${Y}${STREAK:-0}${N}"
+    [ -n "$PENDING" ] && [ "$PENDING" != "0" ] && printf '  %s\n' "${Y}⏳ ${PENDING} pending${N}"
+    echo ""
+
+    printf '%s\n' "${D}── last trade ──${N}"
+    if [ -n "$TRADE" ]; then
+        T_TIME=$(logtime "$TRADE")
+        T_DIR=$(echo "$TRADE" | sed -n 's/.*\[TRADE\] *\([A-Z]*\).*/\1/p')
+        T_PRICE=$(echo "$TRADE" | sed -n 's/.*@ *\([0-9.]*\).*/\1/p')
+        T_EDGE=$(echo "$TRADE" | sed -n 's/.*edge=\([0-9]*\).*/\1/p')
+        if [ "$T_DIR" = "UP" ]; then
+            DIR_CLR="${G}▲ UP${N}"
+        else
+            DIR_CLR="${R}▼ DOWN${N}"
+        fi
+        printf '  %s  BUY %s @ %s  edge %s\n' "${D}${T_TIME}${N}" "${DIR_CLR}" "${B}${T_PRICE}${N}" "${Y}${T_EDGE}%${N}"
+    else
+        printf '  %s\n' "${D}no trades yet${N}"
+    fi
+    echo ""
+
+    printf '%s\n' "${D}── activity ──${N}"
+    ACTIVITY=$(tail -500 "$LOG" 2>/dev/null | grep -E '\[SETTLED\]|\[TRADE\]|\[MKT\].*found' | tail -6)
+    if [ -n "$ACTIVITY" ]; then
+        echo "$ACTIVITY" | while IFS= read -r line; do
+            TIME=$(logtime "$line")
             if echo "$line" | grep -q '\[SETTLED\]'; then
-                PNL_V=$(echo "$line" | sed -n 's/.*pnl=\([^ ]*\).*/\1/p')
+                S_PNL=$(echo "$line" | sed -n 's/.*pnl=\([^ ]*\).*/\1/p')
                 if echo "$line" | grep -q 'WIN'; then
-                    out " ${D}${TIME}${N}  ${G}WIN${N}  ${PNL_V}"
+                    printf '  %s  %s  %s\n' "${D}${TIME}${N}" "${G}✓ WIN${N} " "${G}${S_PNL}${N}"
                 else
-                    out " ${D}${TIME}${N}  ${R}LOSS${N} ${PNL_V}"
+                    printf '  %s  %s  %s\n' "${D}${TIME}${N}" "${R}✗ LOSS${N}" "${R}${S_PNL}${N}"
                 fi
             elif echo "$line" | grep -q '\[TRADE\]'; then
-                DIR=$(echo "$line" | sed -n 's/.*\[TRADE\] *\([A-Z]*\).*/\1/p')
-                out " ${D}${TIME}${N}  ${C}BUY${N}  ${DIR}"
+                A_DIR=$(echo "$line" | sed -n 's/.*\[TRADE\] *\([A-Z]*\).*/\1/p')
+                A_PRICE=$(echo "$line" | sed -n 's/.*@ *\([0-9.]*\).*/\1/p')
+                printf '  %s  %s  %s @ %s\n' "${D}${TIME}${N}" "${C}● BUY${N} " "${A_DIR}" "${A_PRICE}"
             elif echo "$line" | grep -q '\[MKT\]'; then
-                out " ${D}${TIME}  ↻ rotated${N}"
+                printf '  %s  %s\n' "${D}${TIME}${N}" "${D}↻ market rotated${N}"
             fi
         done
-    out ""
+    else
+        printf '  %s\n' "${D}no activity yet${N}"
+    fi
+    echo ""
+
+    ERRORS=$(tail -500 "$LOG" 2>/dev/null | grep -E '\[EXEC\].*failed|\[EXEC\].*FOK' | tail -3)
+    if [ -n "$ERRORS" ]; then
+        printf '%s\n' "${D}── errors ──${N}"
+        echo "$ERRORS" | while IFS= read -r line; do
+            E_TIME=$(logtime "$line")
+            if echo "$line" | grep -q 'FOK'; then
+                E_PRICE=$(echo "$line" | sed -n 's/.*at \([0-9.]*\).*/\1/p')
+                printf '  %s  %s @ %s\n' "${D}${E_TIME}${N}" "${Y}FOK rejected${N}" "${E_PRICE}"
+            else
+                E_MSG=$(echo "$line" | sed 's/.*order failed: //' | cut -c1-45)
+                printf '  %s  %s\n' "${D}${E_TIME}${N}" "${R}${E_MSG}${N}"
+            fi
+        done
+        echo ""
+    fi
 
     sleep "$SEC"; tput ed
 done

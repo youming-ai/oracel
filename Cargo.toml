@@ -22,9 +22,10 @@ chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 futures-util = "0.3"
-rust_decimal = { version = "1", features = ["serde"] }
+rust_decimal = { version = "1", features = ["serde", "serde-with-float"] }
 polymarket-client-sdk = { version = "0.4", features = ["clob", "ctf"] }
 alloy = { version = "1.6", default-features = false, features = ["signer-local", "signers", "contract", "providers", "provider-http", "transports", "transport-http"] }
+dotenvy = "0.15"
 secrecy = "0.10"
 rustls = { version = "0.23", features = ["ring"] }
 
