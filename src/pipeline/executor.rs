@@ -61,50 +61,21 @@ impl Executor {
                 let filled_shares = Self::compute_filled_shares(*size_usdc, price);
                 let cost = filled_shares * price;
                 let order_id = if self.mode.is_live() {
-                    let mut last_err = String::new();
-                    let mut succeeded = None;
-                    for attempt in 0..3u32 {
-                        if attempt > 0 {
-                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                        }
-                        match self.place_live_order(token_id, price, filled_shares).await {
-                            Ok(id) => {
-                                succeeded = Some(id);
-                                break;
-                            }
-                            Err(e) => {
-                                last_err = format!("{:#}", e);
-                                let is_fok = last_err.contains("not matched")
-                                    || last_err.contains("FOK")
-                                    || last_err.contains("no fill")
-                                    || last_err.contains("fully filled");
-                                if is_fok {
-                                    tracing::warn!(
-                                        "[EXEC] FOK rejected (no liquidity at {:.3}): {}",
-                                        price,
-                                        last_err
-                                    );
-                                    break;
-                                }
-                                if attempt < 2 {
-                                    tracing::warn!(
-                                        "[EXEC] order failed (attempt {}), retrying: {}",
-                                        attempt + 1,
-                                        last_err
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    match succeeded {
-                        Some(id) => id,
-                        None => {
-                            if !last_err.contains("FOK")
-                                && !last_err.contains("not matched")
-                                && !last_err.contains("no fill")
-                                && !last_err.contains("fully filled")
+                    match self.place_live_order(token_id, price, filled_shares).await {
+                        Ok(id) => id,
+                        Err(e) => {
+                            let msg = format!("{:#}", e);
+                            if msg.contains("not matched")
+                                || msg.contains("FOK")
+                                || msg.contains("no fill")
+                                || msg.contains("fully filled")
                             {
-                                tracing::error!("[EXEC] order failed after retries: {}", last_err);
+                                tracing::warn!(
+                                    "[EXEC] FOK rejected (no liquidity at {:.3})",
+                                    price
+                                );
+                            } else {
+                                tracing::error!("[EXEC] order failed: {}", msg);
                             }
                             return None;
                         }

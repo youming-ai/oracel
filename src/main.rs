@@ -202,6 +202,14 @@ impl Bot {
         content.trim().parse().ok()
     }
 
+    async fn write_balance(bal: Decimal) {
+        let tmp = Path::new(LOG_DIR).join("balance.tmp");
+        let dst = Path::new(LOG_DIR).join("balance");
+        let text = format!("{:.2}", bal);
+        let _ = tokio::fs::write(&tmp, &text).await;
+        let _ = tokio::fs::rename(&tmp, &dst).await;
+    }
+
     async fn load_state() -> PersistState {
         let path = Path::new(LOG_DIR).join("state.json");
         match tokio::fs::read_to_string(&path).await {
@@ -536,13 +544,12 @@ impl Bot {
                     })
                     .await;
 
-                self.account
-                    .write()
-                    .await
-                    .record_trade_for_market(settlement_ms);
-
                 if let Some(order) = order {
-                    self.account.write().await.record_trade(order.cost);
+                    {
+                        let mut acc = self.account.write().await;
+                        acc.record_trade(order.cost);
+                        acc.record_trade_for_market(settlement_ms);
+                    }
 
                     // Add to settler
                     self.settler.write().await.add_position(PendingPosition {
@@ -559,8 +566,10 @@ impl Bot {
 
                     Self::save_state(&self.settler, &self.account).await;
 
-                    // Log to file
                     let bal = self.account.read().await.balance;
+                    Self::write_balance(bal).await;
+
+                    // Log to file
                     let log_line = format!(
                         "{},{},{},{:.3},{:.2},{:.1},{:.2}\n",
                         Utc::now().format("%H:%M:%S"),
@@ -698,6 +707,7 @@ impl Bot {
 
                 if !results.is_empty() {
                     let mut acc = account.write().await;
+                    acc.check_daily_reset();
                     for r in &results {
                         acc.record_settlement(r);
                     }
@@ -745,19 +755,7 @@ impl Bot {
                         }
                     }
 
-                    let tmp = Path::new(LOG_DIR).join("balance.tmp");
-                    let dst = Path::new(LOG_DIR).join("balance");
-                    let balance_text = format!("{:.2}", bal);
-                    match tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-                        std::fs::write(&tmp, balance_text)?;
-                        std::fs::rename(&tmp, &dst)
-                    })
-                    .await
-                    {
-                        Ok(Ok(())) => {}
-                        Ok(Err(e)) => tracing::debug!("[LOG] balance write failed: {}", e),
-                        Err(e) => tracing::debug!("[LOG] balance task failed: {}", e),
-                    }
+                    Bot::write_balance(bal).await;
 
                     // Queue winning positions for on-chain redeem
                     for r in &results {
