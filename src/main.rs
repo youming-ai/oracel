@@ -469,10 +469,7 @@ impl Bot {
 
         let decider_cfg = DeciderConfig {
             edge_threshold: self.config.edge.edge_threshold_early,
-            max_position: self.config.strategy.max_position_size,
-            min_position: self.config.strategy.min_order_size,
             cooldown_ms: self.config.risk.cooldown_ms,
-            max_risk_fraction: self.config.risk.max_risk_fraction,
             extreme_threshold: self.config.strategy.extreme_threshold,
             fair_value: self.config.strategy.fair_value,
             max_consecutive_losses: self.config.risk.max_consecutive_losses,

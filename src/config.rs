@@ -82,10 +82,6 @@ pub(crate) struct PolymarketConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct StrategyConfig {
-    #[serde(with = "rust_decimal::serde::float")]
-    pub max_position_size: Decimal,
-    #[serde(with = "rust_decimal::serde::float")]
-    pub min_order_size: Decimal,
     #[serde(
         default = "default_extreme_threshold",
         with = "rust_decimal::serde::float"
@@ -140,11 +136,6 @@ pub(crate) struct RiskConfig {
     pub max_daily_loss_pct: Decimal,
     #[serde(default = "default_cooldown_ms")]
     pub cooldown_ms: i64,
-    #[serde(
-        default = "default_max_risk_fraction",
-        with = "rust_decimal::serde::float"
-    )]
-    pub max_risk_fraction: Decimal,
 }
 
 fn default_max_daily_loss_pct() -> Decimal {
@@ -152,9 +143,6 @@ fn default_max_daily_loss_pct() -> Decimal {
 }
 fn default_cooldown_ms() -> i64 {
     5_000
-}
-fn default_max_risk_fraction() -> Decimal {
-    dec("0.10")
 }
 
 // ─── Polling ───
@@ -194,8 +182,6 @@ impl Default for PolymarketConfig {
 impl Default for StrategyConfig {
     fn default() -> Self {
         Self {
-            max_position_size: dec("50.0"),
-            min_order_size: dec("5.0"),
             extreme_threshold: dec("0.80"),
             fair_value: dec("0.50"),
             btc_tiebreaker_usd: 5.0,
@@ -219,7 +205,6 @@ impl Default for RiskConfig {
             max_consecutive_losses: 8,
             max_daily_loss_pct: dec("0.10"),
             cooldown_ms: 5_000,
-            max_risk_fraction: dec("0.10"),
         }
     }
 }
@@ -274,23 +259,11 @@ impl Config {
         if self.polling.signal_interval_ms == 0 {
             anyhow::bail!("polling.signal_interval_ms must be > 0");
         }
-        if self.strategy.max_position_size <= zero {
-            anyhow::bail!("strategy.max_position_size must be > 0");
-        }
-        if self.strategy.min_order_size <= zero {
-            anyhow::bail!("strategy.min_order_size must be > 0");
-        }
-        if self.strategy.min_order_size > self.strategy.max_position_size {
-            anyhow::bail!("strategy.min_order_size must be <= strategy.max_position_size");
-        }
         if !(zero < self.strategy.extreme_threshold && self.strategy.extreme_threshold < one) {
             anyhow::bail!("strategy.extreme_threshold must be in (0, 1)");
         }
         if !(zero < self.strategy.fair_value && self.strategy.fair_value < one) {
             anyhow::bail!("strategy.fair_value must be in (0, 1)");
-        }
-        if !(zero < self.risk.max_risk_fraction && self.risk.max_risk_fraction <= one) {
-            anyhow::bail!("risk.max_risk_fraction must be in (0, 1]");
         }
         if !(zero < self.risk.max_daily_loss_pct && self.risk.max_daily_loss_pct <= one) {
             anyhow::bail!("risk.max_daily_loss_pct must be in (0, 1]");
@@ -307,8 +280,6 @@ impl Config {
 
         self.market.window_minutes == defaults.market.window_minutes
             && self.polyclob.gamma_api_url == defaults.polyclob.gamma_api_url
-            && self.strategy.max_position_size == defaults.strategy.max_position_size
-            && self.strategy.min_order_size == defaults.strategy.min_order_size
             && self.strategy.extreme_threshold == defaults.strategy.extreme_threshold
             && self.strategy.fair_value == defaults.strategy.fair_value
             && self.strategy.btc_tiebreaker_usd == defaults.strategy.btc_tiebreaker_usd
@@ -318,7 +289,6 @@ impl Config {
             && self.risk.max_consecutive_losses == defaults.risk.max_consecutive_losses
             && self.risk.max_daily_loss_pct == defaults.risk.max_daily_loss_pct
             && self.risk.cooldown_ms == defaults.risk.cooldown_ms
-            && self.risk.max_risk_fraction == defaults.risk.max_risk_fraction
             && self.polling.signal_interval_ms == defaults.polling.signal_interval_ms
     }
 }
@@ -333,15 +303,6 @@ mod tests {
     fn test_validate_rejects_zero_interval() {
         let mut cfg = Config::default();
         cfg.polling.signal_interval_ms = 0;
-
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_rejects_min_greater_than_max() {
-        let mut cfg = Config::default();
-        cfg.strategy.min_order_size = dec("20.0");
-        cfg.strategy.max_position_size = dec("10.0");
 
         assert!(cfg.validate().is_err());
     }
