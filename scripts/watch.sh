@@ -277,7 +277,7 @@ while true; do
     echo ""
 
     printf '%s\n' "${D}-- activity --${N}"
-    ACTIVITY=$(tail -500 "$LOG" 2>/dev/null | grep -E '\[SETTLED\]|\[TRADE\]|\[MKT\].*(found|ends)|\[REDEEM\]|\[RISK\]' | tail -8 || true)
+    ACTIVITY=$(tail -500 "$LOG" 2>/dev/null | grep -E '\[SETTLED\]|\[TRADE\]|\[MKT\].*(found|ends)|\[REDEEM\]|\[RISK\]' | tail -5 || true)
     if [ -n "$ACTIVITY" ]; then
         echo "$ACTIVITY" | while IFS= read -r line; do
             TIME=$(logtime "$line")
@@ -310,7 +310,7 @@ while true; do
     fi
     echo ""
 
-    ERRORS=$(tail -500 "$LOG" 2>/dev/null | grep -E '\[EXEC\].*failed|\[EXEC\].*FOK|\[BAL\].*[Ff]ailed|\[PRICE\].*stale' | tail -3 || true)
+    ERRORS=$(tail -500 "$LOG" 2>/dev/null | grep -E '\[EXEC\].*failed|\[EXEC\].*FOK|\[BAL\].*[Ff]ailed|\[PRICE\].*stale' | tail -5 || true)
     if [ -n "$ERRORS" ]; then
         printf '%s\n' "${D}-- errors --${N}"
         echo "$ERRORS" | while IFS= read -r line; do
