@@ -3,7 +3,6 @@
 use chrono::Utc;
 use rust_decimal::Decimal;
 use std::collections::VecDeque;
-use std::io::Write;
 
 use crate::pipeline::signal::Direction;
 
@@ -27,6 +26,7 @@ pub(crate) struct SettlementResult {
     pub pnl: Decimal,
     pub won: bool,
     pub condition_id: String,
+    pub entry_btc_price: f64,
 }
 
 pub(crate) struct Settler {
@@ -63,7 +63,7 @@ impl Settler {
 
     pub(crate) fn settle_first_resolved(&mut self, won: bool) -> Option<SettlementResult> {
         let pos = self.pending.pop_front()?;
-        Some(self.finish_settlement(pos, won, None))
+        Some(self.finish_settlement(pos, won))
     }
 
     pub(crate) fn check_settlements(
@@ -95,18 +95,13 @@ impl Settler {
             };
 
             tracing::debug!("[SETTLEMENT] Local simulation - may not match Polymarket resolution");
-            results.push(self.finish_settlement(pos, won, Some(current_btc_price)));
+            results.push(self.finish_settlement(pos, won));
         }
 
         results
     }
 
-    fn finish_settlement(
-        &mut self,
-        pos: PendingPosition,
-        won: bool,
-        current_btc_price: Option<f64>,
-    ) -> SettlementResult {
+    fn finish_settlement(&mut self, pos: PendingPosition, won: bool) -> SettlementResult {
         let payout = if won {
             pos.filled_shares
         } else {
@@ -130,33 +125,13 @@ impl Settler {
             self.total_losses,
         );
 
-        if let Some(price) = current_btc_price {
-            if let Ok(mut file) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(std::path::Path::new("logs").join("trades.csv"))
-            {
-                if let Err(e) = writeln!(
-                    file,
-                    "{},{},{},{:+.2},{:.0},{:.0}",
-                    Utc::now().format("%H:%M:%S"),
-                    if won { "WIN" } else { "LOSS" },
-                    pos.direction.as_str(),
-                    pnl.round_dp(2),
-                    pos.entry_btc_price,
-                    price,
-                ) {
-                    tracing::debug!("[LOG] trade csv write failed: {}", e);
-                }
-            }
-        }
-
         SettlementResult {
             direction: pos.direction,
             payout,
             pnl,
             won,
             condition_id: pos.condition_id,
+            entry_btc_price: pos.entry_btc_price,
         }
     }
 }

@@ -54,18 +54,26 @@ impl PriceSource {
         let max = self.max;
         tokio::spawn(async move {
             loop {
-                while let Ok(ticker) = rx.try_recv() {
-                    let tick = PriceTick {
-                        price: ticker.price,
-                        timestamp_ms: chrono::Utc::now().timestamp_millis(),
-                    };
-                    let mut h = buf.write().await;
-                    h.push_back(tick);
-                    if h.len() > max {
-                        h.pop_front();
+                match rx.recv().await {
+                    Ok(ticker) => {
+                        let tick = PriceTick {
+                            price: ticker.price,
+                            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                        };
+                        let mut h = buf.write().await;
+                        h.push_back(tick);
+                        if h.len() > max {
+                            h.pop_front();
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::debug!("[WS] Price receiver lagged by {} messages", n);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        tracing::error!("[WS] Price channel closed");
+                        break;
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
         });
     }

@@ -112,8 +112,15 @@ impl CoinbaseClient {
                                 .and_then(|v| v.as_str())
                                 .and_then(|s| s.parse::<f64>().ok())
                             {
-                                if let Ok(mut guard) = self.latest_price.try_write() {
-                                    *guard = Some(price);
+                                match self.latest_price.try_write() {
+                                    Ok(mut guard) => {
+                                        *guard = Some(price);
+                                    }
+                                    Err(_) => {
+                                        tracing::debug!(
+                                            "[WS] Price update dropped (lock contended)"
+                                        );
+                                    }
                                 }
                                 if self.price_tx.send(TickerUpdate { price }).is_err() {
                                     tracing::debug!("[WS] no price receivers");

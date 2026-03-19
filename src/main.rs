@@ -582,7 +582,7 @@ impl Bot {
             loop {
                 interval.tick().await;
 
-                let results = if mode == "paper" {
+                let (results, settlement_btc_price) = if mode == "paper" {
                     let btc_price = match data::chainlink::fetch_btc_price(&http, &rpc).await {
                         Ok(p) => p,
                         Err(e) => {
@@ -594,10 +594,13 @@ impl Bot {
                         }
                     };
 
-                    settler
-                        .write()
-                        .await
-                        .check_settlements(btc_price, btc_tiebreaker_usd)
+                    (
+                        settler
+                            .write()
+                            .await
+                            .check_settlements(btc_price, btc_tiebreaker_usd),
+                        Some(btc_price),
+                    )
                 } else {
                     let mut results = Vec::new();
                     loop {
@@ -638,7 +641,7 @@ impl Bot {
                             }
                         }
                     }
-                    results
+                    (results, None)
                 };
 
                 if !results.is_empty() {
@@ -656,6 +659,38 @@ impl Bot {
 
                     let bal = acc.balance;
                     drop(acc);
+
+                    if let Some(btc_price) = settlement_btc_price {
+                        let mut log_lines = String::new();
+                        for r in &results {
+                            log_lines.push_str(&format!(
+                                "{},{},{},{:+.2},{:.0},{:.0}\n",
+                                Utc::now().format("%H:%M:%S"),
+                                if r.won { "WIN" } else { "LOSS" },
+                                r.direction.as_str(),
+                                r.pnl.round_dp(2),
+                                r.entry_btc_price,
+                                btc_price,
+                            ));
+                        }
+                        let trades_path = Path::new(LOG_DIR).join("trades.csv");
+                        match tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+                            use std::io::Write;
+
+                            let mut file = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(trades_path)?;
+                            file.write_all(log_lines.as_bytes())
+                        })
+                        .await
+                        {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => tracing::debug!("[LOG] trades.csv write failed: {}", e),
+                            Err(e) => tracing::debug!("[LOG] trades.csv task failed: {}", e),
+                        }
+                    }
+
                     let tmp = Path::new(LOG_DIR).join("balance.tmp");
                     let dst = Path::new(LOG_DIR).join("balance");
                     let balance_text = format!("{:.2}", bal);
@@ -714,6 +749,8 @@ impl Bot {
 
 // ─── Main ───
 
+/// Note: `std::env::set_var` becomes unsafe in future Rust editions;
+/// migrate this loader to `dotenvy`.
 fn load_dotenv() {
     if let Ok(content) = std::fs::read_to_string(".env") {
         for line in content.lines() {

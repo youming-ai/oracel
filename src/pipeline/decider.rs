@@ -389,6 +389,7 @@ mod tests {
             pnl: d("19.99"),
             won: true,
             condition_id: "cid".into(),
+            entry_btc_price: 70000.0,
         };
 
         account.record_trade(d("5.0"));
