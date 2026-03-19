@@ -119,7 +119,7 @@ The program reads `.env` from the repository root at startup.
 | --- | --- | --- |
 | `PRIVATE_KEY` | Required in live mode | Wallet private key used for CLOB auth and CTF redeem |
 | `ALCHEMY_KEY` | Optional | Polygon RPC key for faster Chainlink queries and redeem calls in live mode |
-| `TRADING_MODE` | Optional | Runtime mode; set to `paper` or `live`. Overrides legacy `trading.mode` if both are present |
+| `TRADING_MODE` | Optional | Runtime mode; set to `paper` or `live`. Overrides `trading.mode` in `config.json` if both are present |
 
 `--derive-keys` derives `POLY_API_KEY`, `POLY_API_SECRET`, and `POLY_PASSPHRASE` from `PRIVATE_KEY`, but only prints them to the terminal and does not write them back to `.env`.
 
@@ -140,20 +140,14 @@ See `config.json` for the current sample config and `src/config.rs` for the full
 | `strategy.btc_tiebreaker_usd` | `5.0` | Settlement tie-break threshold when BTC price change is very small |
 | `strategy.momentum_threshold` | `0.001` | Momentum filter threshold (0.1%) |
 | `strategy.momentum_lookback_ms` | `120000` | Momentum lookback window (2 minutes) |
-| `edge.edge_threshold_early` | `0.15` | Active edge threshold currently used in the main path |
-| `edge.edge_threshold_mid` | `0.15` | Reserved mid-window edge config, currently unused by the main path |
-| `edge.edge_threshold_late` | `0.20` | Reserved late-window edge config, currently unused by the main path |
-| `edge.min_prob_early` | `0.50` | Reserved minimum-probability config, currently unused by the main path |
-| `edge.min_prob_mid` | `0.50` | Reserved minimum-probability config, currently unused by the main path |
-| `edge.min_prob_late` | `0.50` | Reserved minimum-probability config, currently unused by the main path |
-| `risk.max_daily_loss_usdc` | `100.0` | Reserved absolute daily loss config, currently unused by the decider |
+| `edge.edge_threshold_early` | `0.15` | Minimum edge required to place a trade |
 | `risk.max_consecutive_losses` | `8` | Circuit-breaker threshold for consecutive losses |
 | `risk.max_daily_loss_pct` | `0.10` | Daily loss percentage limit |
 | `risk.cooldown_ms` | `5000` | Cooldown between trades |
 | `risk.max_risk_fraction` | `0.10` | Maximum fraction of balance allowed per trade |
 | `polling.signal_interval_ms` | `1000` | Main signal loop interval |
 
-Note: the checked-in `config.json` is a current sample runtime config, not necessarily the same as the code defaults. `TRADING_MODE` now comes from `.env` instead of `config.json`; older `trading.mode` values are only used as a fallback during migration.
+Note: the checked-in `config.json` is a current sample runtime config, not necessarily the same as the code defaults. `TRADING_MODE` in `.env` overrides `trading.mode` in `config.json`.
 
 ## Data Sources
 

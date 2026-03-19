@@ -115,33 +115,12 @@ fn default_momentum_lookback_ms() -> i64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct EdgeConfigFile {
     pub edge_threshold_early: f64,
-    #[serde(default = "default_edge_threshold_mid")]
-    pub edge_threshold_mid: f64,
-    #[serde(default = "default_edge_threshold_late")]
-    pub edge_threshold_late: f64,
-    #[serde(default = "default_min_prob")]
-    pub min_prob_early: f64,
-    #[serde(default = "default_min_prob")]
-    pub min_prob_mid: f64,
-    #[serde(default = "default_min_prob")]
-    pub min_prob_late: f64,
-}
-
-fn default_edge_threshold_mid() -> f64 {
-    0.15
-}
-fn default_edge_threshold_late() -> f64 {
-    0.20
-}
-fn default_min_prob() -> f64 {
-    0.50
 }
 
 // ─── Risk ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RiskConfig {
-    pub max_daily_loss_usdc: f64,
     pub max_consecutive_losses: u32,
     #[serde(default = "default_max_daily_loss_pct")]
     pub max_daily_loss_pct: f64,
@@ -215,11 +194,6 @@ impl Default for EdgeConfigFile {
     fn default() -> Self {
         Self {
             edge_threshold_early: 0.15,
-            edge_threshold_mid: 0.15,
-            edge_threshold_late: 0.20,
-            min_prob_early: 0.50,
-            min_prob_mid: 0.50,
-            min_prob_late: 0.50,
         }
     }
 }
@@ -227,7 +201,6 @@ impl Default for EdgeConfigFile {
 impl Default for RiskConfig {
     fn default() -> Self {
         Self {
-            max_daily_loss_usdc: 100.0,
             max_consecutive_losses: 8,
             max_daily_loss_pct: 0.10,
             cooldown_ms: 5_000,
@@ -284,9 +257,21 @@ impl Config {
     pub(crate) fn load(path: &Path) -> anyhow::Result<Self> {
         let content = fs::read_to_string(path)?;
         let mut config: Config = serde_json::from_str(&content)?;
-        // Load private key from env (not stored in config.json)
+        // Load secrets and runtime overrides from env (not stored in config.json)
         if let Ok(pk) = std::env::var("PRIVATE_KEY") {
             config.trading.private_key = SecretString::new(pk.into());
+        }
+        if let Ok(mode) = std::env::var("TRADING_MODE") {
+            match mode.to_lowercase().as_str() {
+                "live" => config.trading.mode = TradingMode::Live,
+                "paper" => config.trading.mode = TradingMode::Paper,
+                other => {
+                    anyhow::bail!(
+                        "Invalid TRADING_MODE '{}' in .env — must be 'paper' or 'live'",
+                        other
+                    );
+                }
+            }
         }
         Ok(config)
     }
@@ -344,12 +329,6 @@ impl Config {
             && self.strategy.momentum_threshold == defaults.strategy.momentum_threshold
             && self.strategy.momentum_lookback_ms == defaults.strategy.momentum_lookback_ms
             && self.edge.edge_threshold_early == defaults.edge.edge_threshold_early
-            && self.edge.edge_threshold_mid == defaults.edge.edge_threshold_mid
-            && self.edge.edge_threshold_late == defaults.edge.edge_threshold_late
-            && self.edge.min_prob_early == defaults.edge.min_prob_early
-            && self.edge.min_prob_mid == defaults.edge.min_prob_mid
-            && self.edge.min_prob_late == defaults.edge.min_prob_late
-            && self.risk.max_daily_loss_usdc == defaults.risk.max_daily_loss_usdc
             && self.risk.max_consecutive_losses == defaults.risk.max_consecutive_losses
             && self.risk.max_daily_loss_pct == defaults.risk.max_daily_loss_pct
             && self.risk.cooldown_ms == defaults.risk.cooldown_ms
