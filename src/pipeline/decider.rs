@@ -27,14 +27,8 @@ pub(crate) enum Decision {
 pub(crate) struct DeciderConfig {
     /// Minimum edge to trade (15%)
     pub edge_threshold: Decimal,
-    /// Maximum position size
-    pub max_position: Decimal,
-    /// Minimum position size
-    pub min_position: Decimal,
     /// Cooldown between trades (ms)
     pub cooldown_ms: i64,
-    /// Account balance fraction to risk per trade (Half-Kelly cap)
-    pub max_risk_fraction: Decimal,
     /// Market price threshold to consider "extreme" (e.g. 0.80)
     pub extreme_threshold: Decimal,
     /// Fair value assumption for binary outcome (e.g. 0.50)
@@ -53,10 +47,7 @@ impl Default for DeciderConfig {
     fn default() -> Self {
         Self {
             edge_threshold: decimal("0.15"),
-            max_position: decimal("50.0"),
-            min_position: decimal("5.0"),
             cooldown_ms: 5_000,
-            max_risk_fraction: decimal("0.10"),
             extreme_threshold: decimal("0.80"),
             fair_value: decimal("0.50"),
             max_consecutive_losses: 8,
@@ -77,9 +68,6 @@ struct DirectionStats {
 impl DirectionStats {
     fn new() -> Self {
         Self { wins: 0, losses: 0 }
-    }
-    fn total(&self) -> u32 {
-        self.wins + self.losses
     }
 }
 
@@ -217,16 +205,6 @@ impl AccountState {
             }
         }
     }
-
-    /// Overall win rate across all trades
-    fn overall_win_rate(&self) -> Decimal {
-        let total_wins = self.up_stats.wins + self.down_stats.wins;
-        let total = self.up_stats.total() + self.down_stats.total();
-        if total == 0 {
-            return decimal("0.50");
-        }
-        Decimal::from(total_wins) / Decimal::from(total)
-    }
 }
 
 fn btc_momentum(prices: &[(f64, i64)], lookback_ms: i64) -> Option<f64> {
@@ -323,25 +301,7 @@ pub(crate) fn decide(
         }
     }
 
-    // 6. Position sizing: Half-Kelly based on edge
-    // Kelly = edge / (1 - edge) simplified for binary outcome
-    // But we cap at max_risk_fraction
-    let two = decimal("2");
-    let win_rate = account
-        .overall_win_rate()
-        .max(decimal("0.50"))
-        .min(decimal("0.75"));
-    let kelly_fraction = (two * win_rate - Decimal::ONE).max(decimal("0.05"));
-    let half_kelly = kelly_fraction * decimal("0.5");
-
-    // Scale by edge strength: 15% edge = 1x, 30% edge = 1.5x, 45%+ = 2x
-    let edge_base = decimal("0.15");
-    let edge_excess = (edge - edge_base) / edge_base;
-    let edge_multiplier = (Decimal::ONE + edge_excess).max(Decimal::ONE).min(two);
-
-    let mut size = account.balance * half_kelly * edge_multiplier;
-    size = size.max(cfg.min_position).min(cfg.max_position);
-    size = size.min(account.balance * cfg.max_risk_fraction);
+    let size = (account.balance / decimal("100")).max(decimal("1"));
 
     Decision::Trade {
         direction,
@@ -361,10 +321,7 @@ mod tests {
     fn cfg_for_threshold_test() -> DeciderConfig {
         DeciderConfig {
             edge_threshold: d("0.15"),
-            max_position: d("50"),
-            min_position: d("5"),
             cooldown_ms: 5_000,
-            max_risk_fraction: d("0.10"),
             extreme_threshold: d("0.64"),
             fair_value: d("0.50"),
             max_consecutive_losses: 8,
@@ -434,6 +391,44 @@ mod tests {
                 assert_eq!(direction, Direction::Down);
                 assert_eq!(edge, d("0.35"));
             }
+            Decision::Pass(reason) => panic!("expected trade but got pass: {}", reason),
+        }
+    }
+
+    #[test]
+    fn test_position_size_is_one_percent_of_balance() {
+        let mut account = AccountState::new(d("500"));
+        account.last_trade_time_ms = chrono::Utc::now().timestamp_millis() - 60_000;
+        let cfg = DeciderConfig::default();
+        let decision = decide(
+            Some(d("0.85")),
+            Some(d("0.15")),
+            1_700_000_000_000,
+            &account,
+            &cfg,
+            &[],
+        );
+        match decision {
+            Decision::Trade { size_usdc, .. } => assert_eq!(size_usdc, d("5")),
+            Decision::Pass(reason) => panic!("expected trade but got pass: {}", reason),
+        }
+    }
+
+    #[test]
+    fn test_position_size_floor_at_one_usdc() {
+        let mut account = AccountState::new(d("50"));
+        account.last_trade_time_ms = chrono::Utc::now().timestamp_millis() - 60_000;
+        let cfg = DeciderConfig::default();
+        let decision = decide(
+            Some(d("0.85")),
+            Some(d("0.15")),
+            1_700_000_000_000,
+            &account,
+            &cfg,
+            &[],
+        );
+        match decision {
+            Decision::Trade { size_usdc, .. } => assert_eq!(size_usdc, d("1")),
             Decision::Pass(reason) => panic!("expected trade but got pass: {}", reason),
         }
     }

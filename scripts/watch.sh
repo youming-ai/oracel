@@ -1,9 +1,11 @@
 #!/bin/bash
-# Usage: scripts/watch.sh [logfile] [refresh_seconds]
+# Usage: scripts/watch.sh [mode] [refresh_seconds]
+#   mode: paper (default) or live
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-LOG="${1:-${ROOT}/logs/bot.log}"
+MODE="${1:-paper}"
+LOG="${ROOT}/logs/${MODE}/bot.log"
 SEC="${2:-3}"
 
 G=$'\033[32m'; R=$'\033[31m'; Y=$'\033[33m'; C=$'\033[36m'
@@ -20,7 +22,7 @@ while true; do
     STATUS=$(grep '\[STATUS\]' "$LOG" 2>/dev/null | tail -1)
     MKT=$(grep '\[MKT\].*found\|cid=' "$LOG" 2>/dev/null | tail -1)
     TRADE=$(grep '\[TRADE\]' "$LOG" 2>/dev/null | tail -1)
-    BALANCE=$(cat "${ROOT}/logs/balance" 2>/dev/null || echo "?")
+    BALANCE=$(cat "${ROOT}/logs/${MODE}/balance" 2>/dev/null || echo "?")
 
     MODE=$(grep '\[INIT\] mode=' "$LOG" 2>/dev/null | tail -1 | sed -n 's/.*mode=\([a-z]*\).*/\1/p')
     MODE=${MODE:-paper}
