@@ -40,7 +40,7 @@ use data::market_discovery::{
 use data::polymarket::{AuthenticatedPolyClient, CtfRedeemer, PolymarketClient};
 
 use pipeline::decider::{self, AccountState, DeciderConfig};
-use pipeline::executor::Executor;
+use pipeline::executor::{ExecuteContext, Executor};
 use pipeline::price_source::PriceSource;
 use pipeline::settler::{PendingPosition, Settler};
 use pipeline::signal;
@@ -347,7 +347,7 @@ impl Bot {
             let settle = *self.active_settlement_ms.read().await;
 
             if token_yes.is_empty() || token_no.is_empty() {
-                if closes.len() % 30 == 0 {
+                if closes.len().is_multiple_of(30) {
                     tracing::debug!(
                         "[DEBUG] Waiting for market tokens | buffer={}",
                         closes.len()
@@ -471,15 +471,15 @@ impl Bot {
 
                 if let Some(order) = self
                     .executor
-                    .execute(
-                        &decision,
-                        &token_yes,
-                        &token_no,
-                        poly_yes_dec,
-                        poly_no_dec,
-                        settlement_ms,
+                    .execute(&ExecuteContext {
+                        decision: &decision,
+                        token_yes: &token_yes,
+                        token_no: &token_no,
+                        poly_yes: poly_yes_dec,
+                        poly_no: poly_no_dec,
+                        settlement_time_ms: settlement_ms,
                         btc_price,
-                    )
+                    })
                     .await
                 {
                     // Update account
@@ -782,10 +782,8 @@ async fn main() -> Result<()> {
     }
 
     // Validate credentials for live mode
-    if config.trading.mode == "live" {
-        if config.trading.private_key.expose_secret().is_empty() {
-            anyhow::bail!("PRIVATE_KEY not set in .env — required for live trading");
-        }
+    if config.trading.mode == "live" && config.trading.private_key.expose_secret().is_empty() {
+        anyhow::bail!("PRIVATE_KEY not set in .env — required for live trading");
     }
 
     let mut bot = Bot::new(config).await?;

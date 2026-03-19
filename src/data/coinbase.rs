@@ -68,7 +68,7 @@ impl CoinbaseClient {
             "channel": "ticker"
         });
         write
-            .send(Message::Text(subscribe_msg.to_string().into()))
+            .send(Message::Text(subscribe_msg.to_string()))
             .await
             .context("Failed to subscribe")?;
 

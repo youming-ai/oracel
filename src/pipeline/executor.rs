@@ -25,22 +25,23 @@ pub(crate) struct Executor {
     auth_client: Option<AuthenticatedPolyClient>,
 }
 
+pub(crate) struct ExecuteContext<'a> {
+    pub decision: &'a Decision,
+    pub token_yes: &'a str,
+    pub token_no: &'a str,
+    pub poly_yes: Option<Decimal>,
+    pub poly_no: Option<Decimal>,
+    pub settlement_time_ms: i64,
+    pub btc_price: f64,
+}
+
 impl Executor {
     pub(crate) fn new(mode: String, auth_client: Option<AuthenticatedPolyClient>) -> Self {
         Self { mode, auth_client }
     }
 
-    pub(crate) async fn execute(
-        &self,
-        decision: &Decision,
-        token_yes: &str,
-        token_no: &str,
-        poly_yes: Option<Decimal>,
-        poly_no: Option<Decimal>,
-        settlement_time_ms: i64,
-        btc_price: f64,
-    ) -> Option<OrderResult> {
-        match decision {
+    pub(crate) async fn execute(&self, ctx: &ExecuteContext<'_>) -> Option<OrderResult> {
+        match ctx.decision {
             Decision::Pass(_) => None,
             Decision::Trade {
                 direction,
@@ -48,8 +49,8 @@ impl Executor {
                 edge: _,
             } => {
                 let (token_id, price) = match direction {
-                    Direction::Up => (token_yes, poly_yes.unwrap_or(Decimal::new(5, 1))),
-                    Direction::Down => (token_no, poly_no.unwrap_or(Decimal::new(5, 1))),
+                    Direction::Up => (ctx.token_yes, ctx.poly_yes.unwrap_or(Decimal::new(5, 1))),
+                    Direction::Down => (ctx.token_no, ctx.poly_no.unwrap_or(Decimal::new(5, 1))),
                 };
 
                 if price <= Decimal::new(1, 2) || price >= Decimal::new(99, 2) {
@@ -90,8 +91,8 @@ impl Executor {
                     entry_price: price,
                     filled_shares,
                     cost,
-                    settlement_time_ms,
-                    entry_btc_price: btc_price,
+                    settlement_time_ms: ctx.settlement_time_ms,
+                    entry_btc_price: ctx.btc_price,
                 })
             }
         }
@@ -141,15 +142,15 @@ mod tests {
         };
 
         let result = executor
-            .execute(
-                &decision,
-                "yes",
-                "no",
-                Some(d("0.201")),
-                Some(d("0.799")),
-                123,
-                70000.0,
-            )
+            .execute(&ExecuteContext {
+                decision: &decision,
+                token_yes: "yes",
+                token_no: "no",
+                poly_yes: Some(d("0.201")),
+                poly_no: Some(d("0.799")),
+                settlement_time_ms: 123,
+                btc_price: 70000.0,
+            })
             .await
             .expect("expected paper order");
 

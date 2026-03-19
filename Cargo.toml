@@ -1,6 +1,6 @@
 [package]
 name = "polymarket-5m-bot"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Automated trading bot for Polymarket BTC 5m markets - Chainlink oracle strategy"
 license = "MIT"
@@ -20,11 +20,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1"
-thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 futures-util = "0.3"
 rust_decimal = { version = "1", features = ["serde"] }
-rand = "0.8"
 polymarket-client-sdk = { version = "0.4", features = ["clob", "ctf"] }
 alloy = { version = "1.6", default-features = false, features = ["signer-local", "signers", "contract", "providers", "provider-http", "transports", "transport-http"] }
 secrecy = "0.10"

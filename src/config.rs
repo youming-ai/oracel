@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Config {
+    #[serde(default)]
     pub trading: TradingConfig,
     pub market: MarketConfig,
     pub polyclob: PolymarketConfig,
@@ -20,10 +21,15 @@ pub(crate) struct Config {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct TradingConfig {
+    #[serde(default = "default_trading_mode")]
     pub mode: String,
     /// Loaded from PRIVATE_KEY env var (not stored in config.json)
     #[serde(skip, default = "default_private_key")]
     pub private_key: SecretString,
+}
+
+fn default_trading_mode() -> String {
+    "paper".to_string()
 }
 
 fn default_private_key() -> SecretString {
@@ -140,20 +146,6 @@ pub(crate) struct PollingConfig {
 }
 
 // ─── Defaults ───
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            trading: TradingConfig::default(),
-            market: MarketConfig::default(),
-            polyclob: PolymarketConfig::default(),
-            strategy: StrategyConfig::default(),
-            edge: EdgeConfigFile::default(),
-            risk: RiskConfig::default(),
-            polling: PollingConfig::default(),
-        }
-    }
-}
 
 impl Default for TradingConfig {
     fn default() -> Self {
@@ -374,8 +366,10 @@ mod tests {
 
     #[test]
     fn test_resolve_series_id() {
-        let mut cfg = MarketConfig::default();
-        cfg.event_url = "https://polymarket.com/event/btc-updown-5m-1773364500".to_string();
+        let cfg = MarketConfig {
+            event_url: "https://polymarket.com/event/btc-updown-5m-1773364500".to_string(),
+            ..Default::default()
+        };
         assert_eq!(cfg.resolve_series_id(), "btc-updown-5m");
     }
 
