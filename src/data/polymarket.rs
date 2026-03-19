@@ -37,6 +37,13 @@ alloy::sol! {
     }
 }
 
+alloy::sol! {
+    #[sol(rpc)]
+    interface IERC20 {
+        function balanceOf(address account) external view returns (uint256);
+    }
+}
+
 /// Unauthenticated client for price queries.
 pub(crate) struct PolymarketClient {
     unauth: clob::Client,
@@ -313,4 +320,31 @@ impl CtfRedeemer {
 
         Ok(format!("{:#x}", resp.transaction_hash))
     }
+}
+
+pub(crate) async fn query_usdc_balance(
+    rpc_url: &str,
+    wallet: alloy::primitives::Address,
+) -> anyhow::Result<rust_decimal::Decimal> {
+    use rust_decimal::Decimal;
+
+    let provider = tokio::time::timeout(
+        Duration::from_secs(15),
+        alloy::providers::ProviderBuilder::new().connect(rpc_url),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("RPC connect timed out querying USDC balance"))?
+    .context("RPC connect failed")?;
+
+    let usdc = IERC20::new(POLYGON_USDC, &provider);
+    let raw = usdc
+        .balanceOf(wallet)
+        .call()
+        .await
+        .map_err(|e| anyhow::anyhow!("USDC balanceOf failed: {}", e))?;
+
+    let raw_u128: u128 = raw
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("USDC balance too large for u128"))?;
+    Ok(Decimal::from(raw_u128) / Decimal::from(1_000_000u64))
 }
