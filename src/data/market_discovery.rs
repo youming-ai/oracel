@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::pipeline::signal::Direction;
 
 const WINDOW_SECS: i64 = 300;
+pub(crate) const SERIES_ID: &str = "btc-updown-5m";
 
 // ─── Gamma API Types ───
 
@@ -61,14 +62,12 @@ pub(crate) struct ActiveMarket {
 
 #[derive(Debug, Clone)]
 pub(crate) struct DiscoveryConfig {
-    pub series_id: String,
     pub gamma_api_url: String,
 }
 
 impl Default for DiscoveryConfig {
     fn default() -> Self {
         Self {
-            series_id: String::new(),
             gamma_api_url: "https://gamma-api.polymarket.com".to_string(),
         }
     }
@@ -111,7 +110,7 @@ impl MarketDiscovery {
         // Search nearby windows (current + next few)
         for offset in 0..5 {
             let ts = window_ts + offset * WINDOW_SECS;
-            let slug = Self::generate_slug(&self.config.series_id, ts);
+            let slug = Self::generate_slug(SERIES_ID, ts);
 
             let url = format!("{}/events?slug={}&limit=1", base, slug);
 
@@ -157,10 +156,7 @@ impl MarketDiscovery {
             }
         }
 
-        anyhow::bail!(
-            "No active market found for series: {}",
-            self.config.series_id
-        )
+        anyhow::bail!("No active market found for series: {}", SERIES_ID)
     }
 
     pub(crate) async fn fetch_market_by_slug(&self, slug: &str) -> Result<GammaMarket> {

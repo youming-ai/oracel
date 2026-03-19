@@ -69,9 +69,8 @@ logs/                       # Generated at runtime
 # 1. Build
 cargo build --release
 
-# 2. Review or edit config
-#    The first run creates config.json automatically,
-#    but you still need market.event_url or market.series_id before the bot can start
+# 2. Create config
+cp config.example.json config.json
 
 # 3. Run in paper mode
 cargo run --release
@@ -125,12 +124,10 @@ The program reads `.env` from the repository root at startup.
 
 ## Configuration
 
-See `config.json` for the current sample config and `src/config.rs` for the full code defaults.
+The market series (`btc-updown-5m`) is hardcoded. See `config.example.json` for a sample config and `src/config.rs` for the full code defaults.
 
 | Field | Default | Description |
 | --- | --- | --- |
-| `market.event_url` | `""` | Polymarket event URL used to derive `series_id` automatically |
-| `market.series_id` | `""` | Event series ID; if `event_url` is set, the URL-derived value wins |
 | `market.window_minutes` | `5.0` | Market window length |
 | `polyclob.gamma_api_url` | `https://gamma-api.polymarket.com` | Gamma API base URL |
 | `strategy.max_position_size` | `50.0` | Maximum position size per trade (USDC) |

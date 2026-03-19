@@ -6,8 +6,8 @@
     "gamma_api_url": "https://gamma-api.polymarket.com"
   },
   "strategy": {
-    "max_position_size": 10.0,
-    "min_order_size": 1.0,
+    "max_position_size": 50.0,
+    "min_order_size": 5.0,
     "extreme_threshold": 0.80,
     "fair_value": 0.50,
     "btc_tiebreaker_usd": 5.0,
@@ -18,8 +18,8 @@
     "edge_threshold_early": 0.15
   },
   "risk": {
-    "max_daily_loss_pct": 0.25,
     "max_consecutive_losses": 8,
+    "max_daily_loss_pct": 0.10,
     "cooldown_ms": 5000,
     "max_risk_fraction": 0.10
   },

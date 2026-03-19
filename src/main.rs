@@ -101,13 +101,7 @@ impl Bot {
         let price_source = Arc::new(PriceSource::new(coinbase, PRICE_BUFFER_MAX));
         let polymarket = Arc::new(PolymarketClient::new()?);
 
-        let resolved_series_id = config.market.resolve_series_id();
-        if resolved_series_id.is_empty() {
-            anyhow::bail!("series_id is empty. Set market.event_url in config.json");
-        }
-
         let discovery_cfg = DiscoveryConfig {
-            series_id: resolved_series_id,
             gamma_api_url: config.polyclob.gamma_api_url.clone(),
         };
         let discovery = Arc::new(MarketDiscovery::new(discovery_cfg));
@@ -639,7 +633,8 @@ impl Bot {
                             }
                         }
                     }
-                    (results, None)
+                    let btc_price = price_source.latest().await.unwrap_or(0.0);
+                    (results, Some(btc_price))
                 };
 
                 if !results.is_empty() {
@@ -852,11 +847,6 @@ async fn redeem_all() -> Result<()> {
     let rpc = data::chainlink::rpc_url(mode);
     let redeemer = data::polymarket::CtfRedeemer::new(private_key, rpc);
 
-    let series_id = config.market.resolve_series_id();
-    if series_id.is_empty() {
-        anyhow::bail!("series_id is empty. Set market.event_url in config.json");
-    }
-
     let gamma_url = &config.polyclob.gamma_api_url;
     let http = reqwest::Client::new();
 
@@ -867,7 +857,7 @@ async fn redeem_all() -> Result<()> {
 
     for i in 0..WINDOWS_PER_DAY {
         let ts = base_ts - i * WINDOW_SECS;
-        let slug = format!("{}-{}", series_id, ts);
+        let slug = format!("{}-{}", data::market_discovery::SERIES_ID, ts);
         let url = format!("{}/events?slug={}&limit=1", gamma_url, slug);
 
         let resp = match http.get(&url).send().await {

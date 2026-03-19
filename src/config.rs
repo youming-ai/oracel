@@ -63,9 +63,6 @@ fn default_private_key() -> SecretString {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MarketConfig {
-    #[serde(default)]
-    pub event_url: String,
-    pub series_id: String,
     pub window_minutes: f64,
 }
 
@@ -161,8 +158,6 @@ impl Default for TradingConfig {
 impl Default for MarketConfig {
     fn default() -> Self {
         Self {
-            event_url: String::new(),
-            series_id: String::new(),
             window_minutes: 5.0,
         }
     }
@@ -214,42 +209,6 @@ impl Default for PollingConfig {
         Self {
             signal_interval_ms: 1000,
         }
-    }
-}
-
-// ─── Market helpers ───
-
-impl MarketConfig {
-    pub(crate) fn extract_event_slug(url: &str) -> Option<String> {
-        url.trim_end_matches('/')
-            .rsplit('/')
-            .next()
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-    }
-
-    pub(crate) fn extract_series_from_slug(slug: &str) -> Option<String> {
-        let parts: Vec<&str> = slug.split('-').collect();
-        if parts.len() < 2 {
-            return Some(slug.to_string());
-        }
-        let last = parts.last().unwrap();
-        if last.chars().all(|c| c.is_ascii_digit()) && last.len() >= 8 {
-            Some(parts[..parts.len() - 1].join("-"))
-        } else {
-            Some(slug.to_string())
-        }
-    }
-
-    pub(crate) fn resolve_series_id(&self) -> String {
-        if !self.event_url.is_empty() {
-            if let Some(slug) = Self::extract_event_slug(&self.event_url) {
-                if let Some(series) = Self::extract_series_from_slug(&slug) {
-                    return series;
-                }
-            }
-        }
-        self.series_id.clone()
     }
 }
 
@@ -317,9 +276,7 @@ impl Config {
     pub(crate) fn is_default_non_trading(&self) -> bool {
         let defaults = Config::default();
 
-        self.market.event_url == defaults.market.event_url
-            && self.market.series_id == defaults.market.series_id
-            && self.market.window_minutes == defaults.market.window_minutes
+        self.market.window_minutes == defaults.market.window_minutes
             && self.polyclob.gamma_api_url == defaults.polyclob.gamma_api_url
             && self.strategy.max_position_size == defaults.strategy.max_position_size
             && self.strategy.min_order_size == defaults.strategy.min_order_size
@@ -342,38 +299,6 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_extract_event_slug() {
-        assert_eq!(
-            MarketConfig::extract_event_slug(
-                "https://polymarket.com/event/btc-updown-5m-1773364500"
-            ),
-            Some("btc-updown-5m-1773364500".to_string())
-        );
-        assert_eq!(MarketConfig::extract_event_slug(""), None);
-    }
-
-    #[test]
-    fn test_extract_series_from_slug() {
-        assert_eq!(
-            MarketConfig::extract_series_from_slug("btc-updown-5m-1773364500"),
-            Some("btc-updown-5m".to_string())
-        );
-        assert_eq!(
-            MarketConfig::extract_series_from_slug("btc-updown-5m"),
-            Some("btc-updown-5m".to_string())
-        );
-    }
-
-    #[test]
-    fn test_resolve_series_id() {
-        let cfg = MarketConfig {
-            event_url: "https://polymarket.com/event/btc-updown-5m-1773364500".to_string(),
-            ..Default::default()
-        };
-        assert_eq!(cfg.resolve_series_id(), "btc-updown-5m");
-    }
 
     #[test]
     fn test_validate_rejects_zero_interval() {
