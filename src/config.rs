@@ -1,12 +1,12 @@
 //! Bot configuration
 
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    #[serde(default)]
     pub trading: TradingConfig,
     pub market: MarketConfig,
     pub polyclob: PolymarketConfig,
@@ -20,11 +20,14 @@ pub struct Config {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradingConfig {
-    #[serde(default = "default_trading_mode", skip_serializing)]
     pub mode: String,
     /// Loaded from PRIVATE_KEY env var (not stored in config.json)
-    #[serde(skip)]
-    pub private_key: String,
+    #[serde(skip, default = "default_private_key")]
+    pub private_key: SecretString,
+}
+
+fn default_private_key() -> SecretString {
+    SecretString::new(String::new().into())
 }
 
 // ─── Market ───
@@ -64,9 +67,6 @@ pub struct StrategyConfig {
 
 fn default_extreme_threshold() -> f64 {
     0.80
-}
-fn default_trading_mode() -> String {
-    "paper".to_string()
 }
 fn default_fair_value() -> f64 {
     0.50
@@ -158,8 +158,8 @@ impl Default for Config {
 impl Default for TradingConfig {
     fn default() -> Self {
         Self {
-            mode: default_trading_mode(),
-            private_key: String::new(),
+            mode: "paper".to_string(),
+            private_key: default_private_key(),
         }
     }
 }
@@ -269,16 +269,9 @@ impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let content = fs::read_to_string(path)?;
         let mut config: Config = serde_json::from_str(&content)?;
-        if let Some(mode) = std::env::var("TRADING_MODE")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-        {
-            config.trading.mode = mode;
-        }
         // Load private key from env (not stored in config.json)
         if let Ok(pk) = std::env::var("PRIVATE_KEY") {
-            config.trading.private_key = pk;
+            config.trading.private_key = SecretString::new(pk.into());
         }
         Ok(config)
     }
@@ -288,6 +281,66 @@ impl Config {
         fs::write(path, content)?;
         Ok(())
     }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.polling.signal_interval_ms == 0 {
+            anyhow::bail!("polling.signal_interval_ms must be > 0");
+        }
+        if self.strategy.max_position_size <= 0.0 {
+            anyhow::bail!("strategy.max_position_size must be > 0");
+        }
+        if self.strategy.min_order_size <= 0.0 {
+            anyhow::bail!("strategy.min_order_size must be > 0");
+        }
+        if self.strategy.min_order_size > self.strategy.max_position_size {
+            anyhow::bail!("strategy.min_order_size must be <= strategy.max_position_size");
+        }
+        if !(0.0 < self.strategy.extreme_threshold && self.strategy.extreme_threshold < 1.0) {
+            anyhow::bail!("strategy.extreme_threshold must be in (0, 1)");
+        }
+        if !(0.0 < self.strategy.fair_value && self.strategy.fair_value < 1.0) {
+            anyhow::bail!("strategy.fair_value must be in (0, 1)");
+        }
+        if !(0.0 < self.risk.max_risk_fraction && self.risk.max_risk_fraction <= 1.0) {
+            anyhow::bail!("risk.max_risk_fraction must be in (0, 1]");
+        }
+        if !(0.0 < self.risk.max_daily_loss_pct && self.risk.max_daily_loss_pct <= 1.0) {
+            anyhow::bail!("risk.max_daily_loss_pct must be in (0, 1]");
+        }
+        if self.market.window_minutes <= 0.0 {
+            anyhow::bail!("market.window_minutes must be > 0");
+        }
+
+        Ok(())
+    }
+
+    pub fn is_default_non_trading(&self) -> bool {
+        let defaults = Config::default();
+
+        self.market.event_url == defaults.market.event_url
+            && self.market.series_id == defaults.market.series_id
+            && self.market.window_minutes == defaults.market.window_minutes
+            && self.polyclob.gamma_api_url == defaults.polyclob.gamma_api_url
+            && self.strategy.max_position_size == defaults.strategy.max_position_size
+            && self.strategy.min_order_size == defaults.strategy.min_order_size
+            && self.strategy.extreme_threshold == defaults.strategy.extreme_threshold
+            && self.strategy.fair_value == defaults.strategy.fair_value
+            && self.strategy.btc_tiebreaker_usd == defaults.strategy.btc_tiebreaker_usd
+            && self.strategy.momentum_threshold == defaults.strategy.momentum_threshold
+            && self.strategy.momentum_lookback_ms == defaults.strategy.momentum_lookback_ms
+            && self.edge.edge_threshold_early == defaults.edge.edge_threshold_early
+            && self.edge.edge_threshold_mid == defaults.edge.edge_threshold_mid
+            && self.edge.edge_threshold_late == defaults.edge.edge_threshold_late
+            && self.edge.min_prob_early == defaults.edge.min_prob_early
+            && self.edge.min_prob_mid == defaults.edge.min_prob_mid
+            && self.edge.min_prob_late == defaults.edge.min_prob_late
+            && self.risk.max_daily_loss_usdc == defaults.risk.max_daily_loss_usdc
+            && self.risk.max_consecutive_losses == defaults.risk.max_consecutive_losses
+            && self.risk.max_daily_loss_pct == defaults.risk.max_daily_loss_pct
+            && self.risk.cooldown_ms == defaults.risk.cooldown_ms
+            && self.risk.max_risk_fraction == defaults.risk.max_risk_fraction
+            && self.polling.signal_interval_ms == defaults.polling.signal_interval_ms
+    }
 }
 
 // ─── Tests ───
@@ -295,111 +348,6 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
-    use std::sync::{Mutex, OnceLock};
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
-    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
-        env_lock().lock().unwrap_or_else(|err| err.into_inner())
-    }
-
-    fn write_test_config(path: &Path) {
-        let content = r#"{
-  "trading": {},
-  "market": {
-    "event_url": "",
-    "series_id": "btc-updown-5m",
-    "window_minutes": 5.0
-  },
-  "polyclob": {
-    "gamma_api_url": "https://gamma-api.polymarket.com"
-  },
-  "strategy": {
-    "max_position_size": 5.0,
-    "min_order_size": 1.0
-  },
-  "edge": {
-    "edge_threshold_early": 0.15
-  },
-  "risk": {
-    "max_daily_loss_usdc": 10.0,
-    "max_consecutive_losses": 5
-  },
-  "polling": {
-    "signal_interval_ms": 1000
-  }
-}"#;
-        fs::write(path, content).expect("write config fixture");
-    }
-
-    fn write_test_config_without_trading(path: &Path) {
-        let content = r#"{
-  "market": {
-    "event_url": "",
-    "series_id": "btc-updown-5m",
-    "window_minutes": 5.0
-  },
-  "polyclob": {
-    "gamma_api_url": "https://gamma-api.polymarket.com"
-  },
-  "strategy": {
-    "max_position_size": 5.0,
-    "min_order_size": 1.0
-  },
-  "edge": {
-    "edge_threshold_early": 0.15
-  },
-  "risk": {
-    "max_daily_loss_usdc": 10.0,
-    "max_consecutive_losses": 5
-  },
-  "polling": {
-    "signal_interval_ms": 1000
-  }
-}"#;
-        fs::write(path, content).expect("write config fixture without trading");
-    }
-
-    fn write_test_config_with_live_mode(path: &Path) {
-        let content = r#"{
-  "trading": {
-    "mode": "live"
-  },
-  "market": {
-    "event_url": "",
-    "series_id": "btc-updown-5m",
-    "window_minutes": 5.0
-  },
-  "polyclob": {
-    "gamma_api_url": "https://gamma-api.polymarket.com"
-  },
-  "strategy": {
-    "max_position_size": 5.0,
-    "min_order_size": 1.0
-  },
-  "edge": {
-    "edge_threshold_early": 0.15
-  },
-  "risk": {
-    "max_daily_loss_usdc": 10.0,
-    "max_consecutive_losses": 5
-  },
-  "polling": {
-    "signal_interval_ms": 1000
-  }
-}"#;
-        fs::write(path, content).expect("write config fixture with live mode");
-    }
-
-    fn test_config_path(test_name: &str) -> std::path::PathBuf {
-        let mut path = std::env::temp_dir();
-        path.push(format!("oracel-{test_name}-{}.json", std::process::id()));
-        path
-    }
 
     #[test]
     fn test_extract_event_slug() {
@@ -432,75 +380,26 @@ mod tests {
     }
 
     #[test]
-    fn test_load_reads_trading_mode_from_env() {
-        let _guard = lock_env();
-        let path = test_config_path("trading-mode-env");
-        write_test_config(&path);
-        env::set_var("TRADING_MODE", "live");
+    fn test_validate_rejects_zero_interval() {
+        let mut cfg = Config::default();
+        cfg.polling.signal_interval_ms = 0;
 
-        let config = Config::load(&path).expect("load config");
-
-        assert_eq!(config.trading.mode, "live");
-
-        env::remove_var("TRADING_MODE");
-        fs::remove_file(path).expect("remove config fixture");
+        assert!(cfg.validate().is_err());
     }
 
     #[test]
-    fn test_load_defaults_trading_mode_to_paper() {
-        let _guard = lock_env();
-        let path = test_config_path("trading-mode-default");
-        write_test_config(&path);
-        env::remove_var("TRADING_MODE");
+    fn test_validate_rejects_min_greater_than_max() {
+        let mut cfg = Config::default();
+        cfg.strategy.min_order_size = 20.0;
+        cfg.strategy.max_position_size = 10.0;
 
-        let config = Config::load(&path).expect("load config");
-
-        assert_eq!(config.trading.mode, "paper");
-
-        fs::remove_file(path).expect("remove config fixture");
+        assert!(cfg.validate().is_err());
     }
 
     #[test]
-    fn test_load_defaults_trading_when_section_missing() {
-        let _guard = lock_env();
-        let path = test_config_path("trading-missing-section");
-        write_test_config_without_trading(&path);
-        env::remove_var("TRADING_MODE");
+    fn test_validate_accepts_defaults() {
+        let cfg = Config::default();
 
-        let config = Config::load(&path).expect("load config");
-
-        assert_eq!(config.trading.mode, "paper");
-        assert_eq!(config.trading.private_key, "");
-
-        fs::remove_file(path).expect("remove config fixture");
-    }
-
-    #[test]
-    fn test_load_uses_legacy_trading_mode_when_env_unset() {
-        let _guard = lock_env();
-        let path = test_config_path("trading-legacy-live");
-        write_test_config_with_live_mode(&path);
-        env::remove_var("TRADING_MODE");
-
-        let config = Config::load(&path).expect("load config");
-
-        assert_eq!(config.trading.mode, "live");
-
-        fs::remove_file(path).expect("remove config fixture");
-    }
-
-    #[test]
-    fn test_load_ignores_empty_trading_mode_env() {
-        let _guard = lock_env();
-        let path = test_config_path("trading-empty-env");
-        write_test_config_with_live_mode(&path);
-        env::set_var("TRADING_MODE", "   ");
-
-        let config = Config::load(&path).expect("load config");
-
-        assert_eq!(config.trading.mode, "live");
-
-        env::remove_var("TRADING_MODE");
-        fs::remove_file(path).expect("remove config fixture");
+        assert!(cfg.validate().is_ok());
     }
 }

@@ -4,6 +4,7 @@
 //! Live mode: Alchemy (via ALCHEMY_KEY env var)
 
 use anyhow::{Context, Result};
+use std::time::Duration;
 
 const PUBLIC_RPC: &str = "https://polygon-bor-rpc.publicnode.com";
 const ALCHEMY_RPC: &str = "https://polygon-mainnet.g.alchemy.com/v2";
@@ -29,11 +30,13 @@ pub async fn fetch_btc_price(client: &reqwest::Client, rpc: &str) -> Result<f64>
         "id": 1
     });
 
-    let resp: serde_json::Value = client
+    let request = client
         .post(rpc)
-        .json(&payload)
-        .send()
+        .json(&payload);
+
+    let resp: serde_json::Value = tokio::time::timeout(Duration::from_secs(10), request.send())
         .await
+        .map_err(|_| anyhow::anyhow!("Chainlink RPC timed out after 10s"))?
         .context("Chainlink RPC failed")?
         .json()
         .await?;
