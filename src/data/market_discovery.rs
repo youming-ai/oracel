@@ -54,11 +54,7 @@ pub(crate) struct ActiveMarket {
     pub token_id_yes: String,
     pub token_id_no: String,
     pub condition_id: String,
-    #[allow(dead_code)]
-    pub price_to_beat: Option<f64>,
     pub end_date: DateTime<Utc>,
-    #[allow(dead_code)]
-    pub fetched_at: DateTime<Utc>,
 }
 
 // ─── Discovery Config ───
@@ -67,10 +63,6 @@ pub(crate) struct ActiveMarket {
 pub(crate) struct DiscoveryConfig {
     pub series_id: String,
     pub gamma_api_url: String,
-    #[allow(dead_code)]
-    pub refresh_interval_sec: u64,
-    #[allow(dead_code)]
-    pub window_minutes: f64,
 }
 
 impl Default for DiscoveryConfig {
@@ -78,8 +70,6 @@ impl Default for DiscoveryConfig {
         Self {
             series_id: String::new(),
             gamma_api_url: "https://gamma-api.polymarket.com".to_string(),
-            refresh_interval_sec: 60,
-            window_minutes: 5.0,
         }
     }
 }
@@ -204,20 +194,12 @@ impl MarketDiscovery {
         let condition_id = market.condition_id.clone().unwrap_or_default();
         let end_date = parse_datetime(&market.end_date).context("Failed to parse end_date")?;
 
-        let price_to_beat = market
-            .question
-            .as_ref()
-            .or(market.title.as_ref())
-            .and_then(|q| extract_price_to_beat(q));
-
         Ok(ActiveMarket {
             market: market.clone(),
             token_id_yes,
             token_id_no,
             condition_id,
-            price_to_beat,
             end_date,
-            fetched_at: Utc::now(),
         })
     }
 }
@@ -246,25 +228,6 @@ fn parse_datetime(s: &str) -> Option<DateTime<Utc>> {
                 .ok()
                 .map(|nd| nd.and_utc())
         })
-}
-
-fn extract_price_to_beat(text: &str) -> Option<f64> {
-    for (i, _) in text.match_indices('$') {
-        let after = text[i + 1..].trim_start();
-        let num_str: String = after
-            .chars()
-            .take_while(|c| c.is_ascii_digit() || *c == ',' || *c == '.')
-            .collect();
-        if !num_str.is_empty() {
-            let cleaned = num_str.replace(',', "");
-            if let Ok(price) = cleaned.parse::<f64>() {
-                if price > 0.0 {
-                    return Some(price);
-                }
-            }
-        }
-    }
-    None
 }
 
 fn parse_json_string_array(value: &Option<String>) -> Option<Vec<String>> {

@@ -2745,21 +2745,19 @@ dependencies = [
 
 [[package]]
 name = "polymarket-5m-bot"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "alloy",
  "anyhow",
  "chrono",
  "futures-util",
  "polymarket-client-sdk",
- "rand 0.8.5",
  "reqwest 0.12.28",
  "rust_decimal",
  "rustls",
  "secrecy",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite",
  "tracing",

@@ -3,6 +3,7 @@
 //! Paper mode: free public RPC
 //! Live mode: Alchemy (via ALCHEMY_KEY env var)
 
+use crate::config::TradingMode;
 use anyhow::{Context, Result};
 use std::time::Duration;
 
@@ -12,8 +13,8 @@ const CHAINLINK_BTC_USD: &str = "0xc907E116054Ad103354f2D350FD2514433D57F6f";
 const LATEST_ROUND_DATA: &str = "0xfeaf968c";
 
 /// Pick RPC based on mode: live uses Alchemy (ALCHEMY_KEY env), paper uses public.
-pub(crate) fn rpc_url(mode: &str) -> String {
-    if mode == "live" {
+pub(crate) fn rpc_url(mode: TradingMode) -> String {
+    if mode.is_live() {
         if let Ok(key) = std::env::var("ALCHEMY_KEY") {
             return format!("{}/{}", ALCHEMY_RPC, key);
         }

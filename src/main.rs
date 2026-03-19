@@ -8,7 +8,7 @@ mod pipeline;
 
 use anyhow::Result;
 use chrono::Utc;
-use config::Config;
+use config::{Config, TradingMode};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use secrecy::{ExposeSecret, SecretString};
@@ -40,7 +40,7 @@ use data::market_discovery::{
 use data::polymarket::{AuthenticatedPolyClient, CtfRedeemer, PolymarketClient};
 
 use pipeline::decider::{self, AccountState, DeciderConfig};
-use pipeline::executor::Executor;
+use pipeline::executor::{ExecuteContext, Executor};
 use pipeline::price_source::PriceSource;
 use pipeline::settler::{PendingPosition, Settler};
 use pipeline::signal;
@@ -64,6 +64,21 @@ impl BotState {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct MarketState {
+    token_yes: String,
+    token_no: String,
+    condition_id: String,
+    market_slug: String,
+    settlement_ms: i64,
+}
+
+impl MarketState {
+    fn is_ready(&self) -> bool {
+        !self.token_yes.is_empty() && !self.token_no.is_empty()
+    }
+}
+
 // ─── Bot ───
 
 struct Bot {
@@ -77,11 +92,7 @@ struct Bot {
     executor: Executor,
     redeemer: Option<Arc<CtfRedeemer>>,
     // Dynamic market data
-    active_token_yes: Arc<RwLock<String>>,
-    active_token_no: Arc<RwLock<String>>,
-    active_condition_id: Arc<RwLock<String>>,
-    active_market_slug: Arc<RwLock<String>>,
-    active_settlement_ms: Arc<RwLock<i64>>,
+    market_state: Arc<RwLock<MarketState>>,
 }
 
 impl Bot {
@@ -98,12 +109,10 @@ impl Bot {
         let discovery_cfg = DiscoveryConfig {
             series_id: resolved_series_id,
             gamma_api_url: config.polyclob.gamma_api_url.clone(),
-            refresh_interval_sec: 60,
-            window_minutes: config.market.window_minutes,
         };
         let discovery = Arc::new(MarketDiscovery::new(discovery_cfg));
 
-        let auth_client = if config.trading.mode != "paper"
+        let auth_client = if config.trading.mode.is_live()
             && !config.trading.private_key.expose_secret().is_empty()
         {
             match AuthenticatedPolyClient::new(config.trading.private_key.expose_secret()).await {
@@ -119,13 +128,13 @@ impl Bot {
             None
         };
 
-        let executor = Executor::new(config.trading.mode.clone(), auth_client);
+        let executor = Executor::new(config.trading.mode, auth_client);
 
         // Create CTF redeemer for live mode
-        let redeemer = if config.trading.mode != "paper"
+        let redeemer = if config.trading.mode.is_live()
             && !config.trading.private_key.expose_secret().is_empty()
         {
-            let rpc = data::chainlink::rpc_url(&config.trading.mode);
+            let rpc = data::chainlink::rpc_url(config.trading.mode);
             tracing::info!("[INIT] CTF redeemer enabled for on-chain redemption");
             Some(Arc::new(CtfRedeemer::new(
                 config.trading.private_key.expose_secret().to_owned(),
@@ -151,11 +160,7 @@ impl Bot {
             settler: Arc::new(RwLock::new(Settler::new())),
             executor,
             redeemer,
-            active_token_yes: Arc::new(RwLock::new(String::new())),
-            active_token_no: Arc::new(RwLock::new(String::new())),
-            active_condition_id: Arc::new(RwLock::new(String::new())),
-            active_market_slug: Arc::new(RwLock::new(String::new())),
-            active_settlement_ms: Arc::new(RwLock::new(0)),
+            market_state: Arc::new(RwLock::new(MarketState::default())),
         })
     }
 
@@ -247,11 +252,7 @@ impl Bot {
 
     fn start_market_refresher(&self) -> tokio::task::JoinHandle<()> {
         let discovery = self.discovery.clone();
-        let token_yes = self.active_token_yes.clone();
-        let token_no = self.active_token_no.clone();
-        let condition_id = self.active_condition_id.clone();
-        let market_slug = self.active_market_slug.clone();
-        let settle_ms = self.active_settlement_ms.clone();
+        let market_state = self.market_state.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(60));
@@ -259,14 +260,16 @@ impl Bot {
                 interval.tick().await;
                 match discovery.discover().await {
                     Ok(active) => {
-                        let current_yes = token_yes.read().await.clone();
+                        let current_yes = market_state.read().await.token_yes.clone();
                         if current_yes != active.token_id_yes {
                             tracing::info!("[MKT] {} ends {}", active.market.slug, active.end_date);
-                            *token_yes.write().await = active.token_id_yes;
-                            *token_no.write().await = active.token_id_no;
-                            *condition_id.write().await = active.condition_id;
-                            *market_slug.write().await = active.market.slug;
-                            *settle_ms.write().await = active.end_date.timestamp_millis();
+                            *market_state.write().await = MarketState {
+                                token_yes: active.token_id_yes,
+                                token_no: active.token_id_no,
+                                condition_id: active.condition_id,
+                                market_slug: active.market.slug,
+                                settlement_ms: active.end_date.timestamp_millis(),
+                            };
                         }
                     }
                     Err(e) => {
@@ -281,8 +284,8 @@ impl Bot {
         let price_source = self.price_source.clone();
         let account = self.account.clone();
         let settler = self.settler.clone();
-        let settle_ms = self.active_settlement_ms.clone();
-        let mode = self.config.trading.mode.clone();
+        let market_state = self.market_state.clone();
+        let mode = self.config.trading.mode;
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(10));
@@ -292,7 +295,7 @@ impl Bot {
                 let btc = price_source.latest().await.unwrap_or(0.0);
                 let acc = account.read().await;
                 let pending = settler.read().await.pending_count();
-                let settle = *settle_ms.read().await;
+                let settle = market_state.read().await.settlement_ms;
 
                 let ttl = if settle > 0 {
                     let remaining_s = (settle - Utc::now().timestamp_millis()) / 1000;
@@ -319,6 +322,8 @@ impl Bot {
     }
 
     async fn tick(&self) -> Result<()> {
+        let mkt = self.market_state.read().await.clone();
+
         // 1. Get latest price
         let prices = self.price_source.history().await;
         let closes: Vec<f64> = prices.iter().map(|p| p.price).collect();
@@ -341,43 +346,39 @@ impl Bot {
         }
 
         // 2. Get market data FIRST (signal depends on it)
-        let (poly_yes, poly_no, settlement_ms) = {
-            let token_yes = self.active_token_yes.read().await.clone();
-            let token_no = self.active_token_no.read().await.clone();
-            let settle = *self.active_settlement_ms.read().await;
+        if !mkt.is_ready() {
+            if closes.len().is_multiple_of(30) {
+                tracing::debug!(
+                    "[DEBUG] Waiting for market tokens | buffer={}",
+                    closes.len()
+                );
+            }
+            return Ok(());
+        }
 
-            if token_yes.is_empty() || token_no.is_empty() {
-                if closes.len() % 30 == 0 {
-                    tracing::debug!(
-                        "[DEBUG] Waiting for market tokens | buffer={}",
-                        closes.len()
-                    );
-                }
+        const MIN_TTL_MS: i64 = 30_000;
+        if mkt.settlement_ms > 0 {
+            let remaining = mkt.settlement_ms - Utc::now().timestamp_millis();
+            if remaining < MIN_TTL_MS {
                 return Ok(());
             }
+        }
 
-            const MIN_TTL_MS: i64 = 30_000;
-            if settle > 0 {
-                let remaining = settle - Utc::now().timestamp_millis();
-                if remaining < MIN_TTL_MS {
-                    return Ok(());
-                }
+        let yes = self.polymarket.fetch_mid_price(&mkt.token_yes).await;
+        let no = self.polymarket.fetch_mid_price(&mkt.token_no).await;
+
+        match (&yes, &no) {
+            (Ok(y), Ok(n)) => {
+                tracing::debug!("[PRICE] Yes={:.3} No={:.3} | buffer={}", y, n, closes.len());
             }
-
-            let yes = self.polymarket.fetch_mid_price(&token_yes).await;
-            let no = self.polymarket.fetch_mid_price(&token_no).await;
-
-            match (&yes, &no) {
-                (Ok(y), Ok(n)) => {
-                    tracing::debug!("[PRICE] Yes={:.3} No={:.3} | buffer={}", y, n, closes.len());
-                }
-                (Err(e), _) | (_, Err(e)) => {
-                    tracing::warn!("[PRICE] Polymarket fetch failed: {}", e);
-                }
+            (Err(e), _) | (_, Err(e)) => {
+                tracing::warn!("[PRICE] Polymarket fetch failed: {}", e);
             }
+        }
 
-            (yes.ok(), no.ok(), settle)
-        };
+        let poly_yes = yes.ok();
+        let poly_no = no.ok();
+        let settlement_ms = mkt.settlement_ms;
 
         // Convert quotes to Decimal once — this is the single canonical boundary
         let poly_yes_dec = poly_yes.and_then(decimal_from_f64);
@@ -453,9 +454,6 @@ impl Bot {
                 size_usdc: _,
                 edge,
             } => {
-                let token_yes = self.active_token_yes.read().await.clone();
-                let token_no = self.active_token_no.read().await.clone();
-
                 let cheap_price = match direction {
                     Direction::Up => poly_yes_dec.unwrap_or_else(|| decimal("0.5")),
                     Direction::Down => poly_no_dec.unwrap_or_else(|| decimal("0.5")),
@@ -471,15 +469,15 @@ impl Bot {
 
                 if let Some(order) = self
                     .executor
-                    .execute(
-                        &decision,
-                        &token_yes,
-                        &token_no,
-                        poly_yes_dec,
-                        poly_no_dec,
-                        settlement_ms,
+                    .execute(&ExecuteContext {
+                        decision: &decision,
+                        token_yes: &mkt.token_yes,
+                        token_no: &mkt.token_no,
+                        poly_yes: poly_yes_dec,
+                        poly_no: poly_no_dec,
+                        settlement_time_ms: settlement_ms,
                         btc_price,
-                    )
+                    })
                     .await
                 {
                     // Update account
@@ -490,8 +488,6 @@ impl Bot {
                     }
 
                     // Add to settler
-                    let cid = self.active_condition_id.read().await.clone();
-                    let market_slug = self.active_market_slug.read().await.clone();
                     self.settler.write().await.add_position(PendingPosition {
                         direction: order.direction,
                         size_usdc: order.size_usdc,
@@ -500,8 +496,8 @@ impl Bot {
                         cost: order.cost,
                         settlement_time_ms: order.settlement_time_ms,
                         entry_btc_price: order.entry_btc_price,
-                        condition_id: cid,
-                        market_slug,
+                        condition_id: mkt.condition_id.clone(),
+                        market_slug: mkt.market_slug.clone(),
                     });
 
                     // Log to file
@@ -548,11 +544,13 @@ impl Bot {
                     active.end_date,
                     &active.condition_id[..8.min(active.condition_id.len())]
                 );
-                *self.active_token_yes.write().await = active.token_id_yes.clone();
-                *self.active_token_no.write().await = active.token_id_no.clone();
-                *self.active_condition_id.write().await = active.condition_id.clone();
-                *self.active_market_slug.write().await = active.market.slug.clone();
-                *self.active_settlement_ms.write().await = active.end_date.timestamp_millis();
+                *self.market_state.write().await = MarketState {
+                    token_yes: active.token_id_yes,
+                    token_no: active.token_id_no,
+                    condition_id: active.condition_id,
+                    market_slug: active.market.slug,
+                    settlement_ms: active.end_date.timestamp_millis(),
+                };
             }
             Err(e) => {
                 tracing::warn!("[MKT] discovery failed: {}", e);
@@ -566,8 +564,8 @@ impl Bot {
         let price_source = self.price_source.clone();
         let discovery = self.discovery.clone();
         let btc_tiebreaker_usd = self.config.strategy.btc_tiebreaker_usd;
-        let rpc = data::chainlink::rpc_url(&self.config.trading.mode);
-        let mode = self.config.trading.mode.clone();
+        let rpc = data::chainlink::rpc_url(self.config.trading.mode);
+        let mode = self.config.trading.mode;
         let redeemer = self.redeemer.clone();
 
         tokio::spawn(async move {
@@ -582,7 +580,7 @@ impl Bot {
             loop {
                 interval.tick().await;
 
-                let results = if mode == "paper" {
+                let (results, settlement_btc_price) = if mode.is_paper() {
                     let btc_price = match data::chainlink::fetch_btc_price(&http, &rpc).await {
                         Ok(p) => p,
                         Err(e) => {
@@ -594,10 +592,13 @@ impl Bot {
                         }
                     };
 
-                    settler
-                        .write()
-                        .await
-                        .check_settlements(btc_price, btc_tiebreaker_usd)
+                    (
+                        settler
+                            .write()
+                            .await
+                            .check_settlements(btc_price, btc_tiebreaker_usd),
+                        Some(btc_price),
+                    )
                 } else {
                     let mut results = Vec::new();
                     loop {
@@ -638,7 +639,7 @@ impl Bot {
                             }
                         }
                     }
-                    results
+                    (results, None)
                 };
 
                 if !results.is_empty() {
@@ -656,6 +657,38 @@ impl Bot {
 
                     let bal = acc.balance;
                     drop(acc);
+
+                    if let Some(btc_price) = settlement_btc_price {
+                        let mut log_lines = String::new();
+                        for r in &results {
+                            log_lines.push_str(&format!(
+                                "{},{},{},{:+.2},{:.0},{:.0}\n",
+                                Utc::now().format("%H:%M:%S"),
+                                if r.won { "WIN" } else { "LOSS" },
+                                r.direction.as_str(),
+                                r.pnl.round_dp(2),
+                                r.entry_btc_price,
+                                btc_price,
+                            ));
+                        }
+                        let trades_path = Path::new(LOG_DIR).join("trades.csv");
+                        match tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+                            use std::io::Write;
+
+                            let mut file = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(trades_path)?;
+                            file.write_all(log_lines.as_bytes())
+                        })
+                        .await
+                        {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => tracing::debug!("[LOG] trades.csv write failed: {}", e),
+                            Err(e) => tracing::debug!("[LOG] trades.csv task failed: {}", e),
+                        }
+                    }
+
                     let tmp = Path::new(LOG_DIR).join("balance.tmp");
                     let dst = Path::new(LOG_DIR).join("balance");
                     let balance_text = format!("{:.2}", bal);
@@ -714,6 +747,8 @@ impl Bot {
 
 // ─── Main ───
 
+/// Note: `std::env::set_var` becomes unsafe in future Rust editions;
+/// migrate this loader to `dotenvy`.
 fn load_dotenv() {
     if let Ok(content) = std::fs::read_to_string(".env") {
         for line in content.lines() {
@@ -775,17 +810,15 @@ async fn main() -> Result<()> {
 
     config.validate()?;
 
-    if config.trading.mode == "live" && config.is_default_non_trading() {
+    if config.trading.mode.is_live() && config.is_default_non_trading() {
         tracing::warn!(
             "[INIT] Running live mode with default config values; review config.json before trading"
         );
     }
 
     // Validate credentials for live mode
-    if config.trading.mode == "live" {
-        if config.trading.private_key.expose_secret().is_empty() {
-            anyhow::bail!("PRIVATE_KEY not set in .env — required for live trading");
-        }
+    if config.trading.mode.is_live() && config.trading.private_key.expose_secret().is_empty() {
+        anyhow::bail!("PRIVATE_KEY not set in .env — required for live trading");
     }
 
     let mut bot = Bot::new(config).await?;
@@ -811,10 +844,10 @@ async fn redeem_all() -> Result<()> {
         anyhow::bail!("PRIVATE_KEY not set in .env");
     };
 
-    let mode = if config.trading.mode == "paper" {
-        "live"
+    let mode = if config.trading.mode.is_paper() {
+        TradingMode::Live
     } else {
-        &config.trading.mode
+        config.trading.mode
     };
     let rpc = data::chainlink::rpc_url(mode);
     let redeemer = data::polymarket::CtfRedeemer::new(private_key, rpc);
