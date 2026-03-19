@@ -7,35 +7,39 @@ use tokio::sync::RwLock;
 use crate::data::coinbase::CoinbaseClient;
 
 #[derive(Debug, Clone)]
-pub struct PriceTick {
+pub(crate) struct PriceTick {
     pub price: f64,
     pub timestamp_ms: i64,
 }
 
-pub struct PriceSource {
+pub(crate) struct PriceSource {
     client: Arc<CoinbaseClient>,
     buffer: Arc<RwLock<VecDeque<PriceTick>>>,
     max: usize,
 }
 
 impl PriceSource {
-    pub fn new(client: Arc<CoinbaseClient>, max: usize) -> Self {
-        Self { client, buffer: Arc::new(RwLock::new(VecDeque::with_capacity(max))), max }
+    pub(crate) fn new(client: Arc<CoinbaseClient>, max: usize) -> Self {
+        Self {
+            client,
+            buffer: Arc::new(RwLock::new(VecDeque::with_capacity(max))),
+            max,
+        }
     }
 
-    pub async fn latest(&self) -> Option<f64> {
+    pub(crate) async fn latest(&self) -> Option<f64> {
         self.buffer.read().await.back().map(|t| t.price)
     }
 
-    pub async fn last_tick_ms(&self) -> Option<i64> {
+    pub(crate) async fn last_tick_ms(&self) -> Option<i64> {
         self.buffer.read().await.back().map(|t| t.timestamp_ms)
     }
 
-    pub async fn history(&self) -> Vec<PriceTick> {
+    pub(crate) async fn history(&self) -> Vec<PriceTick> {
         self.buffer.read().await.iter().cloned().collect()
     }
 
-    pub async fn start(self: Arc<Self>) {
+    pub(crate) async fn start(self: Arc<Self>) {
         let client_for_ws = self.client.clone();
         tokio::spawn(async move {
             if let Err(e) = client_for_ws.start_ticker_ws().await {
@@ -57,7 +61,9 @@ impl PriceSource {
                     };
                     let mut h = buf.write().await;
                     h.push_back(tick);
-                    if h.len() > max { h.pop_front(); }
+                    if h.len() > max {
+                        h.pop_front();
+                    }
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }

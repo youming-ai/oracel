@@ -10,8 +10,11 @@ use crate::pipeline::signal::Direction;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 
+const PAUSE_SHORT_MS: i64 = 60_000;
+const PAUSE_LONG_MS: i64 = 300_000;
+
 #[derive(Debug, Clone)]
-pub enum Decision {
+pub(crate) enum Decision {
     Pass(String),
     Trade {
         direction: Direction,
@@ -21,7 +24,7 @@ pub enum Decision {
 }
 
 #[derive(Debug, Clone)]
-pub struct DeciderConfig {
+pub(crate) struct DeciderConfig {
     /// Minimum edge to trade (15%)
     pub edge_threshold: Decimal,
     /// Maximum position size
@@ -85,7 +88,7 @@ fn decimal(value: &str) -> Decimal {
 }
 
 #[derive(Debug, Clone)]
-pub struct AccountState {
+pub(crate) struct AccountState {
     pub balance: Decimal,
     pub consecutive_losses: u32,
     pub consecutive_wins: u32,
@@ -99,7 +102,7 @@ pub struct AccountState {
 }
 
 impl AccountState {
-    pub fn new(balance: Decimal) -> Self {
+    pub(crate) fn new(balance: Decimal) -> Self {
         Self {
             balance,
             consecutive_losses: 0,
@@ -113,11 +116,11 @@ impl AccountState {
         }
     }
 
-    pub fn already_traded_market(&self, settlement_ms: i64) -> bool {
+    pub(crate) fn already_traded_market(&self, settlement_ms: i64) -> bool {
         self.last_traded_settlement_ms == settlement_ms && settlement_ms > 0
     }
 
-    pub fn record_trade_for_market(&mut self, settlement_ms: i64) {
+    pub(crate) fn record_trade_for_market(&mut self, settlement_ms: i64) {
         self.last_traded_settlement_ms = settlement_ms;
     }
 
@@ -154,19 +157,22 @@ impl AccountState {
     /// Returns pause duration in ms, or 0 if no pause needed
     fn loss_pause_duration(&self) -> i64 {
         match self.consecutive_losses {
-            0..=3 => 0,       // No pause
-            4..=5 => 60_000,  // 1 minute pause
-            6..=7 => 300_000, // 5 minutes pause
-            _ => 0,           // Hard stop handled elsewhere
+            0..=3 => 0,              // No pause
+            4..=5 => PAUSE_SHORT_MS, // 1 minute pause
+            6..=7 => PAUSE_LONG_MS,  // 5 minutes pause
+            _ => 0,                  // Hard stop handled elsewhere
         }
     }
 
-    pub fn record_trade(&mut self, cost: Decimal) {
+    pub(crate) fn record_trade(&mut self, cost: Decimal) {
         self.balance -= cost;
         self.last_trade_time_ms = chrono::Utc::now().timestamp_millis();
     }
 
-    pub fn record_settlement(&mut self, result: &crate::pipeline::settler::SettlementResult) {
+    pub(crate) fn record_settlement(
+        &mut self,
+        result: &crate::pipeline::settler::SettlementResult,
+    ) {
         self.balance += result.payout;
         self.daily_pnl += result.pnl;
 
@@ -229,7 +235,7 @@ fn btc_momentum(prices: &[(f64, i64)], lookback_ms: i64) -> Option<f64> {
     Some((now_price - past_price) / past_price)
 }
 
-pub fn decide(
+pub(crate) fn decide(
     market_yes: Option<Decimal>,
     market_no: Option<Decimal>,
     settlement_ms: i64,

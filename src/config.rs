@@ -6,7 +6,7 @@ use std::fs;
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Config {
+pub(crate) struct Config {
     pub trading: TradingConfig,
     pub market: MarketConfig,
     pub polyclob: PolymarketConfig,
@@ -19,7 +19,7 @@ pub struct Config {
 // ─── Trading ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TradingConfig {
+pub(crate) struct TradingConfig {
     pub mode: String,
     /// Loaded from PRIVATE_KEY env var (not stored in config.json)
     #[serde(skip, default = "default_private_key")]
@@ -33,7 +33,7 @@ fn default_private_key() -> SecretString {
 // ─── Market ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MarketConfig {
+pub(crate) struct MarketConfig {
     #[serde(default)]
     pub event_url: String,
     pub series_id: String,
@@ -43,14 +43,14 @@ pub struct MarketConfig {
 // ─── Polymarket CLOB ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PolymarketConfig {
+pub(crate) struct PolymarketConfig {
     pub gamma_api_url: String,
 }
 
 // ─── Strategy ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StrategyConfig {
+pub(crate) struct StrategyConfig {
     pub max_position_size: f64,
     pub min_order_size: f64,
     #[serde(default = "default_extreme_threshold")]
@@ -84,7 +84,7 @@ fn default_momentum_lookback_ms() -> i64 {
 // ─── Edge Thresholds ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EdgeConfigFile {
+pub(crate) struct EdgeConfigFile {
     pub edge_threshold_early: f64,
     #[serde(default = "default_edge_threshold_mid")]
     pub edge_threshold_mid: f64,
@@ -111,7 +111,7 @@ fn default_min_prob() -> f64 {
 // ─── Risk ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RiskConfig {
+pub(crate) struct RiskConfig {
     pub max_daily_loss_usdc: f64,
     pub max_consecutive_losses: u32,
     #[serde(default = "default_max_daily_loss_pct")]
@@ -135,7 +135,7 @@ fn default_max_risk_fraction() -> f64 {
 // ─── Polling ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PollingConfig {
+pub(crate) struct PollingConfig {
     pub signal_interval_ms: u64,
 }
 
@@ -232,7 +232,7 @@ impl Default for PollingConfig {
 // ─── Market helpers ───
 
 impl MarketConfig {
-    pub fn extract_event_slug(url: &str) -> Option<String> {
+    pub(crate) fn extract_event_slug(url: &str) -> Option<String> {
         url.trim_end_matches('/')
             .rsplit('/')
             .next()
@@ -240,7 +240,7 @@ impl MarketConfig {
             .map(|s| s.to_string())
     }
 
-    pub fn extract_series_from_slug(slug: &str) -> Option<String> {
+    pub(crate) fn extract_series_from_slug(slug: &str) -> Option<String> {
         let parts: Vec<&str> = slug.split('-').collect();
         if parts.len() < 2 {
             return Some(slug.to_string());
@@ -253,7 +253,7 @@ impl MarketConfig {
         }
     }
 
-    pub fn resolve_series_id(&self) -> String {
+    pub(crate) fn resolve_series_id(&self) -> String {
         if !self.event_url.is_empty() {
             if let Some(slug) = Self::extract_event_slug(&self.event_url) {
                 if let Some(series) = Self::extract_series_from_slug(&slug) {
@@ -266,7 +266,7 @@ impl MarketConfig {
 }
 
 impl Config {
-    pub fn load(path: &Path) -> anyhow::Result<Self> {
+    pub(crate) fn load(path: &Path) -> anyhow::Result<Self> {
         let content = fs::read_to_string(path)?;
         let mut config: Config = serde_json::from_str(&content)?;
         // Load private key from env (not stored in config.json)
@@ -276,13 +276,13 @@ impl Config {
         Ok(config)
     }
 
-    pub fn save(&self, path: &Path) -> anyhow::Result<()> {
+    pub(crate) fn save(&self, path: &Path) -> anyhow::Result<()> {
         let content = serde_json::to_string_pretty(self)?;
         fs::write(path, content)?;
         Ok(())
     }
 
-    pub fn validate(&self) -> anyhow::Result<()> {
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
         if self.polling.signal_interval_ms == 0 {
             anyhow::bail!("polling.signal_interval_ms must be > 0");
         }
@@ -314,7 +314,7 @@ impl Config {
         Ok(())
     }
 
-    pub fn is_default_non_trading(&self) -> bool {
+    pub(crate) fn is_default_non_trading(&self) -> bool {
         let defaults = Config::default();
 
         self.market.event_url == defaults.market.event_url

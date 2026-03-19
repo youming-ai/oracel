@@ -2,7 +2,7 @@
 //!
 //! Automatically discovers and tracks the current active 5-minute BTC market
 //! on Polymarket. Handles market rotation (new market every 5 minutes).
-//! 
+//!
 //! Uses direct slug lookup: btc-updown-5m-{timestamp} where timestamp is
 //! a Unix timestamp rounded to 5-minute boundaries.
 
@@ -12,10 +12,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::pipeline::signal::Direction;
 
+const WINDOW_SECS: i64 = 300;
+
 // ─── Gamma API Types ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GammaMarket {
+pub(crate) struct GammaMarket {
     #[serde(default)]
     pub slug: String,
     #[serde(default)]
@@ -41,31 +43,33 @@ pub struct GammaMarket {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResolutionState {
+pub(crate) enum ResolutionState {
     Pending,
     Resolved(Direction),
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct ActiveMarket {
+pub(crate) struct ActiveMarket {
     pub market: GammaMarket,
     pub token_id_yes: String,
     pub token_id_no: String,
     pub condition_id: String,
+    #[allow(dead_code)]
     pub price_to_beat: Option<f64>,
     pub end_date: DateTime<Utc>,
+    #[allow(dead_code)]
     pub fetched_at: DateTime<Utc>,
 }
 
 // ─── Discovery Config ───
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct DiscoveryConfig {
+pub(crate) struct DiscoveryConfig {
     pub series_id: String,
     pub gamma_api_url: String,
+    #[allow(dead_code)]
     pub refresh_interval_sec: u64,
+    #[allow(dead_code)]
     pub window_minutes: f64,
 }
 
@@ -82,13 +86,13 @@ impl Default for DiscoveryConfig {
 
 // ─── Market Discovery ───
 
-pub struct MarketDiscovery {
+pub(crate) struct MarketDiscovery {
     config: DiscoveryConfig,
     client: reqwest::Client,
 }
 
 impl MarketDiscovery {
-    pub fn new(config: DiscoveryConfig) -> Self {
+    pub(crate) fn new(config: DiscoveryConfig) -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
@@ -106,21 +110,21 @@ impl MarketDiscovery {
     fn current_window_ts() -> i64 {
         let now = chrono::Utc::now().timestamp();
         // Round DOWN to nearest 5-minute boundary
-        (now / 300) * 300
+        (now / WINDOW_SECS) * WINDOW_SECS
     }
 
     /// Find the next active market by searching slug patterns
-    pub async fn discover(&self) -> Result<ActiveMarket> {
+    pub(crate) async fn discover(&self) -> Result<ActiveMarket> {
         let base = &self.config.gamma_api_url;
         let window_ts = Self::current_window_ts();
-        
+
         // Search nearby windows (current + next few)
         for offset in 0..5 {
-            let ts = window_ts + offset * 300;
+            let ts = window_ts + offset * WINDOW_SECS;
             let slug = Self::generate_slug(&self.config.series_id, ts);
-            
+
             let url = format!("{}/events?slug={}&limit=1", base, slug);
-            
+
             // HTTP request
             let resp = match self.client.get(&url).send().await {
                 Ok(r) => r,
@@ -129,13 +133,13 @@ impl MarketDiscovery {
                     continue;
                 }
             };
-            
+
             // Status check
             if !resp.status().is_success() {
                 tracing::debug!("[MKT] {} status {}", slug, resp.status());
                 continue;
             }
-            
+
             // JSON parse
             let data: serde_json::Value = match resp.json().await {
                 Ok(d) => d,
@@ -144,12 +148,14 @@ impl MarketDiscovery {
                     continue;
                 }
             };
-            
+
             if let Some(events) = data.as_array() {
                 if let Some(event) = events.first() {
                     if let Some(markets) = event.get("markets").and_then(|m| m.as_array()) {
                         for market_json in markets {
-                            if let Ok(market) = serde_json::from_value::<GammaMarket>(market_json.clone()) {
+                            if let Ok(market) =
+                                serde_json::from_value::<GammaMarket>(market_json.clone())
+                            {
                                 if let Ok(active) = Self::parse_active_market(&market) {
                                     tracing::info!("[MKT] found {} ends {}", slug, active.end_date);
                                     return Ok(active);
@@ -161,12 +167,16 @@ impl MarketDiscovery {
             }
         }
 
-        anyhow::bail!("No active market found for series: {}", self.config.series_id)
+        anyhow::bail!(
+            "No active market found for series: {}",
+            self.config.series_id
+        )
     }
 
-    pub async fn fetch_market_by_slug(&self, slug: &str) -> Result<GammaMarket> {
+    pub(crate) async fn fetch_market_by_slug(&self, slug: &str) -> Result<GammaMarket> {
         let url = format!("{}/markets/slug/{}", self.config.gamma_api_url, slug);
-        let market = self.client
+        let market = self
+            .client
             .get(&url)
             .send()
             .await
@@ -192,8 +202,7 @@ impl MarketDiscovery {
             .clone();
 
         let condition_id = market.condition_id.clone().unwrap_or_default();
-        let end_date = parse_datetime(&market.end_date)
-            .context("Failed to parse end_date")?;
+        let end_date = parse_datetime(&market.end_date).context("Failed to parse end_date")?;
 
         let price_to_beat = market
             .question
@@ -263,8 +272,11 @@ fn parse_json_string_array(value: &Option<String>) -> Option<Vec<String>> {
     serde_json::from_str::<Vec<String>>(raw).ok()
 }
 
-pub fn infer_resolution_state(market: &GammaMarket) -> Option<ResolutionState> {
-    let status = market.uma_resolution_status.as_deref()?.to_ascii_lowercase();
+pub(crate) fn infer_resolution_state(market: &GammaMarket) -> Option<ResolutionState> {
+    let status = market
+        .uma_resolution_status
+        .as_deref()?
+        .to_ascii_lowercase();
     if !status.contains("resolved") {
         return Some(ResolutionState::Pending);
     }
@@ -378,6 +390,9 @@ mod tests {
             outcome_prices: Some("[\"1\",\"0\"]".into()),
         };
 
-        assert_eq!(infer_resolution_state(&market), Some(ResolutionState::Pending));
+        assert_eq!(
+            infer_resolution_state(&market),
+            Some(ResolutionState::Pending)
+        );
     }
 }

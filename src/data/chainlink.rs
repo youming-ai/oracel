@@ -12,7 +12,7 @@ const CHAINLINK_BTC_USD: &str = "0xc907E116054Ad103354f2D350FD2514433D57F6f";
 const LATEST_ROUND_DATA: &str = "0xfeaf968c";
 
 /// Pick RPC based on mode: live uses Alchemy (ALCHEMY_KEY env), paper uses public.
-pub fn rpc_url(mode: &str) -> String {
+pub(crate) fn rpc_url(mode: &str) -> String {
     if mode == "live" {
         if let Ok(key) = std::env::var("ALCHEMY_KEY") {
             return format!("{}/{}", ALCHEMY_RPC, key);
@@ -22,7 +22,7 @@ pub fn rpc_url(mode: &str) -> String {
     PUBLIC_RPC.to_string()
 }
 
-pub async fn fetch_btc_price(client: &reqwest::Client, rpc: &str) -> Result<f64> {
+pub(crate) async fn fetch_btc_price(client: &reqwest::Client, rpc: &str) -> Result<f64> {
     let payload = serde_json::json!({
         "jsonrpc": "2.0",
         "method": "eth_call",
@@ -30,9 +30,7 @@ pub async fn fetch_btc_price(client: &reqwest::Client, rpc: &str) -> Result<f64>
         "id": 1
     });
 
-    let request = client
-        .post(rpc)
-        .json(&payload);
+    let request = client.post(rpc).json(&payload);
 
     let resp: serde_json::Value = tokio::time::timeout(Duration::from_secs(10), request.send())
         .await
@@ -49,8 +47,8 @@ pub async fn fetch_btc_price(client: &reqwest::Client, rpc: &str) -> Result<f64>
         return Err(anyhow::anyhow!("Chainlink response too short"));
     }
 
-    let answer = i128::from_str_radix(&result[66..130], 16)
-        .context("Failed to parse Chainlink answer")?;
+    let answer =
+        i128::from_str_radix(&result[66..130], 16).context("Failed to parse Chainlink answer")?;
 
     Ok(answer as f64 / 1e8)
 }

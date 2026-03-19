@@ -8,7 +8,7 @@ use std::io::Write;
 use crate::pipeline::signal::Direction;
 
 #[derive(Debug, Clone)]
-pub struct PendingPosition {
+pub(crate) struct PendingPosition {
     pub direction: Direction,
     pub size_usdc: Decimal,
     pub entry_price: Decimal,
@@ -21,7 +21,7 @@ pub struct PendingPosition {
 }
 
 #[derive(Debug, Clone)]
-pub struct SettlementResult {
+pub(crate) struct SettlementResult {
     pub direction: Direction,
     pub payout: Decimal,
     pub pnl: Decimal,
@@ -29,14 +29,14 @@ pub struct SettlementResult {
     pub condition_id: String,
 }
 
-pub struct Settler {
+pub(crate) struct Settler {
     pending: VecDeque<PendingPosition>,
     total_wins: u32,
     total_losses: u32,
 }
 
 impl Settler {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             pending: VecDeque::new(),
             total_wins: 0,
@@ -44,15 +44,15 @@ impl Settler {
         }
     }
 
-    pub fn add_position(&mut self, pos: PendingPosition) {
+    pub(crate) fn add_position(&mut self, pos: PendingPosition) {
         self.pending.push_back(pos);
     }
 
-    pub fn pending_count(&self) -> usize {
+    pub(crate) fn pending_count(&self) -> usize {
         self.pending.len()
     }
 
-    pub fn first_due_position(&self) -> Option<PendingPosition> {
+    pub(crate) fn first_due_position(&self) -> Option<PendingPosition> {
         let now = Utc::now().timestamp_millis();
         let pos = self.pending.front()?;
         if pos.settlement_time_ms > now {
@@ -61,12 +61,12 @@ impl Settler {
         Some(pos.clone())
     }
 
-    pub fn settle_first_resolved(&mut self, won: bool) -> Option<SettlementResult> {
+    pub(crate) fn settle_first_resolved(&mut self, won: bool) -> Option<SettlementResult> {
         let pos = self.pending.pop_front()?;
         Some(self.finish_settlement(pos, won, None))
     }
 
-    pub fn check_settlements(
+    pub(crate) fn check_settlements(
         &mut self,
         current_btc_price: f64,
         btc_tiebreaker_usd: f64,

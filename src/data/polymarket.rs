@@ -3,15 +3,15 @@
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
-use std::time::Duration;
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::{LocalSigner, Normal, Signer as _};
 use polymarket_client_sdk::clob;
-use polymarket_client_sdk::clob::types::{OrderType, Side, request::PriceRequest};
+use polymarket_client_sdk::clob::types::{request::PriceRequest, OrderType, Side};
 use polymarket_client_sdk::ctf;
 use polymarket_client_sdk::ctf::types::RedeemPositionsRequest;
-use polymarket_client_sdk::types::{Decimal, U256, address};
+use polymarket_client_sdk::types::{address, Decimal, U256};
 use polymarket_client_sdk::POLYGON;
+use std::time::Duration;
 
 use alloy::primitives::B256;
 use alloy::providers::ProviderBuilder;
@@ -21,12 +21,12 @@ use secrecy::{ExposeSecret, SecretString};
 const CLOB_HOST: &str = "https://clob.polymarket.com";
 
 /// Unauthenticated client for price queries.
-pub struct PolymarketClient {
+pub(crate) struct PolymarketClient {
     unauth: clob::Client,
 }
 
 impl PolymarketClient {
-    pub fn new() -> Result<Self> {
+    pub(crate) fn new() -> Result<Self> {
         let config = clob::Config::builder().use_server_time(true).build();
         Ok(Self {
             unauth: clob::Client::new(CLOB_HOST, config)
@@ -34,7 +34,7 @@ impl PolymarketClient {
         })
     }
 
-    pub async fn fetch_mid_price(&self, token_id: &str) -> Result<f64> {
+    pub(crate) async fn fetch_mid_price(&self, token_id: &str) -> Result<f64> {
         let tid = U256::from_str(token_id).context("Invalid token_id")?;
         let req = PriceRequest::builder()
             .token_id(tid)
@@ -44,19 +44,22 @@ impl PolymarketClient {
             .await
             .map_err(|_| anyhow::anyhow!("CLOB price request timed out after 10s"))?
             .context("CLOB price request failed")?;
-        let price: f64 = result.price.try_into().context("Failed to convert Decimal price to f64")?;
+        let price: f64 = result
+            .price
+            .try_into()
+            .context("Failed to convert Decimal price to f64")?;
         Ok(price)
     }
 }
 
 /// Authenticated client for order placement.
-pub struct AuthenticatedPolyClient {
+pub(crate) struct AuthenticatedPolyClient {
     client: clob::Client<Authenticated<Normal>>,
     signer: PrivateKeySigner,
 }
 
 impl AuthenticatedPolyClient {
-    pub async fn new(private_key: &str) -> Result<Self> {
+    pub(crate) async fn new(private_key: &str) -> Result<Self> {
         let key_hex = private_key.strip_prefix("0x").unwrap_or(private_key);
         let signer: PrivateKeySigner = LocalSigner::from_str(key_hex)
             .context("Invalid private key")?
@@ -75,7 +78,7 @@ impl AuthenticatedPolyClient {
         Ok(Self { client, signer })
     }
 
-    pub async fn place_order(
+    pub(crate) async fn place_order(
         &self,
         token_id: &str,
         side: &str,
@@ -87,7 +90,8 @@ impl AuthenticatedPolyClient {
         let price_dec = Decimal::try_from(price).context("Invalid price")?;
         let size_dec = Decimal::try_from(size).context("Invalid size")?;
 
-        let order = self.client
+        let order = self
+            .client
             .limit_order()
             .token_id(tid)
             .side(sdk_side)
@@ -98,7 +102,9 @@ impl AuthenticatedPolyClient {
             .await
             .context("Failed to build order")?;
 
-        let signed = self.client.sign(&self.signer, order)
+        let signed = self
+            .client
+            .sign(&self.signer, order)
             .await
             .context("Failed to sign order")?;
 
@@ -112,17 +118,18 @@ impl AuthenticatedPolyClient {
 }
 
 /// USDC on Polygon mainnet
-const POLYGON_USDC: alloy::primitives::Address = address!("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174");
+const POLYGON_USDC: alloy::primitives::Address =
+    address!("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174");
 
 /// On-chain CTF redeemer for winning outcome tokens.
 /// Creates ephemeral provider per redeem (wins are infrequent).
-pub struct CtfRedeemer {
+pub(crate) struct CtfRedeemer {
     private_key: SecretString,
     rpc_url: String,
 }
 
 impl CtfRedeemer {
-    pub fn new(private_key: String, rpc_url: String) -> Self {
+    pub(crate) fn new(private_key: String, rpc_url: String) -> Self {
         Self {
             private_key: SecretString::new(private_key.into()),
             rpc_url,
@@ -130,7 +137,7 @@ impl CtfRedeemer {
     }
 
     /// Redeem winning tokens for a binary market condition back to USDC.
-    pub async fn redeem(&self, condition_id_hex: &str) -> Result<String> {
+    pub(crate) async fn redeem(&self, condition_id_hex: &str) -> Result<String> {
         let key_hex = self
             .private_key
             .expose_secret()
@@ -145,16 +152,20 @@ impl CtfRedeemer {
             Duration::from_secs(30),
             ProviderBuilder::new().wallet(wallet).connect(&self.rpc_url),
         )
-            .await
-            .map_err(|_| anyhow::anyhow!("Failed to connect to Polygon RPC for redeem: timed out after 30s"))?
-            .context("Failed to connect to Polygon RPC for redeem")?;
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("Failed to connect to Polygon RPC for redeem: timed out after 30s")
+        })?
+        .context("Failed to connect to Polygon RPC for redeem")?;
 
         let client = ctf::Client::new(provider, POLYGON)
             .map_err(|e| anyhow::anyhow!("CTF client init failed: {}", e))?;
 
-        let hex = condition_id_hex.strip_prefix("0x").unwrap_or(condition_id_hex);
-        let cid = B256::from_str(hex)
-            .map_err(|e| anyhow::anyhow!("Invalid condition_id: {}", e))?;
+        let hex = condition_id_hex
+            .strip_prefix("0x")
+            .unwrap_or(condition_id_hex);
+        let cid =
+            B256::from_str(hex).map_err(|e| anyhow::anyhow!("Invalid condition_id: {}", e))?;
 
         let req = RedeemPositionsRequest::for_binary_market(POLYGON_USDC, cid);
         let resp = tokio::time::timeout(Duration::from_secs(30), client.redeem_positions(&req))

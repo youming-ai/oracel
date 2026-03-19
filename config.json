@@ -8,8 +8,8 @@
     "gamma_api_url": "https://gamma-api.polymarket.com"
   },
   "strategy": {
-    "max_position_size": 5.0,
-    "min_order_size": 1.0
+    "max_position_size": 50.0,
+    "min_order_size": 5.0
   },
   "edge": {
     "edge_threshold_early": 0.15,
@@ -22,7 +22,7 @@
   "risk": {
     "max_daily_loss_usdc": 100.0,
     "max_daily_loss_pct": 0.10,
-    "max_consecutive_losses": 5
+    "max_consecutive_losses": 8
   },
   "polling": {
     "signal_interval_ms": 1000

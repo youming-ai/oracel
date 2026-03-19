@@ -8,21 +8,22 @@ use tokio::sync::{broadcast, RwLock};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 const WS_URL: &str = "wss://advanced-trade-ws.coinbase.com";
+const PRICE_CHANNEL_BUFFER: usize = 1000;
 
 #[derive(Debug, Clone)]
-pub struct TickerUpdate {
+pub(crate) struct TickerUpdate {
     pub price: f64,
 }
 
-pub struct CoinbaseClient {
+pub(crate) struct CoinbaseClient {
     product_id: String,
     price_tx: broadcast::Sender<TickerUpdate>,
     latest_price: Arc<RwLock<Option<f64>>>,
 }
 
 impl CoinbaseClient {
-    pub fn new(product_id: &str) -> Self {
-        let (price_tx, _) = broadcast::channel(1000);
+    pub(crate) fn new(product_id: &str) -> Self {
+        let (price_tx, _) = broadcast::channel(PRICE_CHANNEL_BUFFER);
         Self {
             product_id: product_id.to_string(),
             price_tx,
@@ -30,11 +31,11 @@ impl CoinbaseClient {
         }
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<TickerUpdate> {
+    pub(crate) fn subscribe(&self) -> broadcast::Receiver<TickerUpdate> {
         self.price_tx.subscribe()
     }
 
-    pub async fn start_ticker_ws(self: Arc<Self>) -> Result<()> {
+    pub(crate) async fn start_ticker_ws(self: Arc<Self>) -> Result<()> {
         tracing::info!("[WS] connecting {}", WS_URL);
         let mut backoff_secs: u64 = 1;
         const MAX_BACKOFF_SECS: u64 = 60;
@@ -74,9 +75,16 @@ impl CoinbaseClient {
         while let Some(msg) = read.next().await {
             match msg {
                 Ok(Message::Text(text)) => self.handle_message(&text),
-                Ok(Message::Ping(data)) => { let _ = write.send(Message::Pong(data)).await; }
+                Ok(Message::Ping(data)) => {
+                    if let Err(e) = write.send(Message::Pong(data)).await {
+                        tracing::debug!("[WS] pong send failed: {}", e);
+                    }
+                }
                 Ok(Message::Close(_)) => break,
-                Err(e) => { tracing::warn!("WS error: {}", e); break; }
+                Err(e) => {
+                    tracing::warn!("WS error: {}", e);
+                    break;
+                }
                 _ => {}
             }
         }
@@ -92,13 +100,24 @@ impl CoinbaseClient {
                 for event in events {
                     if let Some(tickers) = event.get("tickers").and_then(|v| v.as_array()) {
                         for ticker in tickers {
-                            let pid = ticker.get("product_id").and_then(|v| v.as_str()).unwrap_or("");
-                            if pid != self.product_id { continue; }
-                            if let Some(price) = ticker.get("price").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()) {
+                            let pid = ticker
+                                .get("product_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            if pid != self.product_id {
+                                continue;
+                            }
+                            if let Some(price) = ticker
+                                .get("price")
+                                .and_then(|v| v.as_str())
+                                .and_then(|s| s.parse::<f64>().ok())
+                            {
                                 if let Ok(mut guard) = self.latest_price.try_write() {
                                     *guard = Some(price);
                                 }
-                                let _ = self.price_tx.send(TickerUpdate { price });
+                                if self.price_tx.send(TickerUpdate { price }).is_err() {
+                                    tracing::debug!("[WS] no price receivers");
+                                }
                             }
                         }
                     }

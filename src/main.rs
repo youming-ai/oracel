@@ -9,18 +9,21 @@ mod pipeline;
 use anyhow::Result;
 use chrono::Utc;
 use config::Config;
-use secrecy::{ExposeSecret, SecretString};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
+use secrecy::{ExposeSecret, SecretString};
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
+use tokio::sync::RwLock;
 use tokio::time::{interval, Duration};
 use tracing_subscriber::fmt::writer::MakeWriterExt;
 
 const LOG_DIR: &str = "logs";
+const PRICE_BUFFER_MAX: usize = 1000;
+const WINDOWS_PER_DAY: i64 = 288;
+const WINDOW_SECS: i64 = 300;
 
 fn decimal(value: &str) -> Decimal {
     Decimal::from_str_exact(value).expect("valid decimal literal")
@@ -31,15 +34,17 @@ fn decimal_from_f64(value: f64) -> Option<Decimal> {
 }
 
 use data::coinbase::CoinbaseClient;
-use data::market_discovery::{DiscoveryConfig, MarketDiscovery, ResolutionState, infer_resolution_state};
-use data::polymarket::{PolymarketClient, AuthenticatedPolyClient, CtfRedeemer};
+use data::market_discovery::{
+    infer_resolution_state, DiscoveryConfig, MarketDiscovery, ResolutionState,
+};
+use data::polymarket::{AuthenticatedPolyClient, CtfRedeemer, PolymarketClient};
 
+use pipeline::decider::{self, AccountState, DeciderConfig};
+use pipeline::executor::Executor;
 use pipeline::price_source::PriceSource;
+use pipeline::settler::{PendingPosition, Settler};
 use pipeline::signal;
 use pipeline::signal::Direction;
-use pipeline::decider::{self, DeciderConfig, AccountState};
-use pipeline::executor::Executor;
-use pipeline::settler::{Settler, PendingPosition};
 
 // ─── Bot State ───
 
@@ -82,7 +87,7 @@ struct Bot {
 impl Bot {
     async fn new(config: Config) -> Result<Self> {
         let coinbase = Arc::new(CoinbaseClient::new("BTC-USD"));
-        let price_source = Arc::new(PriceSource::new(coinbase, 1000));
+        let price_source = Arc::new(PriceSource::new(coinbase, PRICE_BUFFER_MAX));
         let polymarket = Arc::new(PolymarketClient::new()?);
 
         let resolved_series_id = config.market.resolve_series_id();
@@ -114,10 +119,7 @@ impl Bot {
             None
         };
 
-        let executor = Executor::new(
-            config.trading.mode.clone(),
-            auth_client,
-        );
+        let executor = Executor::new(config.trading.mode.clone(), auth_client);
 
         // Create CTF redeemer for live mode
         let redeemer = if config.trading.mode != "paper"
@@ -134,7 +136,9 @@ impl Bot {
         };
 
         // Load balance from file or use default
-        let initial_balance = Self::load_balance().await.unwrap_or_else(|| decimal("1000.0"));
+        let initial_balance = Self::load_balance()
+            .await
+            .unwrap_or_else(|| decimal("1000.0"));
         tracing::info!("[INIT] Starting balance: ${:.2}", initial_balance);
 
         Ok(Self {
@@ -156,12 +160,18 @@ impl Bot {
     }
 
     async fn load_balance() -> Option<Decimal> {
-        let content = tokio::fs::read_to_string(Path::new(LOG_DIR).join("balance")).await.ok()?;
+        let content = tokio::fs::read_to_string(Path::new(LOG_DIR).join("balance"))
+            .await
+            .ok()?;
         content.trim().parse().ok()
     }
 
     async fn run(&mut self) -> Result<()> {
-        tracing::info!("[INIT] mode={} interval={}ms", self.config.trading.mode, self.config.polling.signal_interval_ms);
+        tracing::info!(
+            "[INIT] mode={} interval={}ms",
+            self.config.trading.mode,
+            self.config.polling.signal_interval_ms
+        );
 
         self.refresh_market().await;
         self.price_source.clone().start().await;
@@ -193,7 +203,9 @@ impl Bot {
         let mut refresher_handle = self.start_market_refresher();
         let mut status_handle = self.start_status_printer();
 
-        let mut tick = interval(Duration::from_millis(self.config.polling.signal_interval_ms));
+        let mut tick = interval(Duration::from_millis(
+            self.config.polling.signal_interval_ms,
+        ));
 
         loop {
             tokio::select! {
@@ -336,7 +348,10 @@ impl Bot {
 
             if token_yes.is_empty() || token_no.is_empty() {
                 if closes.len() % 30 == 0 {
-                    tracing::debug!("[DEBUG] Waiting for market tokens | buffer={}", closes.len());
+                    tracing::debug!(
+                        "[DEBUG] Waiting for market tokens | buffer={}",
+                        closes.len()
+                    );
                 }
                 return Ok(());
             }
@@ -351,7 +366,7 @@ impl Bot {
 
             let yes = self.polymarket.fetch_mid_price(&token_yes).await;
             let no = self.polymarket.fetch_mid_price(&token_no).await;
-            
+
             match (&yes, &no) {
                 (Ok(y), Ok(n)) => {
                     tracing::debug!("[PRICE] Yes={:.3} No={:.3} | buffer={}", y, n, closes.len());
@@ -360,7 +375,7 @@ impl Bot {
                     tracing::warn!("[PRICE] Polymarket fetch failed: {}", e);
                 }
             }
-            
+
             (yes.ok(), no.ok(), settle)
         };
 
@@ -401,7 +416,8 @@ impl Bot {
             momentum_lookback_ms: self.config.strategy.momentum_lookback_ms,
         };
 
-        let timed_prices: Vec<(f64, i64)> = prices.iter().map(|p| (p.price, p.timestamp_ms)).collect();
+        let timed_prices: Vec<(f64, i64)> =
+            prices.iter().map(|p| (p.price, p.timestamp_ms)).collect();
         let decision = decider::decide(
             poly_yes_dec,
             poly_no_dec,
@@ -418,16 +434,25 @@ impl Bot {
                     let mut st = self.state.write().await;
                     st.no_trade_count += 1;
                     // Compare category only (strip trailing numbers/%)
-                    let category = reason.trim_end_matches(|c: char| c.is_ascii_digit() || c == '%' || c == '_');
-                    let prev_cat = st.last_no_trade_reason.trim_end_matches(|c: char| c.is_ascii_digit() || c == '%' || c == '_');
+                    let category = reason
+                        .trim_end_matches(|c: char| c.is_ascii_digit() || c == '%' || c == '_');
+                    let prev_cat = st
+                        .last_no_trade_reason
+                        .trim_end_matches(|c: char| c.is_ascii_digit() || c == '%' || c == '_');
                     let changed = category != prev_cat;
-                    if changed { st.last_no_trade_reason = reason.clone(); }
+                    if changed {
+                        st.last_no_trade_reason = reason.clone();
+                    }
                     if changed && !reason.contains("cooldown") && !reason.contains("loss_pause") {
                         tracing::info!("[SKIP] {} | BTC=${:.0}", reason, btc_price);
                     }
                 }
             }
-            decider::Decision::Trade { direction, size_usdc: _, edge } => {
+            decider::Decision::Trade {
+                direction,
+                size_usdc: _,
+                edge,
+            } => {
                 let token_yes = self.active_token_yes.read().await.clone();
                 let token_no = self.active_token_no.read().await.clone();
 
@@ -438,18 +463,25 @@ impl Bot {
 
                 tracing::info!(
                     "[TRADE] {} @ {:.3} edge={:.0}% BTC=${:.0}",
-                    direction.as_str(), cheap_price, (*edge * decimal("100")).round_dp(0), btc_price,
+                    direction.as_str(),
+                    cheap_price,
+                    (*edge * decimal("100")).round_dp(0),
+                    btc_price,
                 );
 
-                if let Some(order) = self.executor.execute(
-                    &decision,
-                    &token_yes,
-                    &token_no,
-                    poly_yes_dec,
-                    poly_no_dec,
-                    settlement_ms,
-                    btc_price,
-                ).await {
+                if let Some(order) = self
+                    .executor
+                    .execute(
+                        &decision,
+                        &token_yes,
+                        &token_no,
+                        poly_yes_dec,
+                        poly_no_dec,
+                        settlement_ms,
+                        btc_price,
+                    )
+                    .await
+                {
                     // Update account
                     {
                         let mut acc = self.account.write().await;
@@ -510,7 +542,12 @@ impl Bot {
     async fn refresh_market(&self) {
         match self.discovery.discover().await {
             Ok(active) => {
-                tracing::info!("[MKT] {} ends {} cid={}", active.market.slug, active.end_date, &active.condition_id[..8.min(active.condition_id.len())]);
+                tracing::info!(
+                    "[MKT] {} ends {} cid={}",
+                    active.market.slug,
+                    active.end_date,
+                    &active.condition_id[..8.min(active.condition_id.len())]
+                );
                 *self.active_token_yes.write().await = active.token_id_yes.clone();
                 *self.active_token_no.write().await = active.token_id_no.clone();
                 *self.active_condition_id.write().await = active.condition_id.clone();
@@ -557,7 +594,10 @@ impl Bot {
                         }
                     };
 
-                    settler.write().await.check_settlements(btc_price, btc_tiebreaker_usd)
+                    settler
+                        .write()
+                        .await
+                        .check_settlements(btc_price, btc_tiebreaker_usd)
                 } else {
                     let mut results = Vec::new();
                     loop {
@@ -568,7 +608,11 @@ impl Bot {
                         let market = match discovery.fetch_market_by_slug(&pos.market_slug).await {
                             Ok(market) => market,
                             Err(e) => {
-                                tracing::debug!("[SETTLE] Gamma fetch failed for {}: {}", pos.market_slug, e);
+                                tracing::debug!(
+                                    "[SETTLE] Gamma fetch failed for {}: {}",
+                                    pos.market_slug,
+                                    e
+                                );
                                 break;
                             }
                         };
@@ -576,7 +620,9 @@ impl Bot {
                         match infer_resolution_state(&market) {
                             Some(ResolutionState::Resolved(winner)) => {
                                 let won = pos.direction == winner;
-                                if let Some(result) = settler.write().await.settle_first_resolved(won) {
+                                if let Some(result) =
+                                    settler.write().await.settle_first_resolved(won)
+                                {
                                     results.push(result);
                                 } else {
                                     break;
@@ -584,7 +630,10 @@ impl Bot {
                             }
                             Some(ResolutionState::Pending) => break,
                             None => {
-                                tracing::debug!("[SETTLE] resolution unclear for {}", pos.market_slug);
+                                tracing::debug!(
+                                    "[SETTLE] resolution unclear for {}",
+                                    pos.market_slug
+                                );
                                 break;
                             }
                         }
@@ -600,7 +649,9 @@ impl Bot {
 
                     tracing::info!(
                         "[BAL] ${:.2} pnl=${:+.2} settled={}",
-                        acc.balance, acc.daily_pnl, results.len(),
+                        acc.balance,
+                        acc.daily_pnl,
+                        results.len(),
                     );
 
                     let bal = acc.balance;
@@ -642,7 +693,11 @@ impl Bot {
                             Err(e) => {
                                 let msg = e.to_string();
                                 if msg.contains("not received yet") && attempts > 1 {
-                                    tracing::debug!("[REDEEM] {} waiting for oracle, {} retries left", dir, attempts - 1);
+                                    tracing::debug!(
+                                        "[REDEEM] {} waiting for oracle, {} retries left",
+                                        dir,
+                                        attempts - 1
+                                    );
                                     still_pending.push((cid, dir, attempts - 1));
                                 } else {
                                     tracing::warn!("[REDEEM] failed {}: {}", dir, msg);
@@ -663,7 +718,9 @@ fn load_dotenv() {
     if let Ok(content) = std::fs::read_to_string(".env") {
         for line in content.lines() {
             let line = line.trim();
-            if line.is_empty() || line.starts_with('#') { continue; }
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
             if let Some((k, v)) = line.split_once('=') {
                 std::env::set_var(k.trim(), v.trim());
             }
@@ -695,8 +752,7 @@ async fn main() -> Result<()> {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .with_writer(file_writer.and(std::io::stderr))
         .with_ansi(false)
@@ -711,7 +767,9 @@ async fn main() -> Result<()> {
         })
     } else {
         let cfg = Config::default();
-        let _ = cfg.save(config_path);
+        if let Err(e) = cfg.save(config_path) {
+            tracing::warn!("[INIT] Failed to save default config: {}", e);
+        }
         cfg
     };
 
@@ -753,7 +811,11 @@ async fn redeem_all() -> Result<()> {
         anyhow::bail!("PRIVATE_KEY not set in .env");
     };
 
-    let mode = if config.trading.mode == "paper" { "live" } else { &config.trading.mode };
+    let mode = if config.trading.mode == "paper" {
+        "live"
+    } else {
+        &config.trading.mode
+    };
     let rpc = data::chainlink::rpc_url(mode);
     let redeemer = data::polymarket::CtfRedeemer::new(private_key, rpc);
 
@@ -767,11 +829,11 @@ async fn redeem_all() -> Result<()> {
 
     // Scan past 24h of 5-minute windows (288 windows)
     let now_ts = chrono::Utc::now().timestamp();
-    let base_ts = (now_ts / 300) * 300;
+    let base_ts = (now_ts / WINDOW_SECS) * WINDOW_SECS;
     let mut condition_ids: Vec<(String, String)> = Vec::new(); // (condition_id, slug)
 
-    for i in 0..288 {
-        let ts = base_ts - i * 300;
+    for i in 0..WINDOWS_PER_DAY {
+        let ts = base_ts - i * WINDOW_SECS;
         let slug = format!("{}-{}", series_id, ts);
         let url = format!("{}/events?slug={}&limit=1", gamma_url, slug);
 
@@ -828,17 +890,20 @@ async fn redeem_all() -> Result<()> {
         }
     }
 
-    eprintln!("\nDone: {} redeemed, {} skipped, {} failed", success, skipped, failed);
+    eprintln!(
+        "\nDone: {} redeemed, {} skipped, {} failed",
+        success, skipped, failed
+    );
     Ok(())
 }
 
 /// Derive CLOB API credentials from wallet using the SDK and write to .env
 async fn derive_api_keys() -> Result<()> {
-    use std::str::FromStr;
     use polymarket_client_sdk::auth::{LocalSigner, Signer as _};
     use polymarket_client_sdk::clob;
     use polymarket_client_sdk::POLYGON;
     use secrecy::ExposeSecret;
+    use std::str::FromStr;
 
     eprintln!("🔑 Deriving Polymarket CLOB API credentials...");
 
@@ -858,7 +923,8 @@ async fn derive_api_keys() -> Result<()> {
 
     // Create or derive API key via SDK
     let client = clob::Client::default();
-    let creds = client.create_or_derive_api_key(&signer, None)
+    let creds = client
+        .create_or_derive_api_key(&signer, None)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to derive API key: {}", e))?;
 

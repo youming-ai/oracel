@@ -1,13 +1,13 @@
 //! Stage 2: Signal — detect market extreme pricing.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Direction {
+pub(crate) enum Direction {
     Up,
     Down,
 }
 
 impl Direction {
-    pub fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Direction::Up => "UP",
             Direction::Down => "DOWN",
@@ -16,7 +16,7 @@ impl Direction {
 }
 
 /// Returns true if the market is in an extreme state (one side > threshold).
-pub fn is_market_extreme(
+pub(crate) fn is_market_extreme(
     market_yes: Option<f64>,
     market_no: Option<f64>,
     extreme_threshold: f64,

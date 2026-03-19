@@ -5,8 +5,10 @@ After=network.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/root/polymarket-5m-bot
-ExecStart=/root/polymarket-5m-bot/target/release/polybot
+# CUSTOMIZE: Replace /path/to/oracel with the actual repository directory
+WorkingDirectory=/path/to/oracel
+# CUSTOMIZE: Replace /path/to/oracel with the actual repository directory
+ExecStart=/path/to/oracel/target/release/polybot
 Restart=always
 RestartSec=5
 StandardOutput=journal

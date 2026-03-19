@@ -1,15 +1,15 @@
 //! Stage 4: Order Executor
 //! Places orders (paper or live).
 
-use anyhow::Result;
+use crate::data::polymarket::AuthenticatedPolyClient;
 use crate::pipeline::decider::Decision;
 use crate::pipeline::signal::Direction;
-use crate::data::polymarket::AuthenticatedPolyClient;
+use anyhow::Result;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 
 #[derive(Debug, Clone)]
-pub struct OrderResult {
+pub(crate) struct OrderResult {
     pub order_id: String,
     pub direction: Direction,
     pub size_usdc: Decimal,
@@ -20,17 +20,17 @@ pub struct OrderResult {
     pub entry_btc_price: f64,
 }
 
-pub struct Executor {
+pub(crate) struct Executor {
     mode: String,
     auth_client: Option<AuthenticatedPolyClient>,
 }
 
 impl Executor {
-    pub fn new(mode: String, auth_client: Option<AuthenticatedPolyClient>) -> Self {
+    pub(crate) fn new(mode: String, auth_client: Option<AuthenticatedPolyClient>) -> Self {
         Self { mode, auth_client }
     }
 
-    pub async fn execute(
+    pub(crate) async fn execute(
         &self,
         decision: &Decision,
         token_yes: &str,
@@ -42,7 +42,11 @@ impl Executor {
     ) -> Option<OrderResult> {
         match decision {
             Decision::Pass(_) => None,
-            Decision::Trade { direction, size_usdc, edge: _ } => {
+            Decision::Trade {
+                direction,
+                size_usdc,
+                edge: _,
+            } => {
                 let (token_id, price) = match direction {
                     Direction::Up => (token_yes, poly_yes.unwrap_or(Decimal::new(5, 1))),
                     Direction::Down => (token_no, poly_no.unwrap_or(Decimal::new(5, 1))),
@@ -60,8 +64,15 @@ impl Executor {
                         Ok(id) => id,
                         Err(e) => {
                             let msg = e.to_string();
-                            if msg.contains("not matched") || msg.contains("FOK") || msg.contains("no fill") {
-                                tracing::warn!("[EXEC] FOK rejected (no liquidity at {:.3}): {}", price, msg);
+                            if msg.contains("not matched")
+                                || msg.contains("FOK")
+                                || msg.contains("no fill")
+                            {
+                                tracing::warn!(
+                                    "[EXEC] FOK rejected (no liquidity at {:.3}): {}",
+                                    price,
+                                    msg
+                                );
                             } else {
                                 tracing::error!("[EXEC] order failed: {}", msg);
                             }
@@ -90,8 +101,15 @@ impl Executor {
         ((size_usdc / price) * Decimal::new(100, 0)).floor() / Decimal::new(100, 0)
     }
 
-    async fn place_live_order(&self, token_id: &str, price: Decimal, shares: Decimal) -> Result<String> {
-        let client = self.auth_client.as_ref()
+    async fn place_live_order(
+        &self,
+        token_id: &str,
+        price: Decimal,
+        shares: Decimal,
+    ) -> Result<String> {
+        let client = self
+            .auth_client
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No authenticated client — run with PRIVATE_KEY set"))?;
         let price_f64 = price
             .to_f64()
@@ -99,7 +117,9 @@ impl Executor {
         let shares_f64 = shares
             .to_f64()
             .ok_or_else(|| anyhow::anyhow!("Failed to convert decimal shares for order"))?;
-        client.place_order(token_id, "BUY", price_f64, shares_f64).await
+        client
+            .place_order(token_id, "BUY", price_f64, shares_f64)
+            .await
     }
 }
 
@@ -121,7 +141,15 @@ mod tests {
         };
 
         let result = executor
-            .execute(&decision, "yes", "no", Some(d("0.201")), Some(d("0.799")), 123, 70000.0)
+            .execute(
+                &decision,
+                "yes",
+                "no",
+                Some(d("0.201")),
+                Some(d("0.799")),
+                123,
+                70000.0,
+            )
             .await
             .expect("expected paper order");
 
