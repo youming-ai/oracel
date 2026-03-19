@@ -19,13 +19,10 @@ clear; trap 'tput cnorm; exit' INT TERM
 while true; do
     tput cup 0 0; tput civis
 
-    STATUS=$(grep '\[STATUS\]' "$LOG" 2>/dev/null | tail -1)
-    MKT=$(grep '\[MKT\].*found\|cid=' "$LOG" 2>/dev/null | tail -1)
-    TRADE=$(grep '\[TRADE\]' "$LOG" 2>/dev/null | tail -1)
+    STATUS=$(grep '\[STATUS\]' "$LOG" 2>/dev/null | tail -1 || true)
+    MKT=$(grep '\[MKT\].*found\|cid=' "$LOG" 2>/dev/null | tail -1 || true)
+    TRADE=$(grep '\[TRADE\]' "$LOG" 2>/dev/null | tail -1 || true)
     BALANCE=$(cat "${ROOT}/logs/${MODE}/balance" 2>/dev/null || echo "?")
-
-    MODE=$(grep '\[INIT\] mode=' "$LOG" 2>/dev/null | tail -1 | sed -n 's/.*mode=\([a-z]*\).*/\1/p')
-    MODE=${MODE:-paper}
 
     BTC=$(field "$STATUS" 'BTC=\$')
     PNL=$(field "$STATUS" 'pnl=')
@@ -88,7 +85,7 @@ while true; do
     echo ""
 
     printf '%s\n' "${D}── activity ──${N}"
-    ACTIVITY=$(tail -500 "$LOG" 2>/dev/null | grep -E '\[SETTLED\]|\[TRADE\]|\[MKT\].*found' | tail -6)
+    ACTIVITY=$(tail -500 "$LOG" 2>/dev/null | grep -E '\[SETTLED\]|\[TRADE\]|\[MKT\].*found' | tail -6 || true)
     if [ -n "$ACTIVITY" ]; then
         echo "$ACTIVITY" | while IFS= read -r line; do
             TIME=$(logtime "$line")
@@ -112,7 +109,7 @@ while true; do
     fi
     echo ""
 
-    ERRORS=$(tail -500 "$LOG" 2>/dev/null | grep -E '\[EXEC\].*failed|\[EXEC\].*FOK' | tail -3)
+    ERRORS=$(tail -500 "$LOG" 2>/dev/null | grep -E '\[EXEC\].*failed|\[EXEC\].*FOK' | tail -3 || true)
     if [ -n "$ERRORS" ]; then
         printf '%s\n' "${D}── errors ──${N}"
         echo "$ERRORS" | while IFS= read -r line; do

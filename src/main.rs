@@ -64,6 +64,8 @@ struct BotState {
     no_trade_count: u64,
     /// Last logged reason (to avoid spamming same reason)
     last_no_trade_reason: String,
+    /// Last idle reason from pre-signal filters (log on state change only)
+    last_idle_reason: String,
 }
 
 impl BotState {
@@ -71,7 +73,19 @@ impl BotState {
         Self {
             no_trade_count: 0,
             last_no_trade_reason: String::new(),
+            last_idle_reason: String::new(),
         }
+    }
+
+    fn log_idle_change(&mut self, reason: &str, detail: &str) {
+        if self.last_idle_reason != reason {
+            self.last_idle_reason = reason.to_string();
+            tracing::info!("[IDLE] {} | {}", reason, detail);
+        }
+    }
+
+    fn clear_idle(&mut self) {
+        self.last_idle_reason.clear();
     }
 }
 
@@ -153,11 +167,12 @@ impl Bot {
         let initial_balance = if config.trading.mode.is_paper() {
             Self::load_balance(&log_dir)
                 .await
-                .unwrap_or_else(|| decimal("100"))
+                .unwrap_or_else(|| decimal("1000"))
         } else {
             Self::load_balance(&log_dir).await.unwrap_or(Decimal::ZERO)
         };
         tracing::info!("[INIT] Starting balance: ${:.2}", initial_balance);
+        Self::write_balance(&log_dir, initial_balance).await;
 
         let mut settler = Settler::new();
         let mut account = AccountState::new(initial_balance);
@@ -407,6 +422,7 @@ impl Bot {
                     Ok(wallet) => match data::polymarket::query_usdc_balance(&rpc, wallet).await {
                         Ok(on_chain_bal) => {
                             self.account.write().await.balance = on_chain_bal;
+                            Self::write_balance(&self.log_dir, on_chain_bal).await;
                         }
                         Err(e) => {
                             tracing::warn!("[BAL] Failed to query on-chain USDC balance: {}", e);
@@ -430,6 +446,11 @@ impl Bot {
         };
 
         if closes.len() < 60 {
+            let detail = format!("buffer={}/60", closes.len());
+            self.state
+                .write()
+                .await
+                .log_idle_change("buffer_filling", &detail);
             return Ok(());
         }
 
@@ -444,12 +465,10 @@ impl Bot {
 
         // 2. Get market data FIRST (signal depends on it)
         if !mkt.is_ready() {
-            if closes.len().is_multiple_of(30) {
-                tracing::debug!(
-                    "[DEBUG] Waiting for market tokens | buffer={}",
-                    closes.len()
-                );
-            }
+            self.state
+                .write()
+                .await
+                .log_idle_change("market_not_ready", "waiting for token IDs");
             return Ok(());
         }
 
@@ -457,6 +476,11 @@ impl Bot {
         if mkt.settlement_ms > 0 {
             let remaining = mkt.settlement_ms - Utc::now().timestamp_millis();
             if remaining < MIN_TTL_MS {
+                let detail = format!("remaining={}s", remaining / 1000);
+                self.state
+                    .write()
+                    .await
+                    .log_idle_change("ttl_too_short", &detail);
                 return Ok(());
             }
         }
@@ -489,8 +513,20 @@ impl Bot {
             .to_f64()
             .unwrap_or(0.80);
         if !signal::is_market_extreme(yes_f64, no_f64, extreme_f64) {
+            let detail = format!(
+                "Yes={:.3} No={:.3} thr={:.2}",
+                yes_f64.unwrap_or(0.0),
+                no_f64.unwrap_or(0.0),
+                extreme_f64,
+            );
+            self.state
+                .write()
+                .await
+                .log_idle_change("not_extreme", &detail);
             return Ok(());
         }
+
+        self.state.write().await.clear_idle();
 
         // 4. Decide trade (Stage 3)
         let account_read = self.account.read().await.clone();
@@ -711,6 +747,11 @@ impl Bot {
 
                         match infer_resolution_state(&market) {
                             Some(ResolutionState::Resolved(winner)) => {
+                                tracing::info!(
+                                    "[SETTLE] {} resolved -> {} won",
+                                    pos.market_slug,
+                                    winner.as_str(),
+                                );
                                 let won = pos.direction == winner;
                                 if let Some(result) =
                                     settler.write().await.settle_by_slug(&pos.market_slug, won)

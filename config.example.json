@@ -1,4 +1,7 @@
 {
+  "trading": {
+    "mode": "paper"
+  },
   "market": {
     "window_minutes": 5.0
   },

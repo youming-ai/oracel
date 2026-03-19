@@ -62,7 +62,15 @@ impl Executor {
                 let cost = filled_shares * price;
                 let order_id = if self.mode.is_live() {
                     match self.place_live_order(token_id, price, filled_shares).await {
-                        Ok(id) => id,
+                        Ok(id) => {
+                            tracing::info!(
+                                "[EXEC] filled id={} shares={} cost={:.2}",
+                                &id[..8.min(id.len())],
+                                filled_shares,
+                                cost,
+                            );
+                            id
+                        }
                         Err(e) => {
                             let msg = format!("{:#}", e);
                             if msg.contains("not matched")
