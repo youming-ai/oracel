@@ -14,15 +14,18 @@ B=$'\033[1m'; D=$'\033[2m'; N=$'\033[0m'; BR=$'\033[41;37m'
 field() { echo "$1" | sed -n "s/.*${2}\([^ |]*\).*/\1/p"; }
 logtime() { echo "$1" | sed -n 's/^[0-9-]*T\([0-9:]*\)\..*/\1/p'; }
 
-clear; trap 'tput cnorm; exit' INT TERM
+tput smcup; clear; tput civis
+trap 'tput cnorm; tput rmcup' EXIT
+trap 'exit' INT TERM
 
 while true; do
-    tput cup 0 0; tput civis
+    tput cup 0 0
 
     STATUS=$(grep '\[STATUS\]' "$LOG" 2>/dev/null | tail -1 || true)
-    MKT=$(grep '\[MKT\].*found\|cid=' "$LOG" 2>/dev/null | tail -1 || true)
+    MKT=$(grep -E '\[MKT\].*(found|cid=)' "$LOG" 2>/dev/null | tail -1 || true)
     TRADE=$(grep '\[TRADE\]' "$LOG" 2>/dev/null | tail -1 || true)
-    BALANCE=$(cat "${ROOT}/logs/${MODE}/balance" 2>/dev/null || echo "?")
+    BALANCE=$(cat "${ROOT}/logs/${MODE}/balance" 2>/dev/null || true)
+    BALANCE="${BALANCE:-?}"
 
     BTC=$(field "$STATUS" 'BTC=\$')
     PNL=$(field "$STATUS" 'pnl=')
@@ -125,5 +128,5 @@ while true; do
         echo ""
     fi
 
-    sleep "$SEC"; tput ed
+    tput ed; sleep "$SEC"
 done
