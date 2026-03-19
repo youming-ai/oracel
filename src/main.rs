@@ -37,6 +37,10 @@ struct PersistState {
     #[serde(default)]
     consecutive_wins: u32,
     #[serde(default)]
+    total_wins: u32,
+    #[serde(default)]
+    total_losses: u32,
+    #[serde(default)]
     pause_until_ms: i64,
     #[serde(default)]
     daily_pnl: String,
@@ -190,6 +194,8 @@ impl Bot {
         }
         account.consecutive_losses = saved.consecutive_losses;
         account.consecutive_wins = saved.consecutive_wins;
+        account.total_wins = saved.total_wins;
+        account.total_losses = saved.total_losses;
         account.pause_until_ms = saved.pause_until_ms;
         if let Ok(pnl) = Decimal::from_str_exact(&saved.daily_pnl) {
             account.daily_pnl = pnl;
@@ -249,6 +255,8 @@ impl Bot {
             last_traded_settlement_ms: acc.last_traded_settlement_ms,
             consecutive_losses: acc.consecutive_losses,
             consecutive_wins: acc.consecutive_wins,
+            total_wins: acc.total_wins,
+            total_losses: acc.total_losses,
             pause_until_ms: acc.pause_until_ms,
             daily_pnl: acc.daily_pnl.to_string(),
             pnl_reset_date: acc.pnl_reset_date.clone(),
@@ -402,7 +410,7 @@ impl Bot {
                 tracing::info!(
                     "[STATUS] {} | BTC=${:.0} | bal=${:.2} pnl={:+.2} | {}W/{}L streak={} | pending={} | ttl={}",
                     mode, btc, acc.balance, acc.daily_pnl,
-                    acc.consecutive_wins, acc.consecutive_losses,
+                    acc.total_wins, acc.total_losses,
                     if acc.consecutive_wins > 0 { format!("+{}", acc.consecutive_wins) }
                     else if acc.consecutive_losses > 0 { format!("-{}", acc.consecutive_losses) }
                     else { "0".into() },

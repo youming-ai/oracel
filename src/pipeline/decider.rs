@@ -80,6 +80,8 @@ pub(crate) struct AccountState {
     pub balance: Decimal,
     pub consecutive_losses: u32,
     pub consecutive_wins: u32,
+    pub total_wins: u32,
+    pub total_losses: u32,
     pub last_trade_time_ms: i64,
     pub daily_pnl: Decimal,
     pub pnl_reset_date: String,
@@ -95,6 +97,8 @@ impl AccountState {
             balance,
             consecutive_losses: 0,
             consecutive_wins: 0,
+            total_wins: 0,
+            total_losses: 0,
             last_trade_time_ms: 0,
             daily_pnl: Decimal::ZERO,
             pnl_reset_date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
@@ -181,6 +185,7 @@ impl AccountState {
         if result.won {
             self.consecutive_wins += 1;
             self.consecutive_losses = 0;
+            self.total_wins += 1;
             match result.direction {
                 Direction::Up => self.up_stats.wins += 1,
                 Direction::Down => self.down_stats.wins += 1,
@@ -188,6 +193,7 @@ impl AccountState {
         } else {
             self.consecutive_losses += 1;
             self.consecutive_wins = 0;
+            self.total_losses += 1;
             match result.direction {
                 Direction::Up => self.up_stats.losses += 1,
                 Direction::Down => self.down_stats.losses += 1,
