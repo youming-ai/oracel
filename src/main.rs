@@ -20,7 +20,6 @@ use tokio::sync::RwLock;
 use tokio::time::{interval, Duration};
 use tracing_subscriber::fmt::writer::MakeWriterExt;
 
-const LOG_DIR: &str = "logs";
 const PRICE_BUFFER_MAX: usize = 1000;
 const WINDOWS_PER_DAY: i64 = 288;
 const WINDOW_SECS: i64 = 300;
@@ -95,6 +94,7 @@ impl MarketState {
 
 struct Bot {
     config: Config,
+    log_dir: String,
     price_source: Arc<PriceSource>,
     polymarket: Arc<PolymarketClient>,
     discovery: Arc<MarketDiscovery>,
@@ -108,7 +108,7 @@ struct Bot {
 }
 
 impl Bot {
-    async fn new(config: Config) -> Result<Self> {
+    async fn new(config: Config, log_dir: String) -> Result<Self> {
         let coinbase = Arc::new(CoinbaseClient::new("BTC-USD"));
         let price_source = Arc::new(PriceSource::new(coinbase, PRICE_BUFFER_MAX));
         let polymarket = Arc::new(PolymarketClient::new()?);
@@ -151,7 +151,7 @@ impl Bot {
         };
 
         // Load balance from file or use default
-        let initial_balance = Self::load_balance()
+        let initial_balance = Self::load_balance(&log_dir)
             .await
             .unwrap_or_else(|| decimal("1000.0"));
         tracing::info!("[INIT] Starting balance: ${:.2}", initial_balance);
@@ -159,7 +159,7 @@ impl Bot {
         let mut settler = Settler::new();
         let mut account = AccountState::new(initial_balance);
 
-        let saved = Self::load_state().await;
+        let saved = Self::load_state(&log_dir).await;
         if !saved.pending_positions.is_empty() {
             tracing::info!(
                 "[INIT] Restored {} pending position(s) from state.json",
@@ -183,6 +183,7 @@ impl Bot {
 
         Ok(Self {
             config,
+            log_dir,
             price_source,
             polymarket,
             discovery,
@@ -195,30 +196,34 @@ impl Bot {
         })
     }
 
-    async fn load_balance() -> Option<Decimal> {
-        let content = tokio::fs::read_to_string(Path::new(LOG_DIR).join("balance"))
+    async fn load_balance(log_dir: &str) -> Option<Decimal> {
+        let content = tokio::fs::read_to_string(Path::new(log_dir).join("balance"))
             .await
             .ok()?;
         content.trim().parse().ok()
     }
 
-    async fn write_balance(bal: Decimal) {
-        let tmp = Path::new(LOG_DIR).join("balance.tmp");
-        let dst = Path::new(LOG_DIR).join("balance");
+    async fn write_balance(log_dir: &str, bal: Decimal) {
+        let tmp = Path::new(log_dir).join("balance.tmp");
+        let dst = Path::new(log_dir).join("balance");
         let text = format!("{:.2}", bal);
         let _ = tokio::fs::write(&tmp, &text).await;
         let _ = tokio::fs::rename(&tmp, &dst).await;
     }
 
-    async fn load_state() -> PersistState {
-        let path = Path::new(LOG_DIR).join("state.json");
+    async fn load_state(log_dir: &str) -> PersistState {
+        let path = Path::new(log_dir).join("state.json");
         match tokio::fs::read_to_string(&path).await {
             Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
             Err(_) => PersistState::default(),
         }
     }
 
-    async fn save_state(settler: &Arc<RwLock<Settler>>, account: &Arc<RwLock<AccountState>>) {
+    async fn save_state(
+        log_dir: &str,
+        settler: &Arc<RwLock<Settler>>,
+        account: &Arc<RwLock<AccountState>>,
+    ) {
         let positions = settler.read().await.pending_positions();
         let acc = account.read().await;
         let state = PersistState {
@@ -231,8 +236,8 @@ impl Bot {
             pnl_reset_date: acc.pnl_reset_date.clone(),
         };
         drop(acc);
-        let tmp = Path::new(LOG_DIR).join("state.json.tmp");
-        let dst = Path::new(LOG_DIR).join("state.json");
+        let tmp = Path::new(log_dir).join("state.json.tmp");
+        let dst = Path::new(log_dir).join("state.json");
         if let Ok(json) = serde_json::to_string(&state) {
             let _ = tokio::fs::write(&tmp, &json).await;
             let _ = tokio::fs::rename(&tmp, &dst).await;
@@ -561,10 +566,10 @@ impl Bot {
                         market_slug: mkt.market_slug.clone(),
                     });
 
-                    Self::save_state(&self.settler, &self.account).await;
+                    Self::save_state(&self.log_dir, &self.settler, &self.account).await;
 
                     let bal = self.account.read().await.balance;
-                    Self::write_balance(bal).await;
+                    Self::write_balance(&self.log_dir, bal).await;
 
                     // Log to file
                     let log_line = format!(
@@ -577,7 +582,7 @@ impl Bot {
                         (*edge * decimal("100")).round_dp(1),
                         bal,
                     );
-                    let trades_path = Path::new(LOG_DIR).join("trades.csv");
+                    let trades_path = Path::new(&self.log_dir).join("trades.csv");
                     match tokio::task::spawn_blocking(move || -> std::io::Result<()> {
                         use std::io::Write;
 
@@ -632,6 +637,7 @@ impl Bot {
         let rpc = data::chainlink::rpc_url(self.config.trading.mode);
         let mode = self.config.trading.mode;
         let redeemer = self.redeemer.clone();
+        let log_dir = self.log_dir.clone();
 
         tokio::spawn(async move {
             let http = reqwest::Client::builder()
@@ -719,7 +725,7 @@ impl Bot {
                     let bal = acc.balance;
                     drop(acc);
 
-                    Bot::save_state(&settler, &account).await;
+                    Bot::save_state(&log_dir, &settler, &account).await;
 
                     if let Some(btc_price) = settlement_btc_price {
                         let mut log_lines = String::new();
@@ -734,7 +740,7 @@ impl Bot {
                                 btc_price,
                             ));
                         }
-                        let trades_path = Path::new(LOG_DIR).join("trades.csv");
+                        let trades_path = Path::new(&log_dir).join("trades.csv");
                         match tokio::task::spawn_blocking(move || -> std::io::Result<()> {
                             use std::io::Write;
 
@@ -752,7 +758,7 @@ impl Bot {
                         }
                     }
 
-                    Bot::write_balance(bal).await;
+                    Bot::write_balance(&log_dir, bal).await;
 
                     // Queue winning positions for on-chain redeem
                     for r in &results {
@@ -844,9 +850,29 @@ async fn main() -> Result<()> {
         return redeem_one(&slug).await;
     }
 
-    tokio::fs::create_dir_all(LOG_DIR).await.ok();
+    let config_path = Path::new("config.json");
+    let config = if config_path.exists() {
+        Config::load(config_path).unwrap_or_else(|e| {
+            eprintln!("[INIT] Failed to load config: {}, using defaults", e);
+            Config::default()
+        })
+    } else {
+        let cfg = Config::default();
+        if let Err(e) = cfg.save(config_path) {
+            eprintln!("[INIT] Failed to save default config: {}", e);
+        }
+        cfg
+    };
 
-    let file_appender = tracing_appender::rolling::never(LOG_DIR, "bot.log");
+    config.validate()?;
+
+    let log_dir = format!("logs/{}", config.trading.mode);
+    if let Err(e) = tokio::fs::create_dir_all(&log_dir).await {
+        eprintln!("[INIT] Failed to create log dir {}: {}", log_dir, e);
+        std::process::exit(1);
+    }
+
+    let file_appender = tracing_appender::rolling::never(&log_dir, "bot.log");
     let (file_writer, _guard) = tracing_appender::non_blocking(file_appender);
 
     tracing_subscriber::fmt()
@@ -857,22 +883,6 @@ async fn main() -> Result<()> {
         .with_ansi(false)
         .init();
     tracing::info!("polybot v{}", env!("CARGO_PKG_VERSION"));
-
-    let config_path = Path::new("config.json");
-    let config = if config_path.exists() {
-        Config::load(config_path).unwrap_or_else(|e| {
-            tracing::warn!("[INIT] Failed to load config: {}, using defaults", e);
-            Config::default()
-        })
-    } else {
-        let cfg = Config::default();
-        if let Err(e) = cfg.save(config_path) {
-            tracing::warn!("[INIT] Failed to save default config: {}", e);
-        }
-        cfg
-    };
-
-    config.validate()?;
 
     if config.trading.mode.is_live() && config.is_default_non_trading() {
         tracing::warn!(
@@ -885,7 +895,7 @@ async fn main() -> Result<()> {
         anyhow::bail!("PRIVATE_KEY not set in .env — required for live trading");
     }
 
-    let mut bot = Bot::new(config).await?;
+    let mut bot = Bot::new(config, log_dir).await?;
     bot.run().await?;
 
     Ok(())
