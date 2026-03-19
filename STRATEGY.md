@@ -107,7 +107,8 @@ Note: the code still defines `risk.max_daily_loss_usdc`, but the current decider
 ### Live Mode
 
 - Uses an authenticated Polymarket CLOB client
-- Converts `size_usdc / price` into shares and floors to 2 decimal places before submission
+- Computes `filled_shares = floor(size_usdc / price, 2)` and tracks the exact share count through settlement
+- Actual cost is `filled_shares * price`, which may be slightly less than the requested `size_usdc` due to truncation
 - Skips the trade if the FOK order cannot match or there is no liquidity
 
 ## 8. Settlement
@@ -131,8 +132,7 @@ The final win/loss decision is then computed from the position direction:
 
 ```text
 if won:
-    shares = size_usdc / entry_price
-    payout = shares
+    payout = filled_shares   (exact shares from execution, not reconstructed)
     pnl = payout - cost
 else:
     payout = 0

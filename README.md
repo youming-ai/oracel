@@ -172,4 +172,22 @@ Note: the checked-in `config.json` is a current sample runtime config, not neces
 
 ## Deployment
 
-The repository includes `deploy/polybot.service`, a systemd service file that currently assumes the binary lives at `/root/polymarket-5m-bot/target/release/polybot`.
+The repository includes `deploy/polybot.service`, a systemd service template. Edit the `WorkingDirectory` and `ExecStart` paths to match your actual install location before enabling the service.
+
+```bash
+# Example setup
+sudo cp deploy/polybot.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now polybot
+```
+
+The bot handles `SIGINT` and `SIGTERM` for graceful shutdown: it flushes the current balance to disk and exits cleanly.
+
+## Recent Changes
+
+- **Security**: `PRIVATE_KEY` is wrapped in `SecretString`; `--derive-keys` masks secret output
+- **Precision**: All financial calculations use `rust_decimal::Decimal` instead of `f64`
+- **Network resilience**: All network calls have explicit timeouts; WebSocket reconnects with exponential backoff
+- **Graceful shutdown**: Handles `SIGINT`/`SIGTERM` with balance flush
+- **Config validation**: Bounds-checked on startup; invalid configs are rejected immediately
+- **CI**: GitHub Actions pipeline with build, clippy, rustfmt, and `cargo audit`
