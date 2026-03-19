@@ -1,5 +1,6 @@
 //! Bot configuration
 
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
@@ -21,8 +22,12 @@ pub struct Config {
 pub struct TradingConfig {
     pub mode: String,
     /// Loaded from PRIVATE_KEY env var (not stored in config.json)
-    #[serde(skip)]
-    pub private_key: String,
+    #[serde(skip, default = "default_private_key")]
+    pub private_key: SecretString,
+}
+
+fn default_private_key() -> SecretString {
+    SecretString::new(String::new().into())
 }
 
 // ─── Market ───
@@ -154,7 +159,7 @@ impl Default for TradingConfig {
     fn default() -> Self {
         Self {
             mode: "paper".to_string(),
-            private_key: String::new(),
+            private_key: default_private_key(),
         }
     }
 }
@@ -266,7 +271,7 @@ impl Config {
         let mut config: Config = serde_json::from_str(&content)?;
         // Load private key from env (not stored in config.json)
         if let Ok(pk) = std::env::var("PRIVATE_KEY") {
-            config.trading.private_key = pk;
+            config.trading.private_key = SecretString::new(pk.into());
         }
         Ok(config)
     }
@@ -275,6 +280,66 @@ impl Config {
         let content = serde_json::to_string_pretty(self)?;
         fs::write(path, content)?;
         Ok(())
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.polling.signal_interval_ms == 0 {
+            anyhow::bail!("polling.signal_interval_ms must be > 0");
+        }
+        if self.strategy.max_position_size <= 0.0 {
+            anyhow::bail!("strategy.max_position_size must be > 0");
+        }
+        if self.strategy.min_order_size <= 0.0 {
+            anyhow::bail!("strategy.min_order_size must be > 0");
+        }
+        if self.strategy.min_order_size > self.strategy.max_position_size {
+            anyhow::bail!("strategy.min_order_size must be <= strategy.max_position_size");
+        }
+        if !(0.0 < self.strategy.extreme_threshold && self.strategy.extreme_threshold < 1.0) {
+            anyhow::bail!("strategy.extreme_threshold must be in (0, 1)");
+        }
+        if !(0.0 < self.strategy.fair_value && self.strategy.fair_value < 1.0) {
+            anyhow::bail!("strategy.fair_value must be in (0, 1)");
+        }
+        if !(0.0 < self.risk.max_risk_fraction && self.risk.max_risk_fraction <= 1.0) {
+            anyhow::bail!("risk.max_risk_fraction must be in (0, 1]");
+        }
+        if !(0.0 < self.risk.max_daily_loss_pct && self.risk.max_daily_loss_pct <= 1.0) {
+            anyhow::bail!("risk.max_daily_loss_pct must be in (0, 1]");
+        }
+        if self.market.window_minutes <= 0.0 {
+            anyhow::bail!("market.window_minutes must be > 0");
+        }
+
+        Ok(())
+    }
+
+    pub fn is_default_non_trading(&self) -> bool {
+        let defaults = Config::default();
+
+        self.market.event_url == defaults.market.event_url
+            && self.market.series_id == defaults.market.series_id
+            && self.market.window_minutes == defaults.market.window_minutes
+            && self.polyclob.gamma_api_url == defaults.polyclob.gamma_api_url
+            && self.strategy.max_position_size == defaults.strategy.max_position_size
+            && self.strategy.min_order_size == defaults.strategy.min_order_size
+            && self.strategy.extreme_threshold == defaults.strategy.extreme_threshold
+            && self.strategy.fair_value == defaults.strategy.fair_value
+            && self.strategy.btc_tiebreaker_usd == defaults.strategy.btc_tiebreaker_usd
+            && self.strategy.momentum_threshold == defaults.strategy.momentum_threshold
+            && self.strategy.momentum_lookback_ms == defaults.strategy.momentum_lookback_ms
+            && self.edge.edge_threshold_early == defaults.edge.edge_threshold_early
+            && self.edge.edge_threshold_mid == defaults.edge.edge_threshold_mid
+            && self.edge.edge_threshold_late == defaults.edge.edge_threshold_late
+            && self.edge.min_prob_early == defaults.edge.min_prob_early
+            && self.edge.min_prob_mid == defaults.edge.min_prob_mid
+            && self.edge.min_prob_late == defaults.edge.min_prob_late
+            && self.risk.max_daily_loss_usdc == defaults.risk.max_daily_loss_usdc
+            && self.risk.max_consecutive_losses == defaults.risk.max_consecutive_losses
+            && self.risk.max_daily_loss_pct == defaults.risk.max_daily_loss_pct
+            && self.risk.cooldown_ms == defaults.risk.cooldown_ms
+            && self.risk.max_risk_fraction == defaults.risk.max_risk_fraction
+            && self.polling.signal_interval_ms == defaults.polling.signal_interval_ms
     }
 }
 
@@ -312,5 +377,29 @@ mod tests {
         let mut cfg = MarketConfig::default();
         cfg.event_url = "https://polymarket.com/event/btc-updown-5m-1773364500".to_string();
         assert_eq!(cfg.resolve_series_id(), "btc-updown-5m");
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_interval() {
+        let mut cfg = Config::default();
+        cfg.polling.signal_interval_ms = 0;
+
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_min_greater_than_max() {
+        let mut cfg = Config::default();
+        cfg.strategy.min_order_size = 20.0;
+        cfg.strategy.max_position_size = 10.0;
+
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_accepts_defaults() {
+        let cfg = Config::default();
+
+        assert!(cfg.validate().is_ok());
     }
 }

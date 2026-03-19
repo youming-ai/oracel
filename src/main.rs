@@ -9,14 +9,26 @@ mod pipeline;
 use anyhow::Result;
 use chrono::Utc;
 use config::Config;
-use std::io::Write;
+use secrecy::{ExposeSecret, SecretString};
+use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+#[cfg(unix)]
+use tokio::signal::unix::{signal, SignalKind};
 use tokio::time::{interval, Duration};
 use tracing_subscriber::fmt::writer::MakeWriterExt;
 
 const LOG_DIR: &str = "logs";
+
+fn decimal(value: &str) -> Decimal {
+    Decimal::from_str_exact(value).expect("valid decimal literal")
+}
+
+fn decimal_from_f64(value: f64) -> Option<Decimal> {
+    Decimal::from_str_exact(&value.to_string()).ok()
+}
 
 use data::coinbase::CoinbaseClient;
 use data::market_discovery::{DiscoveryConfig, MarketDiscovery, ResolutionState, infer_resolution_state};
@@ -71,7 +83,7 @@ impl Bot {
     async fn new(config: Config) -> Result<Self> {
         let coinbase = Arc::new(CoinbaseClient::new("BTC-USD"));
         let price_source = Arc::new(PriceSource::new(coinbase, 1000));
-        let polymarket = Arc::new(PolymarketClient::new());
+        let polymarket = Arc::new(PolymarketClient::new()?);
 
         let resolved_series_id = config.market.resolve_series_id();
         if resolved_series_id.is_empty() {
@@ -86,8 +98,10 @@ impl Bot {
         };
         let discovery = Arc::new(MarketDiscovery::new(discovery_cfg));
 
-        let auth_client = if config.trading.mode != "paper" && !config.trading.private_key.is_empty() {
-            match AuthenticatedPolyClient::new(&config.trading.private_key).await {
+        let auth_client = if config.trading.mode != "paper"
+            && !config.trading.private_key.expose_secret().is_empty()
+        {
+            match AuthenticatedPolyClient::new(config.trading.private_key.expose_secret()).await {
                 Ok(c) => {
                     tracing::info!("[INIT] Authenticated with Polymarket CLOB");
                     Some(c)
@@ -106,16 +120,21 @@ impl Bot {
         );
 
         // Create CTF redeemer for live mode
-        let redeemer = if config.trading.mode != "paper" && !config.trading.private_key.is_empty() {
+        let redeemer = if config.trading.mode != "paper"
+            && !config.trading.private_key.expose_secret().is_empty()
+        {
             let rpc = data::chainlink::rpc_url(&config.trading.mode);
             tracing::info!("[INIT] CTF redeemer enabled for on-chain redemption");
-            Some(Arc::new(CtfRedeemer::new(config.trading.private_key.clone(), rpc)))
+            Some(Arc::new(CtfRedeemer::new(
+                config.trading.private_key.expose_secret().to_owned(),
+                rpc,
+            )))
         } else {
             None
         };
 
         // Load balance from file or use default
-        let initial_balance = Self::load_balance().unwrap_or(1000.0);
+        let initial_balance = Self::load_balance().await.unwrap_or_else(|| decimal("1000.0"));
         tracing::info!("[INIT] Starting balance: ${:.2}", initial_balance);
 
         Ok(Self {
@@ -136,8 +155,8 @@ impl Bot {
         })
     }
 
-    fn load_balance() -> Option<f64> {
-        let content = std::fs::read_to_string(Path::new(LOG_DIR).join("balance")).ok()?;
+    async fn load_balance() -> Option<Decimal> {
+        let content = tokio::fs::read_to_string(Path::new(LOG_DIR).join("balance")).await.ok()?;
         content.trim().parse().ok()
     }
 
@@ -146,6 +165,29 @@ impl Bot {
 
         self.refresh_market().await;
         self.price_source.clone().start().await;
+
+        #[cfg(unix)]
+        let mut sigint = signal(SignalKind::interrupt())?;
+        #[cfg(unix)]
+        let mut sigterm = signal(SignalKind::terminate())?;
+
+        #[cfg(unix)]
+        let shutdown_signal = async {
+            tokio::select! {
+                _ = sigint.recv() => "SIGINT",
+                _ = sigterm.recv() => "SIGTERM",
+            }
+        };
+
+        #[cfg(not(unix))]
+        let shutdown_signal = async {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("failed to listen for ctrl-c");
+            "SIGINT"
+        };
+
+        tokio::pin!(shutdown_signal);
 
         let mut settlement_handle = self.start_settlement_checker();
         let mut refresher_handle = self.start_market_refresher();
@@ -159,6 +201,10 @@ impl Bot {
                     if let Err(e) = self.tick().await {
                         tracing::error!("[BOT] Tick error: {}", e);
                     }
+                }
+                signal = &mut shutdown_signal => {
+                    tracing::info!("[BOT] Received {}, cleaning up...", signal);
+                    break;
                 }
                 result = &mut settlement_handle => {
                     match result {
@@ -318,8 +364,15 @@ impl Bot {
             (yes.ok(), no.ok(), settle)
         };
 
+        // Convert quotes to Decimal once — this is the single canonical boundary
+        let poly_yes_dec = poly_yes.and_then(decimal_from_f64);
+        let poly_no_dec = poly_no.and_then(decimal_from_f64);
+
         // 3. Compute signal based on market prices (Stage 2)
-        if !signal::is_market_extreme(poly_yes, poly_no, self.config.strategy.extreme_threshold) {
+        // Signal pre-filter uses f64 derived from canonical Decimal
+        let yes_f64 = poly_yes_dec.and_then(|d| d.to_f64());
+        let no_f64 = poly_no_dec.and_then(|d| d.to_f64());
+        if !signal::is_market_extreme(yes_f64, no_f64, self.config.strategy.extreme_threshold) {
             return Ok(());
         }
 
@@ -327,23 +380,31 @@ impl Bot {
         let account_read = self.account.read().await.clone();
 
         let decider_cfg = DeciderConfig {
-            edge_threshold: self.config.edge.edge_threshold_early,
-            max_position: self.config.strategy.max_position_size,
-            min_position: self.config.strategy.min_order_size,
+            edge_threshold: decimal_from_f64(self.config.edge.edge_threshold_early)
+                .unwrap_or_else(|| decimal("0.15")),
+            max_position: decimal_from_f64(self.config.strategy.max_position_size)
+                .unwrap_or_else(|| decimal("50.0")),
+            min_position: decimal_from_f64(self.config.strategy.min_order_size)
+                .unwrap_or_else(|| decimal("5.0")),
             cooldown_ms: self.config.risk.cooldown_ms,
-            max_risk_fraction: self.config.risk.max_risk_fraction,
-            extreme_threshold: self.config.strategy.extreme_threshold,
-            fair_value: self.config.strategy.fair_value,
+            max_risk_fraction: decimal_from_f64(self.config.risk.max_risk_fraction)
+                .unwrap_or_else(|| decimal("0.10")),
+            extreme_threshold: decimal_from_f64(self.config.strategy.extreme_threshold)
+                .unwrap_or_else(|| decimal("0.80")),
+            fair_value: decimal_from_f64(self.config.strategy.fair_value)
+                .unwrap_or_else(|| decimal("0.50")),
             max_consecutive_losses: self.config.risk.max_consecutive_losses,
-            max_daily_loss_pct: self.config.risk.max_daily_loss_pct,
-            momentum_threshold: self.config.strategy.momentum_threshold,
+            max_daily_loss_pct: decimal_from_f64(self.config.risk.max_daily_loss_pct)
+                .unwrap_or_else(|| decimal("0.10")),
+            momentum_threshold: decimal_from_f64(self.config.strategy.momentum_threshold)
+                .unwrap_or_else(|| decimal("0.001")),
             momentum_lookback_ms: self.config.strategy.momentum_lookback_ms,
         };
 
         let timed_prices: Vec<(f64, i64)> = prices.iter().map(|p| (p.price, p.timestamp_ms)).collect();
         let decision = decider::decide(
-            poly_yes,
-            poly_no,
+            poly_yes_dec,
+            poly_no_dec,
             settlement_ms,
             &account_read,
             &decider_cfg,
@@ -371,21 +432,21 @@ impl Bot {
                 let token_no = self.active_token_no.read().await.clone();
 
                 let cheap_price = match direction {
-                    Direction::Up => poly_yes.unwrap_or(0.5),
-                    Direction::Down => poly_no.unwrap_or(0.5),
+                    Direction::Up => poly_yes_dec.unwrap_or_else(|| decimal("0.5")),
+                    Direction::Down => poly_no_dec.unwrap_or_else(|| decimal("0.5")),
                 };
 
                 tracing::info!(
                     "[TRADE] {} @ {:.3} edge={:.0}% BTC=${:.0}",
-                    direction.as_str(), cheap_price, edge * 100.0, btc_price,
+                    direction.as_str(), cheap_price, (*edge * decimal("100")).round_dp(0), btc_price,
                 );
 
                 if let Some(order) = self.executor.execute(
                     &decision,
                     &token_yes,
                     &token_no,
-                    poly_yes,
-                    poly_no,
+                    poly_yes_dec,
+                    poly_no_dec,
                     settlement_ms,
                     btc_price,
                 ).await {
@@ -403,6 +464,7 @@ impl Bot {
                         direction: order.direction,
                         size_usdc: order.size_usdc,
                         entry_price: order.entry_price,
+                        filled_shares: order.filled_shares,
                         cost: order.cost,
                         settlement_time_ms: order.settlement_time_ms,
                         entry_btc_price: order.entry_btc_price,
@@ -412,23 +474,31 @@ impl Bot {
 
                     // Log to file
                     let bal = self.account.read().await.balance;
-                    match std::fs::OpenOptions::new()
-                        .create(true).append(true).open(Path::new(LOG_DIR).join("trades.csv"))
+                    let log_line = format!(
+                        "{},{},{},{:.3},{:.2},{:.1},{:.2}\n",
+                        Utc::now().format("%H:%M:%S"),
+                        order.direction.as_str(),
+                        &order.order_id[..8],
+                        order.entry_price,
+                        order.cost,
+                        (*edge * decimal("100")).round_dp(1),
+                        bal,
+                    );
+                    let trades_path = Path::new(LOG_DIR).join("trades.csv");
+                    match tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+                        use std::io::Write;
+
+                        let mut file = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(trades_path)?;
+                        file.write_all(log_line.as_bytes())
+                    })
+                    .await
                     {
-                        Ok(mut file) => {
-                            if let Err(e) = writeln!(file, "{},{},{},{:.3},{:.2},{:.1},{:.2}",
-                                Utc::now().format("%H:%M:%S"),
-                                order.direction.as_str(),
-                                &order.order_id[..8],
-                                order.entry_price,
-                                order.cost,
-                                edge * 100.0,
-                                bal,
-                            ) {
-                                tracing::debug!("[LOG] trades.csv write failed: {}", e);
-                            }
-                        }
-                        Err(e) => tracing::debug!("[LOG] trades.csv open failed: {}", e),
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => tracing::debug!("[LOG] trades.csv write failed: {}", e),
+                        Err(e) => tracing::debug!("[LOG] trades.csv task failed: {}", e),
                     }
                 }
             }
@@ -537,10 +607,16 @@ impl Bot {
                     drop(acc);
                     let tmp = Path::new(LOG_DIR).join("balance.tmp");
                     let dst = Path::new(LOG_DIR).join("balance");
-                    if std::fs::write(&tmp, format!("{:.2}", bal)).is_ok() {
-                        if let Err(e) = std::fs::rename(&tmp, &dst) {
-                            tracing::debug!("[LOG] balance rename failed: {}", e);
-                        }
+                    let balance_text = format!("{:.2}", bal);
+                    match tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+                        std::fs::write(&tmp, balance_text)?;
+                        std::fs::rename(&tmp, &dst)
+                    })
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => tracing::debug!("[LOG] balance write failed: {}", e),
+                        Err(e) => tracing::debug!("[LOG] balance task failed: {}", e),
                     }
 
                     // Queue winning positions for on-chain redeem
@@ -597,9 +673,10 @@ fn load_dotenv() {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("Failed to install rustls crypto provider");
+    if let Err(e) = rustls::crypto::ring::default_provider().install_default() {
+        eprintln!("Failed to install rustls crypto provider: {:?}", e);
+        std::process::exit(1);
+    }
 
     load_dotenv();
 
@@ -611,7 +688,7 @@ async fn main() -> Result<()> {
         return redeem_all().await;
     }
 
-    std::fs::create_dir_all(LOG_DIR).ok();
+    tokio::fs::create_dir_all(LOG_DIR).await.ok();
 
     let file_appender = tracing_appender::rolling::never(LOG_DIR, "bot.log");
     let (file_writer, _guard) = tracing_appender::non_blocking(file_appender);
@@ -638,9 +715,17 @@ async fn main() -> Result<()> {
         cfg
     };
 
+    config.validate()?;
+
+    if config.trading.mode == "live" && config.is_default_non_trading() {
+        tracing::warn!(
+            "[INIT] Running live mode with default config values; review config.json before trading"
+        );
+    }
+
     // Validate credentials for live mode
     if config.trading.mode == "live" {
-        if config.trading.private_key.is_empty() {
+        if config.trading.private_key.expose_secret().is_empty() {
             anyhow::bail!("PRIVATE_KEY not set in .env — required for live trading");
         }
     }
@@ -662,8 +747,8 @@ async fn redeem_all() -> Result<()> {
         anyhow::bail!("config.json not found");
     };
 
-    let private_key = if !config.trading.private_key.is_empty() {
-        config.trading.private_key.clone()
+    let private_key = if !config.trading.private_key.expose_secret().is_empty() {
+        config.trading.private_key.expose_secret().to_owned()
     } else {
         anyhow::bail!("PRIVATE_KEY not set in .env");
     };
@@ -757,9 +842,15 @@ async fn derive_api_keys() -> Result<()> {
 
     eprintln!("🔑 Deriving Polymarket CLOB API credentials...");
 
-    let private_key = std::env::var("PRIVATE_KEY")
-        .map_err(|_| anyhow::anyhow!("PRIVATE_KEY not set in .env"))?;
-    let key_hex = private_key.strip_prefix("0x").unwrap_or(&private_key);
+    let private_key = SecretString::new(
+        std::env::var("PRIVATE_KEY")
+            .map_err(|_| anyhow::anyhow!("PRIVATE_KEY not set in .env"))?
+            .into(),
+    );
+    let key_hex = private_key
+        .expose_secret()
+        .strip_prefix("0x")
+        .unwrap_or(private_key.expose_secret());
 
     let signer = LocalSigner::from_str(key_hex)
         .map_err(|_| anyhow::anyhow!("Invalid PRIVATE_KEY in .env"))?
@@ -775,12 +866,19 @@ async fn derive_api_keys() -> Result<()> {
     let secret = creds.secret().expose_secret().to_string();
     let passphrase = creds.passphrase().expose_secret().to_string();
 
+    fn mask_secret(value: &str) -> String {
+        if value.len() <= 8 {
+            return "[redacted]".to_string();
+        }
+        format!("{}...{}", &value[..4], &value[value.len() - 4..])
+    }
+
     eprintln!("Derived API credentials (not persisted to disk):");
     eprintln!("   POLY_API_KEY={}", api_key);
-    eprintln!("   POLY_API_SECRET={}", secret);
-    eprintln!("   POLY_PASSPHRASE={}", passphrase);
+    eprintln!("   POLY_API_SECRET={}", mask_secret(&secret));
+    eprintln!("   POLY_PASSPHRASE={}", mask_secret(&passphrase));
     eprintln!("\nThese credentials are derived on-the-fly during auth.");
-    eprintln!("No secrets written to .env.");
+    eprintln!("No secrets written to .env. Full secret values are intentionally masked.");
 
     Ok(())
 }

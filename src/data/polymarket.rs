@@ -3,6 +3,7 @@
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
+use std::time::Duration;
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::{LocalSigner, Normal, Signer as _};
 use polymarket_client_sdk::clob;
@@ -15,6 +16,7 @@ use polymarket_client_sdk::POLYGON;
 use alloy::primitives::B256;
 use alloy::providers::ProviderBuilder;
 use alloy::signers::local::PrivateKeySigner;
+use secrecy::{ExposeSecret, SecretString};
 
 const CLOB_HOST: &str = "https://clob.polymarket.com";
 
@@ -24,12 +26,12 @@ pub struct PolymarketClient {
 }
 
 impl PolymarketClient {
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self> {
         let config = clob::Config::builder().use_server_time(true).build();
-        Self {
+        Ok(Self {
             unauth: clob::Client::new(CLOB_HOST, config)
-                .expect("CLOB client initialization should not fail"),
-        }
+                .context("Failed to create unauthenticated CLOB client")?,
+        })
     }
 
     pub async fn fetch_mid_price(&self, token_id: &str) -> Result<f64> {
@@ -38,7 +40,10 @@ impl PolymarketClient {
             .token_id(tid)
             .side(Side::Buy)
             .build();
-        let result = self.unauth.price(&req).await.context("CLOB price request failed")?;
+        let result = tokio::time::timeout(Duration::from_secs(10), self.unauth.price(&req))
+            .await
+            .map_err(|_| anyhow::anyhow!("CLOB price request timed out after 10s"))?
+            .context("CLOB price request failed")?;
         let price: f64 = result.price.try_into().context("Failed to convert Decimal price to f64")?;
         Ok(price)
     }
@@ -61,8 +66,10 @@ impl AuthenticatedPolyClient {
         let client = clob::Client::new(CLOB_HOST, config)
             .context("Failed to create CLOB client")?
             .authentication_builder(&signer)
-            .authenticate()
+            .authenticate();
+        let client = tokio::time::timeout(Duration::from_secs(15), client)
             .await
+            .map_err(|_| anyhow::anyhow!("CLOB authentication timed out after 15s"))?
             .context("Failed to authenticate with Polymarket CLOB")?;
 
         Ok(Self { client, signer })
@@ -95,8 +102,9 @@ impl AuthenticatedPolyClient {
             .await
             .context("Failed to sign order")?;
 
-        let result = self.client.post_order(signed)
+        let result = tokio::time::timeout(Duration::from_secs(15), self.client.post_order(signed))
             .await
+            .map_err(|_| anyhow::anyhow!("Failed to post order: timed out after 15s"))?
             .context("Failed to post order")?;
 
         Ok(result.order_id)
@@ -109,27 +117,36 @@ const POLYGON_USDC: alloy::primitives::Address = address!("0x2791Bca1f2de4661ED8
 /// On-chain CTF redeemer for winning outcome tokens.
 /// Creates ephemeral provider per redeem (wins are infrequent).
 pub struct CtfRedeemer {
-    private_key: String,
+    private_key: SecretString,
     rpc_url: String,
 }
 
 impl CtfRedeemer {
     pub fn new(private_key: String, rpc_url: String) -> Self {
-        Self { private_key, rpc_url }
+        Self {
+            private_key: SecretString::new(private_key.into()),
+            rpc_url,
+        }
     }
 
     /// Redeem winning tokens for a binary market condition back to USDC.
     pub async fn redeem(&self, condition_id_hex: &str) -> Result<String> {
-        let key_hex = self.private_key.strip_prefix("0x").unwrap_or(&self.private_key);
+        let key_hex = self
+            .private_key
+            .expose_secret()
+            .strip_prefix("0x")
+            .unwrap_or(self.private_key.expose_secret());
         let signer: PrivateKeySigner = LocalSigner::from_str(key_hex)
             .context("Invalid private key for CTF")?
             .with_chain_id(Some(POLYGON));
 
         let wallet = alloy::network::EthereumWallet::from(signer);
-        let provider = ProviderBuilder::new()
-            .wallet(wallet)
-            .connect(&self.rpc_url)
+        let provider = tokio::time::timeout(
+            Duration::from_secs(30),
+            ProviderBuilder::new().wallet(wallet).connect(&self.rpc_url),
+        )
             .await
+            .map_err(|_| anyhow::anyhow!("Failed to connect to Polygon RPC for redeem: timed out after 30s"))?
             .context("Failed to connect to Polygon RPC for redeem")?;
 
         let client = ctf::Client::new(provider, POLYGON)
@@ -140,7 +157,9 @@ impl CtfRedeemer {
             .map_err(|e| anyhow::anyhow!("Invalid condition_id: {}", e))?;
 
         let req = RedeemPositionsRequest::for_binary_market(POLYGON_USDC, cid);
-        let resp = client.redeem_positions(&req).await
+        let resp = tokio::time::timeout(Duration::from_secs(30), client.redeem_positions(&req))
+            .await
+            .map_err(|_| anyhow::anyhow!("Redeem failed: timed out after 30s"))?
             .map_err(|e| anyhow::anyhow!("Redeem failed: {}", e))?;
 
         Ok(format!("{:#x}", resp.transaction_hash))

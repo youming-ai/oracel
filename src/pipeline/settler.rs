@@ -1,6 +1,7 @@
 //! Stage 5: Settler — track pending positions, settle at expiry.
 
 use chrono::Utc;
+use rust_decimal::Decimal;
 use std::collections::VecDeque;
 use std::io::Write;
 
@@ -9,9 +10,10 @@ use crate::pipeline::signal::Direction;
 #[derive(Debug, Clone)]
 pub struct PendingPosition {
     pub direction: Direction,
-    pub size_usdc: f64,
-    pub entry_price: f64,
-    pub cost: f64,
+    pub size_usdc: Decimal,
+    pub entry_price: Decimal,
+    pub filled_shares: Decimal,
+    pub cost: Decimal,
     pub settlement_time_ms: i64,
     pub entry_btc_price: f64,
     pub condition_id: String,
@@ -21,8 +23,8 @@ pub struct PendingPosition {
 #[derive(Debug, Clone)]
 pub struct SettlementResult {
     pub direction: Direction,
-    pub payout: f64,
-    pub pnl: f64,
+    pub payout: Decimal,
+    pub pnl: Decimal,
     pub won: bool,
     pub condition_id: String,
 }
@@ -82,7 +84,7 @@ impl Settler {
 
             let btc_change = current_btc_price - pos.entry_btc_price;
             let btc_went_up = if btc_change.abs() < btc_tiebreaker_usd {
-                pos.entry_price > 0.5
+                pos.entry_price > Decimal::new(5, 1)
             } else {
                 btc_change > 0.0
             };
@@ -105,8 +107,11 @@ impl Settler {
         won: bool,
         current_btc_price: Option<f64>,
     ) -> SettlementResult {
-        let shares = pos.size_usdc / pos.entry_price;
-        let payout = if won { shares } else { 0.0 };
+        let payout = if won {
+            pos.filled_shares
+        } else {
+            Decimal::ZERO
+        };
         let pnl = payout - pos.cost;
 
         if won {
@@ -116,10 +121,11 @@ impl Settler {
         }
 
         tracing::info!(
-            "[SETTLED] {} {} pnl={:+.2} {}W/{}L",
+            "[SETTLED] {} {} stake={:.2} pnl={:+.2} {}W/{}L",
             if won { "WIN" } else { "LOSS" },
             pos.direction.as_str(),
-            pnl,
+            pos.size_usdc.round_dp(2),
+            pnl.round_dp(2),
             self.total_wins,
             self.total_losses,
         );
@@ -136,7 +142,7 @@ impl Settler {
                     Utc::now().format("%H:%M:%S"),
                     if won { "WIN" } else { "LOSS" },
                     pos.direction.as_str(),
-                    pnl,
+                    pnl.round_dp(2),
                     pos.entry_btc_price,
                     price,
                 ) {
@@ -159,12 +165,17 @@ impl Settler {
 mod tests {
     use super::*;
 
+    fn d(value: &str) -> rust_decimal::Decimal {
+        rust_decimal::Decimal::from_str_exact(value).expect("valid decimal")
+    }
+
     fn sample_pending() -> PendingPosition {
         PendingPosition {
             direction: Direction::Up,
-            size_usdc: 5.0,
-            entry_price: 0.20,
-            cost: 5.0,
+            size_usdc: d("5.0"),
+            entry_price: d("0.20"),
+            filled_shares: d("25.00"),
+            cost: d("5.0"),
             settlement_time_ms: 0,
             entry_btc_price: 70000.0,
             condition_id: "cid".into(),
@@ -180,9 +191,22 @@ mod tests {
         let result = settler.settle_first_resolved(true).unwrap();
 
         assert!(result.won);
-        assert_eq!(result.payout, 25.0);
-        assert_eq!(result.pnl, 20.0);
+        assert_eq!(result.payout, d("25.0"));
+        assert_eq!(result.pnl, d("20.0"));
         assert_eq!(settler.pending_count(), 0);
+    }
+
+    #[test]
+    fn test_settlement_uses_filled_shares_for_payout() {
+        let mut settler = Settler::new();
+        let mut pos = sample_pending();
+        pos.filled_shares = d("24.99");
+        settler.add_position(pos);
+
+        let result = settler.settle_first_resolved(true).unwrap();
+
+        assert_eq!(result.payout, d("24.99"));
+        assert_eq!(result.pnl, d("19.99"));
     }
 
     #[test]
