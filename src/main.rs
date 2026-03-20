@@ -558,13 +558,15 @@ impl Bot {
 
         let decider_cfg = DeciderConfig {
             edge_threshold: self.config.edge.edge_threshold_early,
+            max_position: self.config.strategy.max_position,
+            min_position: self.config.strategy.min_position,
             cooldown_ms: self.config.risk.cooldown_ms,
+            max_risk_fraction: self.config.strategy.max_risk_fraction,
             extreme_threshold: self.config.strategy.extreme_threshold,
             fair_value: self.config.strategy.fair_value,
             max_daily_loss_pct: self.config.risk.max_daily_loss_pct,
             momentum_threshold: self.config.strategy.momentum_threshold,
             momentum_lookback_ms: self.config.strategy.momentum_lookback_ms,
-            enforce_limits: self.config.risk.enforce_limits,
         };
 
         let timed_prices: Vec<(f64, i64)> =

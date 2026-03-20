@@ -28,33 +28,39 @@ pub(crate) enum Decision {
 pub(crate) struct DeciderConfig {
     /// Minimum edge to trade (15%)
     pub edge_threshold: Decimal,
+    /// Maximum position size (USDC)
+    pub max_position: Decimal,
+    /// Minimum position size (USDC)
+    pub min_position: Decimal,
     /// Cooldown between trades (ms)
     pub cooldown_ms: i64,
+    /// Account balance fraction to risk per trade (Half-Kelly cap)
+    pub max_risk_fraction: Decimal,
     /// Market price threshold to consider "extreme" (e.g. 0.80)
     pub extreme_threshold: Decimal,
     /// Fair value assumption for binary outcome (e.g. 0.50)
     pub fair_value: Decimal,
-    /// Maximum daily loss as fraction of balance (e.g. 0.10 = 10%)
+    /// Maximum daily loss as fraction of balance (e.g. 0.25 = 25%)
     pub max_daily_loss_pct: Decimal,
     /// BTC momentum threshold to skip trade (e.g. 0.001 = 0.1%)
     pub momentum_threshold: Decimal,
     /// Momentum lookback window in milliseconds (e.g. 120_000 = 2 min)
     pub momentum_lookback_ms: i64,
-    /// Whether to enforce risk limits as hard blocks
-    pub enforce_limits: bool,
 }
 
 impl Default for DeciderConfig {
     fn default() -> Self {
         Self {
             edge_threshold: decimal("0.15"),
+            max_position: decimal("10.0"),
+            min_position: decimal("1.0"),
             cooldown_ms: 5_000,
+            max_risk_fraction: decimal("0.10"),
             extreme_threshold: decimal("0.80"),
             fair_value: decimal("0.50"),
-            max_daily_loss_pct: decimal("0.10"),
+            max_daily_loss_pct: decimal("0.25"),
             momentum_threshold: decimal("0.001"),
             momentum_lookback_ms: 120_000,
-            enforce_limits: false,
         }
     }
 }
@@ -69,6 +75,9 @@ struct DirectionStats {
 impl DirectionStats {
     fn new() -> Self {
         Self { wins: 0, losses: 0 }
+    }
+    fn total(&self) -> u32 {
+        self.wins + self.losses
     }
 }
 
@@ -134,35 +143,18 @@ impl AccountState {
 
         if now - self.last_trade_time_ms < cfg.cooldown_ms {
             let remaining = cfg.cooldown_ms - (now - self.last_trade_time_ms);
-            if cfg.enforce_limits {
-                tracing::warn!(
-                    "[RISK] Cooldown active: {}ms remaining, blocking trade",
-                    remaining
-                );
-                return Some("cooldown");
-            } else {
-                tracing::info!(
-                    "[RISK] Cooldown active: {}ms remaining, trading continues",
-                    remaining
-                );
-            }
+            tracing::info!(
+                "[RISK] Cooldown active: {}ms remaining, trading continues",
+                remaining
+            );
         }
 
         if self.daily_pnl <= -(self.balance * cfg.max_daily_loss_pct) {
-            if cfg.enforce_limits {
-                tracing::error!(
-                    "[RISK] Daily loss limit reached: pnl={:.2}, limit={:.2}, blocking trade",
-                    self.daily_pnl,
-                    -(self.balance * cfg.max_daily_loss_pct)
-                );
-                return Some("daily_loss_limit");
-            } else {
-                tracing::warn!(
-                    "[RISK] Daily loss limit reached: pnl={:.2}, limit={:.2}, trading continues",
-                    self.daily_pnl,
-                    -(self.balance * cfg.max_daily_loss_pct)
-                );
-            }
+            tracing::warn!(
+                "[RISK] Daily loss limit reached: pnl={:.2}, limit={:.2}, trading continues",
+                self.daily_pnl,
+                -(self.balance * cfg.max_daily_loss_pct)
+            );
         }
 
         None
@@ -220,6 +212,16 @@ impl AccountState {
                 );
             }
         }
+    }
+
+    /// Overall win rate across all trades
+    fn overall_win_rate(&self) -> Decimal {
+        let total_wins = self.up_stats.wins + self.down_stats.wins;
+        let total = self.up_stats.total() + self.down_stats.total();
+        if total == 0 {
+            return decimal("0.50");
+        }
+        Decimal::from(total_wins) / Decimal::from(total)
     }
 }
 
@@ -318,7 +320,23 @@ pub(crate) fn decide(
         return Decision::Pass("insufficient_balance".into());
     }
 
-    let size = (account.balance / decimal("100")).max(decimal("1"));
+    // Position sizing: Half-Kelly based on edge and win rate
+    let two = decimal("2");
+    let win_rate = account
+        .overall_win_rate()
+        .max(decimal("0.50"))
+        .min(decimal("0.75"));
+    let kelly_fraction = (two * win_rate - Decimal::ONE).max(decimal("0.05"));
+    let half_kelly = kelly_fraction * decimal("0.5");
+
+    // Scale by edge strength: 15% edge = 1x, 30% edge = 1.5x, 45%+ = 2x
+    let edge_base = cfg.edge_threshold;
+    let edge_excess = (edge - edge_base) / edge_base;
+    let edge_multiplier = (Decimal::ONE + edge_excess).max(Decimal::ONE).min(two);
+
+    let mut size = account.balance * half_kelly * edge_multiplier;
+    size = size.max(cfg.min_position).min(cfg.max_position);
+    size = size.min(account.balance * cfg.max_risk_fraction);
 
     Decision::Trade {
         direction,
@@ -338,13 +356,15 @@ mod tests {
     fn cfg_for_threshold_test() -> DeciderConfig {
         DeciderConfig {
             edge_threshold: d("0.15"),
+            max_position: d("10.0"),
+            min_position: d("1.0"),
             cooldown_ms: 5_000,
+            max_risk_fraction: d("0.10"),
             extreme_threshold: d("0.64"),
             fair_value: d("0.50"),
-            max_daily_loss_pct: d("0.10"),
+            max_daily_loss_pct: d("0.25"),
             momentum_threshold: d("0.001"),
             momentum_lookback_ms: 120_000,
-            enforce_limits: false,
         }
     }
 
@@ -643,55 +663,6 @@ mod tests {
         match decision {
             Decision::Pass(reason) => assert_eq!(reason, "no_momentum_data"),
             Decision::Trade { .. } => panic!("expected pass but got trade"),
-        }
-    }
-
-    #[test]
-    fn test_enforce_limits_blocks_on_cooldown() {
-        let mut account = AccountState::new(d("1000"));
-        let mut cfg = DeciderConfig::default();
-        cfg.enforce_limits = true;
-        account.last_trade_time_ms = chrono::Utc::now().timestamp_millis();
-
-        let decision = decide(
-            Some(d("0.85")),
-            Some(d("0.15")),
-            1_700_000_000_000,
-            &account,
-            &cfg,
-            &[(100000.0, 0), (100000.0, 120_000)],
-        );
-
-        match decision {
-            Decision::Pass(reason) => assert_eq!(reason, "cooldown"),
-            Decision::Trade { .. } => {
-                panic!("expected pass due to enforced cooldown but got trade")
-            }
-        }
-    }
-
-    #[test]
-    fn test_enforce_limits_blocks_on_daily_loss() {
-        let mut account = AccountState::new(d("1000"));
-        let mut cfg = DeciderConfig::default();
-        cfg.enforce_limits = true;
-        account.last_trade_time_ms = chrono::Utc::now().timestamp_millis() - 60_000;
-        account.daily_pnl = d("-150");
-
-        let decision = decide(
-            Some(d("0.85")),
-            Some(d("0.15")),
-            1_700_000_000_000,
-            &account,
-            &cfg,
-            &[(100000.0, 0), (100000.0, 120_000)],
-        );
-
-        match decision {
-            Decision::Pass(reason) => assert_eq!(reason, "daily_loss_limit"),
-            Decision::Trade { .. } => {
-                panic!("expected pass due to enforced daily loss limit but got trade")
-            }
         }
     }
 }
