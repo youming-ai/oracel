@@ -176,11 +176,13 @@ Trading mode and all strategy parameters are configured in `config.json`. See `c
 | `strategy.btc_tiebreaker_usd` | `5.0` | BTC price change threshold (unused after settlement refactor) |
 | `strategy.momentum_threshold` | `0.001` | BTC momentum threshold (0.1%) to filter counter-trend trades |
 | `strategy.momentum_lookback_ms` | `120000` | Momentum lookback window in milliseconds (2 minutes) |
+| `strategy.max_position` | `10.0` | Maximum position size in USDC (Half-Kelly cap) |
+| `strategy.min_position` | `1.0` | Minimum position size in USDC |
+| `strategy.max_risk_fraction` | `0.10` | Max risk per trade as fraction of balance (10%) |
 | `edge.edge_threshold_early` | `0.15` | Minimum edge required to place a trade (15%) |
 | `risk.max_consecutive_losses` | `8` | Circuit breaker threshold (logged warning for loss streaks) |
-| `risk.max_daily_loss_pct` | `0.10` | Daily loss limit as fraction of balance (logged warning) |
+| `risk.max_daily_loss_pct` | `0.25` | Daily loss limit as fraction of balance (logged warning) |
 | `risk.cooldown_ms` | `5000` | Minimum milliseconds between trades (logged warning) |
-| `risk.enforce_limits` | `false` | If `true`, cooldown and daily loss become hard blocks |
 | `polling.signal_interval_ms` | `1000` | Main signal loop interval in milliseconds |
 
 ### Price Source Configuration
@@ -279,11 +281,9 @@ The bot handles `SIGINT` and `SIGTERM` for graceful shutdown: it persists state 
 - Configurable via `price_source.source` and `price_source.symbol`
 - Enum-based dispatch for performance (no trait objects)
 
-### Risk Controls - Configurable Enforcement
-- Cooldown and daily-loss conditions are logged by default (`enforce_limits: false`)
-- Set `enforce_limits: true` to make these into hard blocks that prevent trading
+### Risk Controls
+- Cooldown and daily-loss conditions are logged as warnings but do not block trading
 - Zero-balance trades are always rejected regardless of configuration
-- Allows flexible risk management: advisory mode for maximum opportunity capture, strict mode for conservative operation
 
 ### WebSocket Improvements
 - Simplified WebSocket task architecture: one client task + one consumer task per exchange
