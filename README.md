@@ -30,8 +30,8 @@ Polymarket CLOB REST ──► Yes/No mid prices
                               │
               ┌───────────────┼───────────────┐
               │ Paper                         │ Live
-              │ Chainlink Oracle ──► BTC      │ Gamma API ──► market resolution
-              │ settlement price              │ CTF Redeemer ──► on-chain redeem
+              │ Gamma API ──► market resolution │ Gamma API ──► market resolution
+              │                               │ CTF Redeemer ──► on-chain redeem
               └───────────────────────────────┘
 ```
 
@@ -42,7 +42,7 @@ The main loop runs four concurrent tasks:
 | Task | Interval | Purpose |
 | --- | --- | --- |
 | Signal tick | 1s | Fetch prices, evaluate signal, decide and execute |
-| Settlement checker | 15s | Settle expired positions (paper: BTC price, live: Gamma resolution) |
+| Settlement checker | 15s | Settle expired positions via Gamma API resolution |
 | Market refresher | 60s | Discover the current active 5-minute market via Gamma API |
 | Status printer | 10s | Log runtime summary (balance, PnL, streak, pending, TTL) |
 
@@ -53,7 +53,7 @@ src/
 ├── main.rs                  # Main loop, bot state, CLI, persistence
 ├── config.rs                # Config definitions, defaults, validation
 ├── data/
-│   ├── chainlink.rs         # Chainlink BTC/USD oracle (Polygon RPC)
+│   ├── chainlink.rs         # Polygon RPC URL selection (Alchemy fallback)
 │   ├── coinbase.rs          # Coinbase Advanced Trade WebSocket client
 │   ├── market_discovery.rs  # Gamma API market discovery and resolution
 │   └── polymarket.rs        # CLOB client, order placement, CTF redemption
@@ -125,7 +125,7 @@ cargo run --release -- --redeem btc-updown-5m-1773926700
 - Default mode (`trading.mode = "paper"` in `config.json`)
 - Does not require `PRIVATE_KEY`
 - Generates a local UUID as the order ID instead of placing a real order
-- Settlement uses Chainlink BTC/USD oracle on Polygon, with Coinbase price as fallback
+- Settlement uses Gamma API market resolution
 - Starts with $1,000 simulated balance (or restores from `logs/paper/balance`)
 
 ### Live
@@ -134,7 +134,7 @@ cargo run --release -- --redeem btc-updown-5m-1773926700
 - Requires `PRIVATE_KEY` in `.env`
 - Authenticates with the Polymarket CLOB and places real FOK limit orders
 - Balance is synced from the on-chain USDC wallet every tick
-- Settlement uses Gamma API market resolution (not BTC price simulation)
+- Settlement uses Gamma API market resolution
 - Enables CTF redeemer for automatic on-chain redemption of winning positions
 - Uses Alchemy RPC when `ALCHEMY_KEY` is set, otherwise falls back to public Polygon RPC
 
@@ -158,7 +158,7 @@ Trading mode and all strategy parameters are configured in `config.json`. See `c
 | `polyclob.gamma_api_url` | `https://gamma-api.polymarket.com` | Gamma API base URL |
 | `strategy.extreme_threshold` | `0.80` | Market bias threshold to consider sentiment extreme |
 | `strategy.fair_value` | `0.50` | Fair-value assumption for a binary 5-minute outcome |
-| `strategy.btc_tiebreaker_usd` | `5.0` | BTC price change below this is treated as a tie in paper settlement |
+| `strategy.btc_tiebreaker_usd` | `5.0` | BTC price change threshold (unused after settlement refactor) |
 | `strategy.momentum_threshold` | `0.001` | BTC momentum threshold (0.1%) to filter counter-trend trades |
 | `strategy.momentum_lookback_ms` | `120000` | Momentum lookback window in milliseconds (2 minutes) |
 | `edge.edge_threshold_early` | `0.15` | Minimum edge required to place a trade (15%) |
@@ -173,8 +173,7 @@ Trading mode and all strategy parameters are configured in `config.json`. See `c
 | --- | --- | --- |
 | Coinbase Advanced Trade | WebSocket | Live BTC/USD price stream (1-second ticks) |
 | Polymarket CLOB | REST | Yes/No mid prices and live order placement |
-| Gamma API | REST | Market discovery, slug lookup, live-mode resolution checks |
-| Chainlink BTC/USD Oracle | Polygon RPC | Paper-mode settlement pricing |
+| Gamma API | REST | Market discovery, slug lookup, resolution checks |
 | CTF Contract | Polygon RPC | On-chain position balance queries and redemption |
 
 ## Logs and Monitoring

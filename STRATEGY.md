@@ -133,21 +133,20 @@ Both modes skip execution if the target price is ≤ 0.01 or ≥ 0.99. This prev
 
 ## 8. Settlement
 
-### Paper Mode
+Both paper and live modes use the Gamma API to check market resolution state. The settlement checker polls every 15 seconds for pending positions.
 
-When a window expires, the bot performs a local settlement simulation. It prefers the Chainlink BTC/USD oracle on Polygon for the settlement price, and falls back to the latest Coinbase price if the Chainlink query fails.
-
+Resolution detection:
 ```text
-btc_change = settlement_btc_price - entry_btc_price
+1. umaResolutionStatus contains "resolved"
+2. closed == true
+3. outcomePrices shows one outcome at 1.0 and the other at 0.0
 
-if abs(btc_change) < btc_tiebreaker_usd:
-    btc_went_up = entry_price > 0.50    (tiebreaker: use market's own bias)
-else:
-    btc_went_up = btc_change > 0
+if resolved and Up/Yes price == 1  → winner = UP
+if resolved and Down/No price == 1 → winner = DOWN
+otherwise → keep position pending and retry on next check
 ```
 
 Payout calculation:
-
 ```text
 if won:
     payout = filled_shares    (each share pays $1)
@@ -157,24 +156,7 @@ else:
     pnl = -cost
 ```
 
-### Live Mode
-
-Live mode does not use BTC-price simulation for win/loss accounting. Instead, the settlement checker polls the Gamma API for the market slug and waits for an explicit resolution.
-
-```text
-Resolution detection:
-  1. umaResolutionStatus contains "resolved"
-  2. closed == true
-  3. outcomePrices shows one outcome at 1.0 and the other at 0.0
-
-if resolved and Up/Yes price == 1  → winner = UP
-if resolved and Down/No price == 1 → winner = DOWN
-otherwise → keep position pending and retry on next check (every 15 seconds)
-```
-
-This keeps live accounting aligned with Polymarket resolution rather than local BTC price estimates.
-
-Both modes append settlement results to `logs/<mode>/trades.csv`; the same file also receives trade-entry rows when positions are opened.
+Both modes append settlement results to `logs/<mode>/trades.csv`.
 
 ## 9. Live-Mode Redemption
 
@@ -212,5 +194,5 @@ On startup, the bot restores this state to continue seamlessly after a restart.
 1. A 5-minute BTC window is approximately a coin flip (`fair_value = 0.50`), since short-term BTC price movements are dominated by noise rather than directional signal
 2. Extreme market sentiment (>80% on one side) creates exploitable mispricing because the crowd overestimates the probability of a directional move
 3. Strong short-term BTC trends can justify extreme pricing, so the momentum filter is essential to avoid trading against genuine moves
-4. Live settlement should stay aligned with Polymarket's on-chain resolution, while paper mode uses a fast local simulation as a reasonable proxy
+4. Settlement is based on Polymarket's official resolution via Gamma API, ensuring accurate accounting in both paper and live modes
 5. Conservative position sizing (1% per trade) ensures survivability through losing streaks while still capturing asymmetric payoffs at extreme prices
