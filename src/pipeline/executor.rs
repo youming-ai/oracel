@@ -58,11 +58,22 @@ impl Executor {
                     return None;
                 }
 
-                let filled_shares = match Self::compute_filled_shares(*size_usdc, price) {
+                let mut filled_shares = match Self::compute_filled_shares(*size_usdc, price) {
                     Some(shares) => shares,
                     None => return None,
                 };
-                let cost = filled_shares * price;
+                let mut cost = filled_shares * price;
+
+                // Polymarket requires minimum $1 order amount; bump shares to meet it
+                if cost < Decimal::ONE {
+                    filled_shares = (Decimal::ONE / price).ceil();
+                    cost = filled_shares * price;
+                    tracing::info!(
+                        "[EXEC] Bumped to {} shares (cost={:.2}) to meet $1 minimum",
+                        filled_shares,
+                        cost
+                    );
+                }
                 let order_id = if self.mode.is_live() {
                     match self.place_live_order(token_id, price, filled_shares).await {
                         Ok(id) => {
