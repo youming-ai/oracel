@@ -71,6 +71,17 @@ fn default_private_key() -> SecretString {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MarketConfig {
     pub window_minutes: f64,
+    #[serde(default = "default_stale_threshold_ms")]
+    pub stale_threshold_ms: i64,
+    #[serde(default = "default_min_ttl_ms")]
+    pub min_ttl_ms: i64,
+}
+
+fn default_stale_threshold_ms() -> i64 {
+    30_000
+}
+fn default_min_ttl_ms() -> i64 {
+    30_000
 }
 
 // ─── Polymarket CLOB ───
@@ -104,6 +115,11 @@ pub(crate) struct StrategyConfig {
     pub max_position: Decimal,
     #[serde(default = "default_min_position", with = "rust_decimal::serde::float")]
     pub min_position: Decimal,
+    #[serde(
+        default = "default_position_size_pct",
+        with = "rust_decimal::serde::float"
+    )]
+    pub position_size_pct: Decimal,
 }
 
 fn default_extreme_threshold() -> Decimal {
@@ -127,6 +143,9 @@ fn default_max_position() -> Decimal {
 fn default_min_position() -> Decimal {
     dec("1.0")
 }
+fn default_position_size_pct() -> Decimal {
+    dec("1.0")
+}
 // ─── Edge Thresholds ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,6 +166,12 @@ pub(crate) struct RiskConfig {
     pub max_daily_loss_pct: Decimal,
     #[serde(default = "default_cooldown_ms")]
     pub cooldown_ms: i64,
+    #[serde(default = "default_pause_short_ms")]
+    pub pause_short_ms: i64,
+    #[serde(default = "default_pause_long_ms")]
+    pub pause_long_ms: i64,
+    #[serde(default = "default_pause_circuit_ms")]
+    pub pause_circuit_ms: i64,
 }
 
 fn default_max_daily_loss_pct() -> Decimal {
@@ -155,12 +180,27 @@ fn default_max_daily_loss_pct() -> Decimal {
 fn default_cooldown_ms() -> i64 {
     5_000
 }
+fn default_pause_short_ms() -> i64 {
+    60_000
+}
+fn default_pause_long_ms() -> i64 {
+    300_000
+}
+fn default_pause_circuit_ms() -> i64 {
+    1_800_000
+}
 
 // ─── Polling ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PollingConfig {
     pub signal_interval_ms: u64,
+    #[serde(default = "default_status_interval_ms")]
+    pub status_interval_ms: u64,
+}
+
+fn default_status_interval_ms() -> u64 {
+    10_000
 }
 
 // ─── Price Source ───
@@ -244,6 +284,8 @@ impl Default for MarketConfig {
     fn default() -> Self {
         Self {
             window_minutes: 5.0,
+            stale_threshold_ms: 30_000,
+            min_ttl_ms: 30_000,
         }
     }
 }
@@ -266,6 +308,7 @@ impl Default for StrategyConfig {
             momentum_lookback_ms: 120_000,
             max_position: dec("10.0"),
             min_position: dec("1.0"),
+            position_size_pct: dec("1.0"),
         }
     }
 }
@@ -284,6 +327,9 @@ impl Default for RiskConfig {
             max_consecutive_losses: 8,
             max_daily_loss_pct: dec("0.25"),
             cooldown_ms: 5_000,
+            pause_short_ms: 60_000,
+            pause_long_ms: 300_000,
+            pause_circuit_ms: 1_800_000,
         }
     }
 }
@@ -292,6 +338,7 @@ impl Default for PollingConfig {
     fn default() -> Self {
         Self {
             signal_interval_ms: 1000,
+            status_interval_ms: 10_000,
         }
     }
 }
@@ -364,6 +411,8 @@ impl Config {
         let defaults = Config::default();
 
         self.market.window_minutes == defaults.market.window_minutes
+            && self.market.stale_threshold_ms == defaults.market.stale_threshold_ms
+            && self.market.min_ttl_ms == defaults.market.min_ttl_ms
             && self.polyclob.gamma_api_url == defaults.polyclob.gamma_api_url
             && self.strategy.extreme_threshold == defaults.strategy.extreme_threshold
             && self.strategy.fair_value == defaults.strategy.fair_value
@@ -372,11 +421,16 @@ impl Config {
             && self.strategy.momentum_lookback_ms == defaults.strategy.momentum_lookback_ms
             && self.strategy.max_position == defaults.strategy.max_position
             && self.strategy.min_position == defaults.strategy.min_position
+            && self.strategy.position_size_pct == defaults.strategy.position_size_pct
             && self.edge.edge_threshold_early == defaults.edge.edge_threshold_early
             && self.risk.max_consecutive_losses == defaults.risk.max_consecutive_losses
             && self.risk.max_daily_loss_pct == defaults.risk.max_daily_loss_pct
             && self.risk.cooldown_ms == defaults.risk.cooldown_ms
+            && self.risk.pause_short_ms == defaults.risk.pause_short_ms
+            && self.risk.pause_long_ms == defaults.risk.pause_long_ms
+            && self.risk.pause_circuit_ms == defaults.risk.pause_circuit_ms
             && self.polling.signal_interval_ms == defaults.polling.signal_interval_ms
+            && self.polling.status_interval_ms == defaults.polling.status_interval_ms
     }
 }
 

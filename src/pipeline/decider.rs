@@ -10,10 +10,6 @@ use crate::pipeline::signal::Direction;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 
-const PAUSE_SHORT_MS: i64 = 60_000;
-const PAUSE_LONG_MS: i64 = 300_000;
-const PAUSE_CIRCUIT_MS: i64 = 1_800_000;
-
 #[derive(Debug, Clone)]
 pub(crate) enum Decision {
     Pass(String),
@@ -34,6 +30,8 @@ pub(crate) struct DeciderConfig {
     pub min_position: Decimal,
     /// Cooldown between trades (ms)
     pub cooldown_ms: i64,
+    /// Circuit breaker: max consecutive losses before longest pause
+    pub max_consecutive_losses: u32,
     /// Market price threshold to consider "extreme" (e.g. 0.80)
     pub extreme_threshold: Decimal,
     /// Fair value assumption for binary outcome (e.g. 0.50)
@@ -44,6 +42,14 @@ pub(crate) struct DeciderConfig {
     pub momentum_threshold: Decimal,
     /// Momentum lookback window in milliseconds (e.g. 120_000 = 2 min)
     pub momentum_lookback_ms: i64,
+    /// Position size as percentage of balance (e.g. 1.0 = 1%)
+    pub position_size_pct: Decimal,
+    /// Pause duration after 4-5 consecutive losses (ms)
+    pub pause_short_ms: i64,
+    /// Pause duration after 6-7 consecutive losses (ms)
+    pub pause_long_ms: i64,
+    /// Pause duration at circuit breaker (ms)
+    pub pause_circuit_ms: i64,
 }
 
 impl Default for DeciderConfig {
@@ -53,11 +59,16 @@ impl Default for DeciderConfig {
             max_position: decimal("10.0"),
             min_position: decimal("1.0"),
             cooldown_ms: 5_000,
+            max_consecutive_losses: 8,
             extreme_threshold: decimal("0.80"),
             fair_value: decimal("0.50"),
             max_daily_loss_pct: decimal("0.25"),
             momentum_threshold: decimal("0.003"),
             momentum_lookback_ms: 120_000,
+            position_size_pct: decimal("1.0"),
+            pause_short_ms: 60_000,
+            pause_long_ms: 300_000,
+            pause_circuit_ms: 1_800_000,
         }
     }
 }
@@ -157,12 +168,12 @@ impl AccountState {
 
     /// Check if we should pause after losses (trend detection)
     /// Returns pause duration in ms, or 0 if no pause needed
-    fn loss_pause_duration(&self, max_consecutive_losses: u32) -> i64 {
+    fn loss_pause_duration(&self, cfg: &DeciderConfig) -> i64 {
         match self.consecutive_losses {
-            0..=3 => 0,              // No pause
-            4..=5 => PAUSE_SHORT_MS, // 1 minute pause
-            6..=7 => PAUSE_LONG_MS,  // 5 minutes pause
-            _ if self.consecutive_losses >= max_consecutive_losses => PAUSE_CIRCUIT_MS,
+            0..=3 => 0,
+            4..=5 => cfg.pause_short_ms,
+            6..=7 => cfg.pause_long_ms,
+            _ if self.consecutive_losses >= cfg.max_consecutive_losses => cfg.pause_circuit_ms,
             _ => 0,
         }
     }
@@ -175,7 +186,7 @@ impl AccountState {
     pub(crate) fn record_settlement(
         &mut self,
         result: &crate::pipeline::settler::SettlementResult,
-        max_consecutive_losses: u32,
+        cfg: &DeciderConfig,
     ) {
         self.balance += result.payout;
         self.daily_pnl += result.pnl;
@@ -189,7 +200,7 @@ impl AccountState {
             self.consecutive_wins = 0;
             self.total_losses += 1;
 
-            let pause_ms = self.loss_pause_duration(max_consecutive_losses);
+            let pause_ms = self.loss_pause_duration(cfg);
             if pause_ms > 0 {
                 self.pause_until_ms = chrono::Utc::now().timestamp_millis() + pause_ms;
                 tracing::warn!(
@@ -311,8 +322,8 @@ pub(crate) fn decide(
         return Decision::Pass("insufficient_balance".into());
     }
 
-    // Position sizing: fixed 1% of balance, clamped to [min_position, max_position]
-    let size = (account.balance / decimal("100"))
+    // Position sizing: fixed % of balance, clamped to [min_position, max_position]
+    let size = (account.balance * cfg.position_size_pct / decimal("100"))
         .max(cfg.min_position)
         .min(cfg.max_position);
 
@@ -333,15 +344,8 @@ mod tests {
 
     fn cfg_for_threshold_test() -> DeciderConfig {
         DeciderConfig {
-            edge_threshold: d("0.15"),
-            max_position: d("10.0"),
-            min_position: d("1.0"),
-            cooldown_ms: 5_000,
             extreme_threshold: d("0.64"),
-            fair_value: d("0.50"),
-            max_daily_loss_pct: d("0.25"),
-            momentum_threshold: d("0.003"),
-            momentum_lookback_ms: 120_000,
+            ..DeciderConfig::default()
         }
     }
 
@@ -379,7 +383,7 @@ mod tests {
         };
 
         account.record_trade(d("5.0"));
-        account.record_settlement(&result, 8);
+        account.record_settlement(&result, &DeciderConfig::default());
 
         assert_eq!(account.balance, d("1019.99"));
         assert_eq!(account.daily_pnl, d("19.99"));

@@ -168,6 +168,8 @@ Trading mode and all strategy parameters are configured in `config.json`. See `c
 | --- | --- | --- |
 | `trading.mode` | `"paper"` | Runtime mode: `"paper"` or `"live"` |
 | `market.window_minutes` | `5.0` | Market window length in minutes |
+| `market.stale_threshold_ms` | `30000` | Max age of BTC price data before considered stale (ms) |
+| `market.min_ttl_ms` | `30000` | Minimum remaining time before market expiry to place a trade (ms) |
 | `polyclob.gamma_api_url` | `https://gamma-api.polymarket.com` | Gamma API base URL |
 | `price_source.source` | `"binance"` | Price feed: `"binance"`, `"binance_ws"`, `"coinbase"`, `"coinbase_ws"` |
 | `price_source.symbol` | `"BTCUSDT"` | Trading pair symbol (e.g., "BTCUSDT" for Binance, "BTC-USD" for Coinbase) |
@@ -178,11 +180,16 @@ Trading mode and all strategy parameters are configured in `config.json`. See `c
 | `strategy.momentum_lookback_ms` | `120000` | Momentum lookback window in milliseconds (2 minutes) |
 | `strategy.max_position` | `10.0` | Maximum position size in USDC |
 | `strategy.min_position` | `1.0` | Minimum position size in USDC |
+| `strategy.position_size_pct` | `1.0` | Position size as percentage of balance (1.0 = 1%) |
 | `edge.edge_threshold_early` | `0.15` | Minimum edge required to place a trade (15%) |
-| `risk.max_consecutive_losses` | `8` | Circuit breaker threshold (logged warning for loss streaks) |
-| `risk.max_daily_loss_pct` | `0.25` | Daily loss limit as fraction of balance (logged warning) |
-| `risk.cooldown_ms` | `5000` | Minimum milliseconds between trades (logged warning) |
+| `risk.max_consecutive_losses` | `8` | Circuit breaker threshold for consecutive losses |
+| `risk.max_daily_loss_pct` | `0.25` | Daily loss limit as fraction of balance |
+| `risk.cooldown_ms` | `5000` | Minimum milliseconds between trades |
+| `risk.pause_short_ms` | `60000` | Pause after 4-5 consecutive losses (1 min) |
+| `risk.pause_long_ms` | `300000` | Pause after 6-7 consecutive losses (5 min) |
+| `risk.pause_circuit_ms` | `1800000` | Pause at circuit breaker threshold (30 min) |
 | `polling.signal_interval_ms` | `1000` | Main signal loop interval in milliseconds |
+| `polling.status_interval_ms` | `10000` | Status log printing interval in milliseconds |
 
 ### Price Source Configuration
 

@@ -399,15 +399,35 @@ impl Bot {
         })
     }
 
+    fn decider_cfg(&self) -> DeciderConfig {
+        DeciderConfig {
+            edge_threshold: self.config.edge.edge_threshold_early,
+            max_position: self.config.strategy.max_position,
+            min_position: self.config.strategy.min_position,
+            cooldown_ms: self.config.risk.cooldown_ms,
+            max_consecutive_losses: self.config.risk.max_consecutive_losses,
+            extreme_threshold: self.config.strategy.extreme_threshold,
+            fair_value: self.config.strategy.fair_value,
+            max_daily_loss_pct: self.config.risk.max_daily_loss_pct,
+            momentum_threshold: self.config.strategy.momentum_threshold,
+            momentum_lookback_ms: self.config.strategy.momentum_lookback_ms,
+            position_size_pct: self.config.strategy.position_size_pct,
+            pause_short_ms: self.config.risk.pause_short_ms,
+            pause_long_ms: self.config.risk.pause_long_ms,
+            pause_circuit_ms: self.config.risk.pause_circuit_ms,
+        }
+    }
+
     fn start_status_printer(&self) -> tokio::task::JoinHandle<()> {
         let price_source = self.price_source.clone();
         let account = self.account.clone();
         let settler = self.settler.clone();
         let market_state = self.market_state.clone();
         let mode = self.config.trading.mode;
+        let status_interval_ms = self.config.polling.status_interval_ms;
 
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(10));
+            let mut interval = tokio::time::interval(Duration::from_millis(status_interval_ms));
             loop {
                 interval.tick().await;
 
@@ -482,10 +502,10 @@ impl Bot {
             return Ok(());
         }
 
-        const STALE_THRESHOLD_MS: i64 = 30_000;
+        let stale_threshold_ms = self.config.market.stale_threshold_ms;
         if let Some(last_ts) = self.price_source.last_tick_ms().await {
             let age = Utc::now().timestamp_millis() - last_ts;
-            if age > STALE_THRESHOLD_MS {
+            if age > stale_threshold_ms {
                 tracing::warn!("[PRICE] BTC data stale ({}s), skipping trade", age / 1000);
                 return Ok(());
             }
@@ -500,10 +520,10 @@ impl Bot {
             return Ok(());
         }
 
-        const MIN_TTL_MS: i64 = 30_000;
+        let min_ttl_ms = self.config.market.min_ttl_ms;
         if mkt.settlement_ms > 0 {
             let remaining = mkt.settlement_ms - Utc::now().timestamp_millis();
-            if remaining < MIN_TTL_MS {
+            if remaining < min_ttl_ms {
                 let detail = format!("remaining={}s", remaining / 1000);
                 self.state
                     .write()
@@ -559,17 +579,7 @@ impl Bot {
         // 4. Decide trade (Stage 3)
         let account_read = self.account.read().await.clone();
 
-        let decider_cfg = DeciderConfig {
-            edge_threshold: self.config.edge.edge_threshold_early,
-            max_position: self.config.strategy.max_position,
-            min_position: self.config.strategy.min_position,
-            cooldown_ms: self.config.risk.cooldown_ms,
-            extreme_threshold: self.config.strategy.extreme_threshold,
-            fair_value: self.config.strategy.fair_value,
-            max_daily_loss_pct: self.config.risk.max_daily_loss_pct,
-            momentum_threshold: self.config.strategy.momentum_threshold,
-            momentum_lookback_ms: self.config.strategy.momentum_lookback_ms,
-        };
+        let decider_cfg = self.decider_cfg();
 
         let timed_prices: Vec<(f64, i64)> =
             prices.iter().map(|p| (p.price, p.timestamp_ms)).collect();
@@ -722,7 +732,7 @@ impl Bot {
         let account = self.account.clone();
         let price_source = self.price_source.clone();
         let discovery = self.discovery.clone();
-        let max_consecutive_losses = self.config.risk.max_consecutive_losses;
+        let settle_decider_cfg = self.decider_cfg();
         let redeemer = self.redeemer.clone();
         let log_dir = self.log_dir.clone();
 
@@ -776,7 +786,7 @@ impl Bot {
                     let mut acc = account.write().await;
                     acc.check_daily_reset();
                     for r in &results {
-                        acc.record_settlement(r, max_consecutive_losses);
+                        acc.record_settlement(r, &settle_decider_cfg);
                     }
 
                     tracing::info!(
