@@ -303,18 +303,6 @@ pub(crate) fn decide(
             if against_trend {
                 return Decision::Pass(format!("against_trend_{:+.2}%", momentum * 100.0));
             }
-            // Also block if momentum is neutral (no confirmation)
-            // Require momentum to confirm our direction before entering
-            let confirms_direction = match direction {
-                Direction::Down => momentum < -momentum_threshold,
-                Direction::Up => momentum > momentum_threshold,
-            };
-            if !confirms_direction {
-                return Decision::Pass(format!(
-                    "no_momentum_confirm_{:+.2}%",
-                    momentum * 100.0
-                ));
-            }
         }
     }
 
