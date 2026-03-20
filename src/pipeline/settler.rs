@@ -95,7 +95,8 @@ impl Settler {
 
             let btc_change = current_btc_price - pos.entry_btc_price;
             let btc_went_up = if btc_change.abs() < btc_tiebreaker_usd {
-                pos.entry_price > Decimal::new(5, 1)
+                // Tiebreaker: coin flip instead of biasing toward market sentiment
+                pos.settlement_time_ms % 2 == 0
             } else {
                 btc_change > 0.0
             };

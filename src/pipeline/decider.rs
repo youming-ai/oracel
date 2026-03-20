@@ -12,6 +12,7 @@ use rust_decimal::Decimal;
 
 const PAUSE_SHORT_MS: i64 = 60_000;
 const PAUSE_LONG_MS: i64 = 300_000;
+const PAUSE_CIRCUIT_MS: i64 = 1_800_000;
 
 #[derive(Debug, Clone)]
 pub(crate) enum Decision {
@@ -33,8 +34,6 @@ pub(crate) struct DeciderConfig {
     pub extreme_threshold: Decimal,
     /// Fair value assumption for binary outcome (e.g. 0.50)
     pub fair_value: Decimal,
-    /// Maximum consecutive losses before circuit breaker
-    pub max_consecutive_losses: u32,
     /// Maximum daily loss as fraction of balance (e.g. 0.10 = 10%)
     pub max_daily_loss_pct: Decimal,
     /// BTC momentum threshold to skip trade (e.g. 0.001 = 0.1%)
@@ -50,7 +49,6 @@ impl Default for DeciderConfig {
             cooldown_ms: 5_000,
             extreme_threshold: decimal("0.80"),
             fair_value: decimal("0.50"),
-            max_consecutive_losses: 8,
             max_daily_loss_pct: decimal("0.10"),
             momentum_threshold: decimal("0.001"),
             momentum_lookback_ms: 120_000,
@@ -146,11 +144,6 @@ impl AccountState {
             return false;
         }
 
-        // Hard stop: circuit breaker
-        if self.consecutive_losses >= cfg.max_consecutive_losses {
-            return false;
-        }
-
         // Daily loss limit
         if self.daily_pnl <= -(self.balance * cfg.max_daily_loss_pct) {
             return false;
@@ -161,12 +154,13 @@ impl AccountState {
 
     /// Check if we should pause after losses (trend detection)
     /// Returns pause duration in ms, or 0 if no pause needed
-    fn loss_pause_duration(&self) -> i64 {
+    fn loss_pause_duration(&self, max_consecutive_losses: u32) -> i64 {
         match self.consecutive_losses {
             0..=3 => 0,              // No pause
             4..=5 => PAUSE_SHORT_MS, // 1 minute pause
             6..=7 => PAUSE_LONG_MS,  // 5 minutes pause
-            _ => 0,                  // Hard stop handled elsewhere
+            _ if self.consecutive_losses >= max_consecutive_losses => PAUSE_CIRCUIT_MS,
+            _ => 0,
         }
     }
 
@@ -178,6 +172,7 @@ impl AccountState {
     pub(crate) fn record_settlement(
         &mut self,
         result: &crate::pipeline::settler::SettlementResult,
+        max_consecutive_losses: u32,
     ) {
         self.balance += result.payout;
         self.daily_pnl += result.pnl;
@@ -200,7 +195,7 @@ impl AccountState {
             }
 
             // Set pause if needed
-            let pause_ms = self.loss_pause_duration();
+            let pause_ms = self.loss_pause_duration(max_consecutive_losses);
             if pause_ms > 0 {
                 self.pause_until_ms = chrono::Utc::now().timestamp_millis() + pause_ms;
                 tracing::warn!(
@@ -248,9 +243,6 @@ pub(crate) fn decide(
 
     // 2. Risk check
     if !account.can_trade(cfg) {
-        if account.consecutive_losses >= cfg.max_consecutive_losses {
-            return Decision::Pass("circuit_breaker".into());
-        }
         if chrono::Utc::now().timestamp_millis() < account.pause_until_ms {
             let remaining = (account.pause_until_ms - chrono::Utc::now().timestamp_millis()) / 1000;
             return Decision::Pass(format!("loss_pause_{}s", remaining));
@@ -296,14 +288,19 @@ pub(crate) fn decide(
         ));
     }
 
-    if let Some(momentum) = btc_momentum(btc_prices, cfg.momentum_lookback_ms) {
-        let momentum_threshold = cfg.momentum_threshold.to_f64().unwrap_or(0.0);
-        let against_trend = match direction {
-            Direction::Down => momentum > momentum_threshold,
-            Direction::Up => momentum < -momentum_threshold,
-        };
-        if against_trend {
-            return Decision::Pass(format!("against_trend_{:+.2}%", momentum * 100.0));
+    match btc_momentum(btc_prices, cfg.momentum_lookback_ms) {
+        None => {
+            return Decision::Pass("no_momentum_data".into());
+        }
+        Some(momentum) => {
+            let momentum_threshold = cfg.momentum_threshold.to_f64().unwrap_or(0.0);
+            let against_trend = match direction {
+                Direction::Down => momentum > momentum_threshold,
+                Direction::Up => momentum < -momentum_threshold,
+            };
+            if against_trend {
+                return Decision::Pass(format!("against_trend_{:+.2}%", momentum * 100.0));
+            }
         }
     }
 
@@ -330,7 +327,6 @@ mod tests {
             cooldown_ms: 5_000,
             extreme_threshold: d("0.64"),
             fair_value: d("0.50"),
-            max_consecutive_losses: 8,
             max_daily_loss_pct: d("0.10"),
             momentum_threshold: d("0.001"),
             momentum_lookback_ms: 120_000,
@@ -370,7 +366,7 @@ mod tests {
         };
 
         account.record_trade(d("5.0"));
-        account.record_settlement(&result);
+        account.record_settlement(&result, 8);
 
         assert_eq!(account.balance, d("1019.99"));
         assert_eq!(account.daily_pnl, d("19.99"));
@@ -387,7 +383,7 @@ mod tests {
             1_700_000_000_000,
             &account,
             &cfg,
-            &[],
+            &[(100000.0, 0), (100000.0, 120_000)],
         );
 
         match decision {
@@ -412,7 +408,7 @@ mod tests {
             1_700_000_000_000,
             &account,
             &cfg,
-            &[],
+            &[(100000.0, 0), (100000.0, 120_000)],
         );
         match decision {
             Decision::Trade { size_usdc, .. } => assert_eq!(size_usdc, d("5")),
@@ -431,7 +427,7 @@ mod tests {
             1_700_000_000_000,
             &account,
             &cfg,
-            &[],
+            &[(100000.0, 0), (100000.0, 120_000)],
         );
         match decision {
             Decision::Trade { size_usdc, .. } => assert_eq!(size_usdc, d("1")),
@@ -482,10 +478,11 @@ mod tests {
     }
 
     #[test]
-    fn test_circuit_breaker_blocks_trading() {
+    fn test_threshold_losses_pause_trading() {
         let mut account = AccountState::new(d("1000"));
         let cfg = DeciderConfig::default();
-        account.consecutive_losses = cfg.max_consecutive_losses;
+        account.consecutive_losses = 8;
+        account.pause_until_ms = chrono::Utc::now().timestamp_millis() + 60_000;
 
         let decision = decide(
             Some(d("0.85")),
@@ -497,8 +494,37 @@ mod tests {
         );
 
         match decision {
-            Decision::Pass(reason) => assert_eq!(reason, "circuit_breaker"),
+            Decision::Pass(reason) => assert!(reason.starts_with("loss_pause_")),
             Decision::Trade { .. } => panic!("expected pass but got trade"),
+        }
+    }
+
+    #[test]
+    fn test_auto_resumes_after_threshold_pause_expires() {
+        let mut account = AccountState::new(d("1000"));
+        let cfg = DeciderConfig::default();
+        account.consecutive_losses = 8;
+        account.pause_until_ms = chrono::Utc::now().timestamp_millis() - 1_000;
+
+        let decision = decide(
+            Some(d("0.85")),
+            Some(d("0.15")),
+            1_700_000_000_000,
+            &account,
+            &cfg,
+            &[(100000.0, 0), (100000.0, 120_000)],
+        );
+
+        match decision {
+            Decision::Trade {
+                direction, edge, ..
+            } => {
+                assert_eq!(direction, Direction::Down);
+                assert_eq!(edge, d("0.35"));
+            }
+            Decision::Pass(reason) => {
+                panic!("expected trade after pause expiry but got pass: {}", reason)
+            }
         }
     }
 
@@ -518,6 +544,26 @@ mod tests {
 
         match decision {
             Decision::Pass(reason) => assert_eq!(reason, "no_market_data"),
+            Decision::Trade { .. } => panic!("expected pass but got trade"),
+        }
+    }
+
+    #[test]
+    fn test_pass_when_no_momentum_data() {
+        let account = AccountState::new(d("1000"));
+        let cfg = DeciderConfig::default();
+
+        let decision = decide(
+            Some(d("0.85")),
+            Some(d("0.15")),
+            1_700_000_000_000,
+            &account,
+            &cfg,
+            &[],
+        );
+
+        match decision {
+            Decision::Pass(reason) => assert_eq!(reason, "no_momentum_data"),
             Decision::Trade { .. } => panic!("expected pass but got trade"),
         }
     }

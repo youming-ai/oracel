@@ -544,7 +544,6 @@ impl Bot {
             cooldown_ms: self.config.risk.cooldown_ms,
             extreme_threshold: self.config.strategy.extreme_threshold,
             fair_value: self.config.strategy.fair_value,
-            max_consecutive_losses: self.config.risk.max_consecutive_losses,
             max_daily_loss_pct: self.config.risk.max_daily_loss_pct,
             momentum_threshold: self.config.strategy.momentum_threshold,
             momentum_lookback_ms: self.config.strategy.momentum_lookback_ms,
@@ -701,6 +700,7 @@ impl Bot {
         let price_source = self.price_source.clone();
         let discovery = self.discovery.clone();
         let btc_tiebreaker_usd = self.config.strategy.btc_tiebreaker_usd;
+        let max_consecutive_losses = self.config.risk.max_consecutive_losses;
         let rpc = data::chainlink::rpc_url(self.config.trading.mode);
         let mode = self.config.trading.mode;
         let redeemer = self.redeemer.clone();
@@ -784,7 +784,7 @@ impl Bot {
                     let mut acc = account.write().await;
                     acc.check_daily_reset();
                     for r in &results {
-                        acc.record_settlement(r);
+                        acc.record_settlement(r, max_consecutive_losses);
                     }
 
                     tracing::info!(
