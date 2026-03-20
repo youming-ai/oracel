@@ -271,7 +271,7 @@ impl Default for StrategyConfig {
             extreme_threshold: dec("0.80"),
             fair_value: dec("0.50"),
             btc_tiebreaker_usd: 5.0,
-            momentum_threshold: dec("0.001"),
+            momentum_threshold: dec("0.003"),
             momentum_lookback_ms: 120_000,
             max_position: dec("10.0"),
             min_position: dec("1.0"),

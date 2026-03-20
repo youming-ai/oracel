@@ -59,7 +59,7 @@ impl Default for DeciderConfig {
             extreme_threshold: decimal("0.80"),
             fair_value: decimal("0.50"),
             max_daily_loss_pct: decimal("0.25"),
-            momentum_threshold: decimal("0.001"),
+            momentum_threshold: decimal("0.003"),
             momentum_lookback_ms: 120_000,
         }
     }
@@ -98,6 +98,7 @@ pub(crate) struct AccountState {
     up_stats: DirectionStats,
     down_stats: DirectionStats,
     pub last_traded_settlement_ms: i64,
+    pub pause_until_ms: i64,
 }
 
 impl AccountState {
@@ -114,6 +115,7 @@ impl AccountState {
             up_stats: DirectionStats::new(),
             down_stats: DirectionStats::new(),
             last_traded_settlement_ms: 0,
+            pause_until_ms: 0,
         }
     }
 
@@ -141,20 +143,36 @@ impl AccountState {
     fn check_risk_controls(&self, cfg: &DeciderConfig) -> Option<&'static str> {
         let now = chrono::Utc::now().timestamp_millis();
 
+        if self.balance <= Decimal::ZERO {
+            tracing::error!("[RISK] Balance is zero or negative: {}, blocking trade", self.balance);
+            return Some("insufficient_balance");
+        }
+
         if now - self.last_trade_time_ms < cfg.cooldown_ms {
             let remaining = cfg.cooldown_ms - (now - self.last_trade_time_ms);
-            tracing::info!(
-                "[RISK] Cooldown active: {}ms remaining, trading continues",
+            tracing::warn!(
+                "[RISK] Cooldown active: {}ms remaining, blocking trade",
                 remaining
             );
+            return Some("cooldown");
+        }
+
+        if now < self.pause_until_ms {
+            let remaining = (self.pause_until_ms - now) / 1000;
+            tracing::warn!(
+                "[RISK] Loss pause active: {}s remaining, blocking trade",
+                remaining
+            );
+            return Some("loss_pause");
         }
 
         if self.daily_pnl <= -(self.balance * cfg.max_daily_loss_pct) {
-            tracing::warn!(
-                "[RISK] Daily loss limit reached: pnl={:.2}, limit={:.2}, trading continues",
+            tracing::error!(
+                "[RISK] Daily loss limit reached: pnl={:.2}, limit={:.2}, blocking trade",
                 self.daily_pnl,
                 -(self.balance * cfg.max_daily_loss_pct)
             );
+            return Some("daily_loss_limit");
         }
 
         None
@@ -202,11 +220,11 @@ impl AccountState {
                 Direction::Down => self.down_stats.losses += 1,
             }
 
-            // Log pause that would have been applied (but do not pause)
             let pause_ms = self.loss_pause_duration(max_consecutive_losses);
             if pause_ms > 0 {
+                self.pause_until_ms = chrono::Utc::now().timestamp_millis() + pause_ms;
                 tracing::warn!(
-                    "[RISK] {} consecutive losses, would pause for {}s (trading continues)",
+                    "[RISK] {} consecutive losses, pausing for {}s",
                     self.consecutive_losses,
                     pause_ms / 1000
                 );
@@ -214,14 +232,15 @@ impl AccountState {
         }
     }
 
-    /// Overall win rate across all trades
-    fn overall_win_rate(&self) -> Decimal {
+    /// Overall win rate across all trades.
+    /// Returns None if fewer than 10 trades (insufficient data for Kelly sizing).
+    fn overall_win_rate(&self) -> Option<Decimal> {
         let total_wins = self.up_stats.wins + self.down_stats.wins;
         let total = self.up_stats.total() + self.down_stats.total();
-        if total == 0 {
-            return decimal("0.50");
+        if total < 10 {
+            return None;
         }
-        Decimal::from(total_wins) / Decimal::from(total)
+        Some(Decimal::from(total_wins) / Decimal::from(total))
     }
 }
 
@@ -306,12 +325,25 @@ pub(crate) fn decide(
         }
         Some(momentum) => {
             let momentum_threshold = cfg.momentum_threshold.to_f64().unwrap_or(0.0);
+            // Block if momentum is against our trade direction
             let against_trend = match direction {
                 Direction::Down => momentum > momentum_threshold,
                 Direction::Up => momentum < -momentum_threshold,
             };
             if against_trend {
                 return Decision::Pass(format!("against_trend_{:+.2}%", momentum * 100.0));
+            }
+            // Also block if momentum is neutral (no confirmation)
+            // Require momentum to confirm our direction before entering
+            let confirms_direction = match direction {
+                Direction::Down => momentum < -momentum_threshold,
+                Direction::Up => momentum > momentum_threshold,
+            };
+            if !confirms_direction {
+                return Decision::Pass(format!(
+                    "no_momentum_confirm_{:+.2}%",
+                    momentum * 100.0
+                ));
             }
         }
     }
@@ -322,21 +354,32 @@ pub(crate) fn decide(
 
     // Position sizing: Half-Kelly based on edge and win rate
     let two = decimal("2");
-    let win_rate = account
-        .overall_win_rate()
-        .max(decimal("0.50"))
-        .min(decimal("0.75"));
-    let kelly_fraction = (two * win_rate - Decimal::ONE).max(decimal("0.05"));
-    let half_kelly = kelly_fraction * decimal("0.5");
+    let size = match account.overall_win_rate() {
+        None => {
+            // Insufficient data (<10 trades): use fixed 1% of balance
+            (account.balance / decimal("100")).max(cfg.min_position).min(cfg.max_position)
+        }
+        Some(win_rate) => {
+            let win_rate = win_rate.min(decimal("0.75"));
+            let kelly_fraction = two * win_rate - Decimal::ONE;
+            if kelly_fraction <= Decimal::ZERO {
+                return Decision::Pass(format!(
+                    "kelly_negative_wr_{:.0}%",
+                    win_rate.to_f64().unwrap_or(0.0) * 100.0
+                ));
+            }
+            let half_kelly = kelly_fraction * decimal("0.5");
 
-    // Scale by edge strength: 15% edge = 1x, 30% edge = 1.5x, 45%+ = 2x
-    let edge_base = cfg.edge_threshold;
-    let edge_excess = (edge - edge_base) / edge_base;
-    let edge_multiplier = (Decimal::ONE + edge_excess).max(Decimal::ONE).min(two);
+            // Scale by edge strength: 15% edge = 1x, 30% edge = 1.5x, 45%+ = 2x
+            let edge_base = cfg.edge_threshold;
+            let edge_excess = (edge - edge_base) / edge_base;
+            let edge_multiplier = (Decimal::ONE + edge_excess).max(Decimal::ONE).min(two);
 
-    let mut size = account.balance * half_kelly * edge_multiplier;
-    size = size.max(cfg.min_position).min(cfg.max_position);
-    size = size.min(account.balance * cfg.max_risk_fraction);
+            let mut s = account.balance * half_kelly * edge_multiplier;
+            s = s.max(cfg.min_position).min(cfg.max_position);
+            s.min(account.balance * cfg.max_risk_fraction)
+        }
+    };
 
     Decision::Trade {
         direction,
@@ -363,7 +406,7 @@ mod tests {
             extreme_threshold: d("0.64"),
             fair_value: d("0.50"),
             max_daily_loss_pct: d("0.25"),
-            momentum_threshold: d("0.001"),
+            momentum_threshold: d("0.003"),
             momentum_lookback_ms: 120_000,
         }
     }
@@ -373,13 +416,14 @@ mod tests {
         let mut account = AccountState::new(d("1000"));
         account.last_trade_time_ms = chrono::Utc::now().timestamp_millis() - 60_000;
 
+        // extreme_threshold=0.64, mkt_up=0.65 => direction=Down, need downward momentum
         let decision = decide(
             Some(d("0.65")),
             Some(d("0.35")),
             1_700_000_000_000,
             &account,
             &cfg_for_threshold_test(),
-            &[(100000.0, 0), (100000.0, 120_000)],
+            &[(100400.0, 0), (100000.0, 120_000)],
         );
 
         match decision {
@@ -407,6 +451,16 @@ mod tests {
         assert_eq!(account.daily_pnl, d("19.99"));
     }
 
+    /// BTC prices with downward momentum (>0.3% drop) for confirming DOWN direction
+    fn btc_down_momentum() -> Vec<(f64, i64)> {
+        vec![(100400.0, 0), (100000.0, 120_000)]
+    }
+
+    /// BTC prices with upward momentum (>0.3% rise) for confirming UP direction
+    fn btc_up_momentum() -> Vec<(f64, i64)> {
+        vec![(100000.0, 0), (100400.0, 120_000)]
+    }
+
     #[test]
     fn test_trade_when_extreme_bullish() {
         let account = AccountState::new(d("1000"));
@@ -418,7 +472,7 @@ mod tests {
             1_700_000_000_000,
             &account,
             &cfg,
-            &[(100000.0, 0), (100000.0, 120_000)],
+            &btc_down_momentum(),
         );
 
         match decision {
@@ -443,7 +497,7 @@ mod tests {
             1_700_000_000_000,
             &account,
             &cfg,
-            &[(100000.0, 0), (100000.0, 120_000)],
+            &btc_down_momentum(),
         );
         match decision {
             Decision::Trade { size_usdc, .. } => assert_eq!(size_usdc, d("5")),
@@ -462,7 +516,7 @@ mod tests {
             1_700_000_000_000,
             &account,
             &cfg,
-            &[(100000.0, 0), (100000.0, 120_000)],
+            &btc_down_momentum(),
         );
         match decision {
             Decision::Trade { size_usdc, .. } => assert_eq!(size_usdc, d("1")),
@@ -513,10 +567,11 @@ mod tests {
     }
 
     #[test]
-    fn test_risk_controls_do_not_block_after_loss_streak() {
+    fn test_risk_controls_block_after_loss_pause() {
         let mut account = AccountState::new(d("1000"));
         let cfg = DeciderConfig::default();
         account.consecutive_losses = 8;
+        account.pause_until_ms = chrono::Utc::now().timestamp_millis() + 60_000;
 
         let decision = decide(
             Some(d("0.85")),
@@ -524,27 +579,19 @@ mod tests {
             1_700_000_000_000,
             &account,
             &cfg,
-            &[(100000.0, 0), (100000.0, 120_000)],
+            &btc_down_momentum(),
         );
 
         match decision {
-            Decision::Trade {
-                direction, edge, ..
-            } => {
-                assert_eq!(direction, Direction::Down);
-                assert_eq!(edge, d("0.35"));
-            }
-            Decision::Pass(reason) => {
-                panic!(
-                    "expected trade despite advisory loss streak, got pass: {}",
-                    reason
-                )
+            Decision::Pass(reason) => assert_eq!(reason, "loss_pause"),
+            Decision::Trade { .. } => {
+                panic!("expected pass due to loss pause but got trade")
             }
         }
     }
 
     #[test]
-    fn test_risk_controls_do_not_block_on_cooldown() {
+    fn test_risk_controls_block_on_cooldown() {
         let mut account = AccountState::new(d("1000"));
         let cfg = DeciderConfig::default();
         account.last_trade_time_ms = chrono::Utc::now().timestamp_millis();
@@ -555,21 +602,13 @@ mod tests {
             1_700_000_000_000,
             &account,
             &cfg,
-            &[(100000.0, 0), (100000.0, 120_000)],
+            &btc_down_momentum(),
         );
 
         match decision {
-            Decision::Trade {
-                direction, edge, ..
-            } => {
-                assert_eq!(direction, Direction::Down);
-                assert_eq!(edge, d("0.35"));
-            }
-            Decision::Pass(reason) => {
-                panic!(
-                    "expected trade despite advisory cooldown, got pass: {}",
-                    reason
-                )
+            Decision::Pass(reason) => assert_eq!(reason, "cooldown"),
+            Decision::Trade { .. } => {
+                panic!("expected pass due to cooldown but got trade")
             }
         }
     }
@@ -585,7 +624,7 @@ mod tests {
             1_700_000_000_000,
             &account,
             &cfg,
-            &[(100000.0, 0), (100000.0, 120_000)],
+            &btc_down_momentum(),
         );
 
         match decision {
@@ -595,11 +634,11 @@ mod tests {
     }
 
     #[test]
-    fn test_risk_controls_do_not_block_on_daily_loss_limit() {
+    fn test_risk_controls_block_on_daily_loss_limit() {
         let mut account = AccountState::new(d("1000"));
         let cfg = DeciderConfig::default();
         account.last_trade_time_ms = chrono::Utc::now().timestamp_millis() - 60_000;
-        account.daily_pnl = d("-150");
+        account.daily_pnl = d("-300"); // exceeds 25% of $1000
 
         let decision = decide(
             Some(d("0.85")),
@@ -607,21 +646,13 @@ mod tests {
             1_700_000_000_000,
             &account,
             &cfg,
-            &[(100000.0, 0), (100000.0, 120_000)],
+            &btc_down_momentum(),
         );
 
         match decision {
-            Decision::Trade {
-                direction, edge, ..
-            } => {
-                assert_eq!(direction, Direction::Down);
-                assert_eq!(edge, d("0.35"));
-            }
-            Decision::Pass(reason) => {
-                panic!(
-                    "expected trade despite advisory daily loss, got pass: {}",
-                    reason
-                )
+            Decision::Pass(reason) => assert_eq!(reason, "daily_loss_limit"),
+            Decision::Trade { .. } => {
+                panic!("expected pass due to daily loss limit but got trade")
             }
         }
     }

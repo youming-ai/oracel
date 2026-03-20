@@ -44,6 +44,8 @@ struct PersistState {
     daily_pnl: String,
     #[serde(default)]
     pnl_reset_date: String,
+    #[serde(default)]
+    pause_until_ms: i64,
 }
 
 use data::market_discovery::{
@@ -202,6 +204,7 @@ impl Bot {
         if !saved.pnl_reset_date.is_empty() {
             account.pnl_reset_date = saved.pnl_reset_date;
         }
+        account.pause_until_ms = saved.pause_until_ms;
         account.check_daily_reset();
 
         Ok(Self {
@@ -269,6 +272,7 @@ impl Bot {
             total_losses: acc.total_losses,
             daily_pnl: acc.daily_pnl.to_string(),
             pnl_reset_date: acc.pnl_reset_date.clone(),
+            pause_until_ms: acc.pause_until_ms,
         };
         drop(acc);
         let tmp = Path::new(log_dir).join("state.json.tmp");
