@@ -198,9 +198,8 @@ impl Bot {
         account.consecutive_wins = saved.consecutive_wins;
         account.total_wins = saved.total_wins;
         account.total_losses = saved.total_losses;
-        if let Ok(pnl) = Decimal::from_str_exact(&saved.daily_pnl) {
-            account.daily_pnl = pnl;
-        }
+        // daily_pnl is intentionally NOT restored — restarting the bot resets
+        // the daily loss counter so it won't stay stuck on daily_loss_limit.
         if !saved.pnl_reset_date.is_empty() {
             account.pnl_reset_date = saved.pnl_reset_date;
         }
