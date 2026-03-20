@@ -129,26 +129,41 @@ impl AccountState {
     }
 
     fn can_trade(&self, cfg: &DeciderConfig) -> bool {
-        if self.balance <= Decimal::ZERO {
-            return false;
-        }
-
-        // Check cooldown
         let now = chrono::Utc::now().timestamp_millis();
+
+        // Log risk status but do not block trading
+        if self.balance <= Decimal::ZERO {
+            tracing::warn!(
+                "[RISK] Balance is zero or negative: {}, allowing trade",
+                self.balance
+            );
+        }
+
         if now - self.last_trade_time_ms < cfg.cooldown_ms {
-            return false;
+            let remaining = cfg.cooldown_ms - (now - self.last_trade_time_ms);
+            tracing::info!(
+                "[RISK] Cooldown active: {}ms remaining, allowing trade",
+                remaining
+            );
         }
 
-        // Check if we're in a pause period
         if now < self.pause_until_ms {
-            return false;
+            let remaining = self.pause_until_ms - now;
+            tracing::info!(
+                "[RISK] Pause active: {}s remaining, allowing trade",
+                remaining / 1000
+            );
         }
 
-        // Daily loss limit
         if self.daily_pnl <= -(self.balance * cfg.max_daily_loss_pct) {
-            return false;
+            tracing::warn!(
+                "[RISK] Daily loss limit reached: pnl={:.2}, limit={:.2}, allowing trade",
+                self.daily_pnl,
+                -(self.balance * cfg.max_daily_loss_pct)
+            );
         }
 
+        // Always allow trading
         true
     }
 
@@ -194,12 +209,11 @@ impl AccountState {
                 Direction::Down => self.down_stats.losses += 1,
             }
 
-            // Set pause if needed
+            // Log pause that would have been applied (but do not pause)
             let pause_ms = self.loss_pause_duration(max_consecutive_losses);
             if pause_ms > 0 {
-                self.pause_until_ms = chrono::Utc::now().timestamp_millis() + pause_ms;
                 tracing::warn!(
-                    "[RISK] {} consecutive losses, pausing for {}s",
+                    "[RISK] {} consecutive losses, would pause for {}s (trading continues)",
                     self.consecutive_losses,
                     pause_ms / 1000
                 );
@@ -241,15 +255,8 @@ pub(crate) fn decide(
         return Decision::Pass("already_traded".into());
     }
 
-    // 2. Risk check
-    if !account.can_trade(cfg) {
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        if now_ms < account.pause_until_ms {
-            let remaining = (account.pause_until_ms - now_ms) / 1000;
-            return Decision::Pass(format!("loss_pause_{}s", remaining));
-        }
-        return Decision::Pass("risk_blocked".into());
-    }
+    // 2. Risk check (log only, do not block)
+    account.can_trade(cfg);
 
     // 3. Need market data
     let (yes, no) = match (market_yes, market_no) {
@@ -479,33 +486,12 @@ mod tests {
     }
 
     #[test]
-    fn test_threshold_losses_pause_trading() {
+    fn test_threshold_losses_does_not_block_trading() {
+        // After risk check changes, trading continues despite losses
         let mut account = AccountState::new(d("1000"));
         let cfg = DeciderConfig::default();
         account.consecutive_losses = 8;
         account.pause_until_ms = chrono::Utc::now().timestamp_millis() + 60_000;
-
-        let decision = decide(
-            Some(d("0.85")),
-            Some(d("0.15")),
-            1_700_000_000_000,
-            &account,
-            &cfg,
-            &[],
-        );
-
-        match decision {
-            Decision::Pass(reason) => assert!(reason.starts_with("loss_pause_")),
-            Decision::Trade { .. } => panic!("expected pass but got trade"),
-        }
-    }
-
-    #[test]
-    fn test_auto_resumes_after_threshold_pause_expires() {
-        let mut account = AccountState::new(d("1000"));
-        let cfg = DeciderConfig::default();
-        account.consecutive_losses = 8;
-        account.pause_until_ms = chrono::Utc::now().timestamp_millis() - 1_000;
 
         let decision = decide(
             Some(d("0.85")),
@@ -524,7 +510,40 @@ mod tests {
                 assert_eq!(edge, d("0.35"));
             }
             Decision::Pass(reason) => {
-                panic!("expected trade after pause expiry but got pass: {}", reason)
+                panic!("expected trade despite losses but got pass: {}", reason)
+            }
+        }
+    }
+
+    #[test]
+    fn test_trading_continues_during_pause_period() {
+        // Trading continues even during pause period (risk checks are logged only)
+        let mut account = AccountState::new(d("1000"));
+        let cfg = DeciderConfig::default();
+        account.consecutive_losses = 8;
+        account.pause_until_ms = chrono::Utc::now().timestamp_millis() + 60_000;
+
+        let decision = decide(
+            Some(d("0.85")),
+            Some(d("0.15")),
+            1_700_000_000_000,
+            &account,
+            &cfg,
+            &[(100000.0, 0), (100000.0, 120_000)],
+        );
+
+        match decision {
+            Decision::Trade {
+                direction, edge, ..
+            } => {
+                assert_eq!(direction, Direction::Down);
+                assert_eq!(edge, d("0.35"));
+            }
+            Decision::Pass(reason) => {
+                panic!(
+                    "expected trade to continue during pause but got pass: {}",
+                    reason
+                )
             }
         }
     }
