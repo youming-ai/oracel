@@ -19,8 +19,7 @@
     "momentum_threshold": 0.001,
     "momentum_lookback_ms": 120000,
     "max_position": 10.0,
-    "min_position": 1.0,
-    "max_risk_fraction": 0.10
+    "min_position": 1.0
   },
   "edge": {
     "edge_threshold_early": 0.15

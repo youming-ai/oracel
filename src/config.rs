@@ -104,11 +104,6 @@ pub(crate) struct StrategyConfig {
     pub max_position: Decimal,
     #[serde(default = "default_min_position", with = "rust_decimal::serde::float")]
     pub min_position: Decimal,
-    #[serde(
-        default = "default_max_risk_fraction",
-        with = "rust_decimal::serde::float"
-    )]
-    pub max_risk_fraction: Decimal,
 }
 
 fn default_extreme_threshold() -> Decimal {
@@ -132,10 +127,6 @@ fn default_max_position() -> Decimal {
 fn default_min_position() -> Decimal {
     dec("1.0")
 }
-fn default_max_risk_fraction() -> Decimal {
-    dec("0.10")
-}
-
 // ─── Edge Thresholds ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -275,7 +266,6 @@ impl Default for StrategyConfig {
             momentum_lookback_ms: 120_000,
             max_position: dec("10.0"),
             min_position: dec("1.0"),
-            max_risk_fraction: dec("0.10"),
         }
     }
 }
@@ -382,7 +372,6 @@ impl Config {
             && self.strategy.momentum_lookback_ms == defaults.strategy.momentum_lookback_ms
             && self.strategy.max_position == defaults.strategy.max_position
             && self.strategy.min_position == defaults.strategy.min_position
-            && self.strategy.max_risk_fraction == defaults.strategy.max_risk_fraction
             && self.edge.edge_threshold_early == defaults.edge.edge_threshold_early
             && self.risk.max_consecutive_losses == defaults.risk.max_consecutive_losses
             && self.risk.max_daily_loss_pct == defaults.risk.max_daily_loss_pct

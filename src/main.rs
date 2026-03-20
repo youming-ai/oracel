@@ -565,7 +565,6 @@ impl Bot {
             max_position: self.config.strategy.max_position,
             min_position: self.config.strategy.min_position,
             cooldown_ms: self.config.risk.cooldown_ms,
-            max_risk_fraction: self.config.strategy.max_risk_fraction,
             extreme_threshold: self.config.strategy.extreme_threshold,
             fair_value: self.config.strategy.fair_value,
             max_daily_loss_pct: self.config.risk.max_daily_loss_pct,

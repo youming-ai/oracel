@@ -34,8 +34,6 @@ pub(crate) struct DeciderConfig {
     pub min_position: Decimal,
     /// Cooldown between trades (ms)
     pub cooldown_ms: i64,
-    /// Account balance fraction to risk per trade (Half-Kelly cap)
-    pub max_risk_fraction: Decimal,
     /// Market price threshold to consider "extreme" (e.g. 0.80)
     pub extreme_threshold: Decimal,
     /// Fair value assumption for binary outcome (e.g. 0.50)
@@ -55,29 +53,12 @@ impl Default for DeciderConfig {
             max_position: decimal("10.0"),
             min_position: decimal("1.0"),
             cooldown_ms: 5_000,
-            max_risk_fraction: decimal("0.10"),
             extreme_threshold: decimal("0.80"),
             fair_value: decimal("0.50"),
             max_daily_loss_pct: decimal("0.25"),
             momentum_threshold: decimal("0.003"),
             momentum_lookback_ms: 120_000,
         }
-    }
-}
-
-/// Track win/loss per direction
-#[derive(Debug, Clone)]
-struct DirectionStats {
-    wins: u32,
-    losses: u32,
-}
-
-impl DirectionStats {
-    fn new() -> Self {
-        Self { wins: 0, losses: 0 }
-    }
-    fn total(&self) -> u32 {
-        self.wins + self.losses
     }
 }
 
@@ -95,8 +76,6 @@ pub(crate) struct AccountState {
     pub last_trade_time_ms: i64,
     pub daily_pnl: Decimal,
     pub pnl_reset_date: String,
-    up_stats: DirectionStats,
-    down_stats: DirectionStats,
     pub last_traded_settlement_ms: i64,
     pub pause_until_ms: i64,
 }
@@ -112,8 +91,6 @@ impl AccountState {
             last_trade_time_ms: 0,
             daily_pnl: Decimal::ZERO,
             pnl_reset_date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
-            up_stats: DirectionStats::new(),
-            down_stats: DirectionStats::new(),
             last_traded_settlement_ms: 0,
             pause_until_ms: 0,
         }
@@ -207,18 +184,10 @@ impl AccountState {
             self.consecutive_wins += 1;
             self.consecutive_losses = 0;
             self.total_wins += 1;
-            match result.direction {
-                Direction::Up => self.up_stats.wins += 1,
-                Direction::Down => self.down_stats.wins += 1,
-            }
         } else {
             self.consecutive_losses += 1;
             self.consecutive_wins = 0;
             self.total_losses += 1;
-            match result.direction {
-                Direction::Up => self.up_stats.losses += 1,
-                Direction::Down => self.down_stats.losses += 1,
-            }
 
             let pause_ms = self.loss_pause_duration(max_consecutive_losses);
             if pause_ms > 0 {
@@ -232,16 +201,6 @@ impl AccountState {
         }
     }
 
-    /// Overall win rate across all trades.
-    /// Returns None if fewer than 10 trades (insufficient data for Kelly sizing).
-    fn overall_win_rate(&self) -> Option<Decimal> {
-        let total_wins = self.up_stats.wins + self.down_stats.wins;
-        let total = self.up_stats.total() + self.down_stats.total();
-        if total < 10 {
-            return None;
-        }
-        Some(Decimal::from(total_wins) / Decimal::from(total))
-    }
 }
 
 fn btc_momentum(prices: &[(f64, i64)], lookback_ms: i64) -> Option<f64> {
@@ -352,34 +311,10 @@ pub(crate) fn decide(
         return Decision::Pass("insufficient_balance".into());
     }
 
-    // Position sizing: Half-Kelly based on edge and win rate
-    let two = decimal("2");
-    let size = match account.overall_win_rate() {
-        None => {
-            // Insufficient data (<10 trades): use fixed 1% of balance
-            (account.balance / decimal("100")).max(cfg.min_position).min(cfg.max_position)
-        }
-        Some(win_rate) => {
-            let win_rate = win_rate.min(decimal("0.75"));
-            let kelly_fraction = two * win_rate - Decimal::ONE;
-            if kelly_fraction <= Decimal::ZERO {
-                return Decision::Pass(format!(
-                    "kelly_negative_wr_{:.0}%",
-                    win_rate.to_f64().unwrap_or(0.0) * 100.0
-                ));
-            }
-            let half_kelly = kelly_fraction * decimal("0.5");
-
-            // Scale by edge strength: 15% edge = 1x, 30% edge = 1.5x, 45%+ = 2x
-            let edge_base = cfg.edge_threshold;
-            let edge_excess = (edge - edge_base) / edge_base;
-            let edge_multiplier = (Decimal::ONE + edge_excess).max(Decimal::ONE).min(two);
-
-            let mut s = account.balance * half_kelly * edge_multiplier;
-            s = s.max(cfg.min_position).min(cfg.max_position);
-            s.min(account.balance * cfg.max_risk_fraction)
-        }
-    };
+    // Position sizing: fixed 1% of balance, clamped to [min_position, max_position]
+    let size = (account.balance / decimal("100"))
+        .max(cfg.min_position)
+        .min(cfg.max_position);
 
     Decision::Trade {
         direction,
@@ -402,7 +337,6 @@ mod tests {
             max_position: d("10.0"),
             min_position: d("1.0"),
             cooldown_ms: 5_000,
-            max_risk_fraction: d("0.10"),
             extreme_threshold: d("0.64"),
             fair_value: d("0.50"),
             max_daily_loss_pct: d("0.25"),

@@ -176,9 +176,8 @@ Trading mode and all strategy parameters are configured in `config.json`. See `c
 | `strategy.btc_tiebreaker_usd` | `5.0` | BTC price change threshold (unused after settlement refactor) |
 | `strategy.momentum_threshold` | `0.001` | BTC momentum threshold (0.1%) to filter counter-trend trades |
 | `strategy.momentum_lookback_ms` | `120000` | Momentum lookback window in milliseconds (2 minutes) |
-| `strategy.max_position` | `10.0` | Maximum position size in USDC (Half-Kelly cap) |
+| `strategy.max_position` | `10.0` | Maximum position size in USDC |
 | `strategy.min_position` | `1.0` | Minimum position size in USDC |
-| `strategy.max_risk_fraction` | `0.10` | Max risk per trade as fraction of balance (10%) |
 | `edge.edge_threshold_early` | `0.15` | Minimum edge required to place a trade (15%) |
 | `risk.max_consecutive_losses` | `8` | Circuit breaker threshold (logged warning for loss streaks) |
 | `risk.max_daily_loss_pct` | `0.25` | Daily loss limit as fraction of balance (logged warning) |
