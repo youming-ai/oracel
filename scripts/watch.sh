@@ -37,10 +37,9 @@ while true; do
     PENDING=$(echo "$STATUS" | sed -n 's/.*pending=\([^ |]*\).*/\1/p')
 
     # parse state.json
-    CL=0; PAUSE=0
+    CL=0
     if [ -f "$STATE" ]; then
         CL=$(sed -n 's/.*"consecutive_losses":\([0-9]*\).*/\1/p' "$STATE" 2>/dev/null || echo 0)
-        PAUSE=$(sed -n 's/.*"pause_until_ms":\([0-9]*\).*/\1/p' "$STATE" 2>/dev/null || echo 0)
     fi
 
     # parse signal
@@ -60,12 +59,8 @@ while true; do
     pgrep -qf 'polybot' 2>/dev/null && ALIVE="${G}ON${N}"
 
     # bot status
-    NOW_S=$(date +%s)
-    PAUSE_S=$((PAUSE / 1000))
     BOT_ST="${G}ACTIVE${N}"
-    if [ "$PAUSE_S" -gt "$NOW_S" ] 2>/dev/null; then
-        BOT_ST="${Y}PAUSED $((PAUSE_S - NOW_S))s${N}"
-    elif [ "${CL:-0}" -ge 8 ] 2>/dev/null; then
+    if [ "${CL:-0}" -ge 8 ] 2>/dev/null; then
         BOT_ST="${R}CIRCUIT${N}"
     fi
 

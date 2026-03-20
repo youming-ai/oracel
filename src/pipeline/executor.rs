@@ -58,7 +58,10 @@ impl Executor {
                     return None;
                 }
 
-                let filled_shares = Self::compute_filled_shares(*size_usdc, price);
+                let filled_shares = match Self::compute_filled_shares(*size_usdc, price) {
+                    Some(shares) => shares,
+                    None => return None,
+                };
                 let cost = filled_shares * price;
                 let order_id = if self.mode.is_live() {
                     match self.place_live_order(token_id, price, filled_shares).await {
@@ -106,10 +109,21 @@ impl Executor {
         }
     }
 
-    fn compute_filled_shares(size_usdc: Decimal, price: Decimal) -> Decimal {
+    fn compute_filled_shares(size_usdc: Decimal, price: Decimal) -> Option<Decimal> {
         // Floor to whole shares so that maker_amount (= price × shares) stays
         // within the CLOB's 2-decimal-place limit for market buy orders.
-        (size_usdc / price).floor()
+        // Returns None if resulting shares would be 0 (reject tiny orders).
+        let shares = (size_usdc / price).floor();
+        if shares > Decimal::ZERO {
+            Some(shares)
+        } else {
+            tracing::warn!(
+                "[EXEC] Computed 0 shares for size={} price={}",
+                size_usdc,
+                price
+            );
+            None
+        }
     }
 
     async fn place_live_order(

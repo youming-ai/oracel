@@ -16,11 +16,21 @@ impl Direction {
 }
 
 /// Returns true if the market is in an extreme state (one side > threshold).
+/// Threshold must be in (0.5, 1.0) for "extreme" semantics to make sense.
 pub(crate) fn is_market_extreme(
     market_yes: Option<f64>,
     market_no: Option<f64>,
     extreme_threshold: f64,
 ) -> bool {
+    // Validate threshold is in valid range for extreme detection
+    if extreme_threshold <= 0.5 || extreme_threshold >= 1.0 {
+        tracing::warn!(
+            "[SIGNAL] extreme_threshold must be in (0.5, 1.0), got {}",
+            extreme_threshold
+        );
+        return false;
+    }
+
     let (yes, no) = match (market_yes, market_no) {
         (Some(y), Some(n)) if y > 0.01 && n > 0.01 => (y, n),
         _ => return false,
@@ -64,5 +74,16 @@ mod tests {
         assert!(!is_market_extreme(Some(0.0), Some(0.85), 0.80));
         assert!(!is_market_extreme(Some(0.85), Some(0.0), 0.80));
         assert!(!is_market_extreme(Some(0.0), Some(0.0), 0.80));
+    }
+
+    #[test]
+    fn test_invalid_threshold_rejected() {
+        // Threshold <= 0.5 is invalid for "extreme" semantics
+        assert!(!is_market_extreme(Some(0.85), Some(0.15), 0.50));
+        assert!(!is_market_extreme(Some(0.85), Some(0.15), 0.30));
+        assert!(!is_market_extreme(Some(0.85), Some(0.15), 0.0));
+        // Threshold >= 1.0 is invalid
+        assert!(!is_market_extreme(Some(0.85), Some(0.15), 1.0));
+        assert!(!is_market_extreme(Some(0.85), Some(0.15), 1.5));
     }
 }

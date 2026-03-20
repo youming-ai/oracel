@@ -41,14 +41,11 @@ struct PersistState {
     #[serde(default)]
     total_losses: u32,
     #[serde(default)]
-    pause_until_ms: i64,
-    #[serde(default)]
     daily_pnl: String,
     #[serde(default)]
     pnl_reset_date: String,
 }
 
-use data::coinbase::CoinbaseClient;
 use data::market_discovery::{
     infer_resolution_state, DiscoveryConfig, MarketDiscovery, ResolutionState,
 };
@@ -127,8 +124,11 @@ struct Bot {
 
 impl Bot {
     async fn new(config: Config, log_dir: String) -> Result<Self> {
-        let coinbase = Arc::new(CoinbaseClient::new("BTC-USD"));
-        let price_source = Arc::new(PriceSource::new(coinbase, PRICE_BUFFER_MAX));
+        let price_source = Arc::new(PriceSource::new(
+            config.price_source.source,
+            &config.price_source.symbol,
+            PRICE_BUFFER_MAX,
+        ));
         let polymarket = Arc::new(PolymarketClient::new()?);
 
         let discovery_cfg = DiscoveryConfig {
@@ -196,7 +196,6 @@ impl Bot {
         account.consecutive_wins = saved.consecutive_wins;
         account.total_wins = saved.total_wins;
         account.total_losses = saved.total_losses;
-        account.pause_until_ms = saved.pause_until_ms;
         if let Ok(pnl) = Decimal::from_str_exact(&saved.daily_pnl) {
             account.daily_pnl = pnl;
         }
@@ -268,7 +267,6 @@ impl Bot {
             consecutive_wins: acc.consecutive_wins,
             total_wins: acc.total_wins,
             total_losses: acc.total_losses,
-            pause_until_ms: acc.pause_until_ms,
             daily_pnl: acc.daily_pnl.to_string(),
             pnl_reset_date: acc.pnl_reset_date.clone(),
         };
@@ -566,6 +564,7 @@ impl Bot {
             max_daily_loss_pct: self.config.risk.max_daily_loss_pct,
             momentum_threshold: self.config.strategy.momentum_threshold,
             momentum_lookback_ms: self.config.strategy.momentum_lookback_ms,
+            enforce_limits: self.config.risk.enforce_limits,
         };
 
         let timed_prices: Vec<(f64, i64)> =
@@ -595,7 +594,7 @@ impl Bot {
                     if changed {
                         st.last_no_trade_reason = reason.clone();
                     }
-                    if changed && !reason.contains("cooldown") && !reason.contains("loss_pause") {
+                    if changed {
                         tracing::info!("[SKIP] {} | BTC=${:.0}", reason, btc_price);
                     }
                 }
@@ -657,11 +656,12 @@ impl Bot {
                     Self::write_balance(&self.log_dir, bal).await;
 
                     // Log to file
+                    let order_id_short: String = order.order_id.chars().take(8).collect();
                     let log_line = format!(
                         "{},{},{},{:.3},{:.2},{:.1},{:.2}\n",
                         Utc::now().format("%H:%M:%S"),
                         order.direction.as_str(),
-                        &order.order_id[..8],
+                        order_id_short,
                         order.entry_price,
                         order.cost,
                         (*edge * decimal("100")).round_dp(1),

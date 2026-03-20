@@ -20,6 +20,8 @@ pub(crate) struct Config {
     pub edge: EdgeConfigFile,
     pub risk: RiskConfig,
     pub polling: PollingConfig,
+    #[serde(default)]
+    pub price_source: PriceSourceConfig,
 }
 
 // ─── Trading ───
@@ -136,6 +138,9 @@ pub(crate) struct RiskConfig {
     pub max_daily_loss_pct: Decimal,
     #[serde(default = "default_cooldown_ms")]
     pub cooldown_ms: i64,
+    /// Whether to enforce risk limits as hard blocks (default: false = advisory only)
+    #[serde(default)]
+    pub enforce_limits: bool,
 }
 
 fn default_max_daily_loss_pct() -> Decimal {
@@ -144,12 +149,81 @@ fn default_max_daily_loss_pct() -> Decimal {
 fn default_cooldown_ms() -> i64 {
     5_000
 }
+fn default_enforce_limits() -> bool {
+    false
+}
 
 // ─── Polling ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PollingConfig {
     pub signal_interval_ms: u64,
+}
+
+// ─── Price Source ───
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PriceSourceType {
+    #[default]
+    Binance,
+    BinanceWs,
+    Coinbase,
+    CoinbaseWs,
+}
+
+impl PriceSourceType {
+    pub(crate) fn expects_dash_symbol(self) -> bool {
+        matches!(self, Self::Coinbase | Self::CoinbaseWs)
+    }
+}
+
+impl std::fmt::Display for PriceSourceType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Binance => write!(f, "binance"),
+            Self::BinanceWs => write!(f, "binance_ws"),
+            Self::Coinbase => write!(f, "coinbase"),
+            Self::CoinbaseWs => write!(f, "coinbase_ws"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PriceSourceConfig {
+    #[serde(default)]
+    pub source: PriceSourceType,
+    #[serde(default = "default_symbol")]
+    pub symbol: String,
+}
+
+fn default_symbol() -> String {
+    "BTCUSDT".to_string()
+}
+
+fn is_valid_binance_symbol(symbol: &str) -> bool {
+    !symbol.is_empty()
+        && symbol
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+        && !symbol.contains('-')
+}
+
+fn is_valid_coinbase_symbol(symbol: &str) -> bool {
+    let mut parts = symbol.split('-');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(base), Some(quote), None) => {
+            !base.is_empty()
+                && !quote.is_empty()
+                && base
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+                && quote
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+        }
+        _ => false,
+    }
 }
 
 // ─── Defaults ───
@@ -205,6 +279,7 @@ impl Default for RiskConfig {
             max_consecutive_losses: 8,
             max_daily_loss_pct: dec("0.10"),
             cooldown_ms: 5_000,
+            enforce_limits: default_enforce_limits(),
         }
     }
 }
@@ -213,6 +288,15 @@ impl Default for PollingConfig {
     fn default() -> Self {
         Self {
             signal_interval_ms: 1000,
+        }
+    }
+}
+
+impl Default for PriceSourceConfig {
+    fn default() -> Self {
+        Self {
+            source: PriceSourceType::Binance,
+            symbol: default_symbol(),
         }
     }
 }
@@ -252,6 +336,21 @@ impl Config {
         }
         if self.market.window_minutes <= 0.0 {
             anyhow::bail!("market.window_minutes must be > 0");
+        }
+        if self.price_source.source.expects_dash_symbol() {
+            if !is_valid_coinbase_symbol(&self.price_source.symbol) {
+                anyhow::bail!(
+                    "price_source.symbol must match Coinbase format like BTC-USD when source={} (got {})",
+                    self.price_source.source,
+                    self.price_source.symbol
+                );
+            }
+        } else if !is_valid_binance_symbol(&self.price_source.symbol) {
+            anyhow::bail!(
+                "price_source.symbol must match Binance format like BTCUSDT when source={} (got {})",
+                self.price_source.source,
+                self.price_source.symbol
+            );
         }
 
         Ok(())
@@ -319,5 +418,32 @@ mod tests {
         assert!(!TradingMode::Paper.is_live());
         assert!(TradingMode::Live.is_live());
         assert!(!TradingMode::Live.is_paper());
+    }
+
+    #[test]
+    fn test_validate_rejects_coinbase_symbol_in_binance_format() {
+        let mut cfg = Config::default();
+        cfg.price_source.source = PriceSourceType::Coinbase;
+        cfg.price_source.symbol = "BTCUSDT".to_string();
+
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_binance_symbol_in_coinbase_format() {
+        let mut cfg = Config::default();
+        cfg.price_source.source = PriceSourceType::Binance;
+        cfg.price_source.symbol = "BTC-USD".to_string();
+
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_accepts_coinbase_symbol_format() {
+        let mut cfg = Config::default();
+        cfg.price_source.source = PriceSourceType::Coinbase;
+        cfg.price_source.symbol = "BTC-USD".to_string();
+
+        assert!(cfg.validate().is_ok());
     }
 }

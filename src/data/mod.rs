@@ -1,3 +1,4 @@
+pub mod binance;
 pub mod chainlink;
 pub mod coinbase;
 pub mod market_discovery;

@@ -40,6 +40,8 @@ pub(crate) struct DeciderConfig {
     pub momentum_threshold: Decimal,
     /// Momentum lookback window in milliseconds (e.g. 120_000 = 2 min)
     pub momentum_lookback_ms: i64,
+    /// Whether to enforce risk limits as hard blocks
+    pub enforce_limits: bool,
 }
 
 impl Default for DeciderConfig {
@@ -52,6 +54,7 @@ impl Default for DeciderConfig {
             max_daily_loss_pct: decimal("0.10"),
             momentum_threshold: decimal("0.001"),
             momentum_lookback_ms: 120_000,
+            enforce_limits: false,
         }
     }
 }
@@ -86,7 +89,6 @@ pub(crate) struct AccountState {
     up_stats: DirectionStats,
     down_stats: DirectionStats,
     pub last_traded_settlement_ms: i64,
-    pub pause_until_ms: i64,
 }
 
 impl AccountState {
@@ -103,7 +105,6 @@ impl AccountState {
             up_stats: DirectionStats::new(),
             down_stats: DirectionStats::new(),
             last_traded_settlement_ms: 0,
-            pause_until_ms: 0,
         }
     }
 
@@ -128,43 +129,43 @@ impl AccountState {
         self.last_traded_settlement_ms = settlement_ms;
     }
 
-    fn can_trade(&self, cfg: &DeciderConfig) -> bool {
+    fn check_risk_controls(&self, cfg: &DeciderConfig) -> Option<&'static str> {
         let now = chrono::Utc::now().timestamp_millis();
-
-        // Log risk status but do not block trading
-        if self.balance <= Decimal::ZERO {
-            tracing::warn!(
-                "[RISK] Balance is zero or negative: {}, allowing trade",
-                self.balance
-            );
-        }
 
         if now - self.last_trade_time_ms < cfg.cooldown_ms {
             let remaining = cfg.cooldown_ms - (now - self.last_trade_time_ms);
-            tracing::info!(
-                "[RISK] Cooldown active: {}ms remaining, allowing trade",
-                remaining
-            );
-        }
-
-        if now < self.pause_until_ms {
-            let remaining = self.pause_until_ms - now;
-            tracing::info!(
-                "[RISK] Pause active: {}s remaining, allowing trade",
-                remaining / 1000
-            );
+            if cfg.enforce_limits {
+                tracing::warn!(
+                    "[RISK] Cooldown active: {}ms remaining, blocking trade",
+                    remaining
+                );
+                return Some("cooldown");
+            } else {
+                tracing::info!(
+                    "[RISK] Cooldown active: {}ms remaining, trading continues",
+                    remaining
+                );
+            }
         }
 
         if self.daily_pnl <= -(self.balance * cfg.max_daily_loss_pct) {
-            tracing::warn!(
-                "[RISK] Daily loss limit reached: pnl={:.2}, limit={:.2}, allowing trade",
-                self.daily_pnl,
-                -(self.balance * cfg.max_daily_loss_pct)
-            );
+            if cfg.enforce_limits {
+                tracing::error!(
+                    "[RISK] Daily loss limit reached: pnl={:.2}, limit={:.2}, blocking trade",
+                    self.daily_pnl,
+                    -(self.balance * cfg.max_daily_loss_pct)
+                );
+                return Some("daily_loss_limit");
+            } else {
+                tracing::warn!(
+                    "[RISK] Daily loss limit reached: pnl={:.2}, limit={:.2}, trading continues",
+                    self.daily_pnl,
+                    -(self.balance * cfg.max_daily_loss_pct)
+                );
+            }
         }
 
-        // Always allow trading
-        true
+        None
     }
 
     /// Check if we should pause after losses (trend detection)
@@ -255,8 +256,9 @@ pub(crate) fn decide(
         return Decision::Pass("already_traded".into());
     }
 
-    // 2. Risk check (log only, do not block)
-    account.can_trade(cfg);
+    if let Some(reason) = account.check_risk_controls(cfg) {
+        return Decision::Pass(reason.into());
+    }
 
     // 3. Need market data
     let (yes, no) = match (market_yes, market_no) {
@@ -312,6 +314,10 @@ pub(crate) fn decide(
         }
     }
 
+    if account.balance <= Decimal::ZERO {
+        return Decision::Pass("insufficient_balance".into());
+    }
+
     let size = (account.balance / decimal("100")).max(decimal("1"));
 
     Decision::Trade {
@@ -338,6 +344,7 @@ mod tests {
             max_daily_loss_pct: d("0.10"),
             momentum_threshold: d("0.001"),
             momentum_lookback_ms: 120_000,
+            enforce_limits: false,
         }
     }
 
@@ -486,42 +493,10 @@ mod tests {
     }
 
     #[test]
-    fn test_threshold_losses_does_not_block_trading() {
-        // After risk check changes, trading continues despite losses
+    fn test_risk_controls_do_not_block_after_loss_streak() {
         let mut account = AccountState::new(d("1000"));
         let cfg = DeciderConfig::default();
         account.consecutive_losses = 8;
-        account.pause_until_ms = chrono::Utc::now().timestamp_millis() + 60_000;
-
-        let decision = decide(
-            Some(d("0.85")),
-            Some(d("0.15")),
-            1_700_000_000_000,
-            &account,
-            &cfg,
-            &[(100000.0, 0), (100000.0, 120_000)],
-        );
-
-        match decision {
-            Decision::Trade {
-                direction, edge, ..
-            } => {
-                assert_eq!(direction, Direction::Down);
-                assert_eq!(edge, d("0.35"));
-            }
-            Decision::Pass(reason) => {
-                panic!("expected trade despite losses but got pass: {}", reason)
-            }
-        }
-    }
-
-    #[test]
-    fn test_trading_continues_during_pause_period() {
-        // Trading continues even during pause period (risk checks are logged only)
-        let mut account = AccountState::new(d("1000"));
-        let cfg = DeciderConfig::default();
-        account.consecutive_losses = 8;
-        account.pause_until_ms = chrono::Utc::now().timestamp_millis() + 60_000;
 
         let decision = decide(
             Some(d("0.85")),
@@ -541,7 +516,90 @@ mod tests {
             }
             Decision::Pass(reason) => {
                 panic!(
-                    "expected trade to continue during pause but got pass: {}",
+                    "expected trade despite advisory loss streak, got pass: {}",
+                    reason
+                )
+            }
+        }
+    }
+
+    #[test]
+    fn test_risk_controls_do_not_block_on_cooldown() {
+        let mut account = AccountState::new(d("1000"));
+        let cfg = DeciderConfig::default();
+        account.last_trade_time_ms = chrono::Utc::now().timestamp_millis();
+
+        let decision = decide(
+            Some(d("0.85")),
+            Some(d("0.15")),
+            1_700_000_000_000,
+            &account,
+            &cfg,
+            &[(100000.0, 0), (100000.0, 120_000)],
+        );
+
+        match decision {
+            Decision::Trade {
+                direction, edge, ..
+            } => {
+                assert_eq!(direction, Direction::Down);
+                assert_eq!(edge, d("0.35"));
+            }
+            Decision::Pass(reason) => {
+                panic!(
+                    "expected trade despite advisory cooldown, got pass: {}",
+                    reason
+                )
+            }
+        }
+    }
+
+    #[test]
+    fn test_risk_controls_block_on_insufficient_balance() {
+        let account = AccountState::new(d("0"));
+        let cfg = DeciderConfig::default();
+
+        let decision = decide(
+            Some(d("0.85")),
+            Some(d("0.15")),
+            1_700_000_000_000,
+            &account,
+            &cfg,
+            &[(100000.0, 0), (100000.0, 120_000)],
+        );
+
+        match decision {
+            Decision::Pass(reason) => assert_eq!(reason, "insufficient_balance"),
+            Decision::Trade { .. } => panic!("expected pass due to zero balance but got trade"),
+        }
+    }
+
+    #[test]
+    fn test_risk_controls_do_not_block_on_daily_loss_limit() {
+        let mut account = AccountState::new(d("1000"));
+        let cfg = DeciderConfig::default();
+        account.last_trade_time_ms = chrono::Utc::now().timestamp_millis() - 60_000;
+        account.daily_pnl = d("-150");
+
+        let decision = decide(
+            Some(d("0.85")),
+            Some(d("0.15")),
+            1_700_000_000_000,
+            &account,
+            &cfg,
+            &[(100000.0, 0), (100000.0, 120_000)],
+        );
+
+        match decision {
+            Decision::Trade {
+                direction, edge, ..
+            } => {
+                assert_eq!(direction, Direction::Down);
+                assert_eq!(edge, d("0.35"));
+            }
+            Decision::Pass(reason) => {
+                panic!(
+                    "expected trade despite advisory daily loss, got pass: {}",
                     reason
                 )
             }
@@ -585,6 +643,55 @@ mod tests {
         match decision {
             Decision::Pass(reason) => assert_eq!(reason, "no_momentum_data"),
             Decision::Trade { .. } => panic!("expected pass but got trade"),
+        }
+    }
+
+    #[test]
+    fn test_enforce_limits_blocks_on_cooldown() {
+        let mut account = AccountState::new(d("1000"));
+        let mut cfg = DeciderConfig::default();
+        cfg.enforce_limits = true;
+        account.last_trade_time_ms = chrono::Utc::now().timestamp_millis();
+
+        let decision = decide(
+            Some(d("0.85")),
+            Some(d("0.15")),
+            1_700_000_000_000,
+            &account,
+            &cfg,
+            &[(100000.0, 0), (100000.0, 120_000)],
+        );
+
+        match decision {
+            Decision::Pass(reason) => assert_eq!(reason, "cooldown"),
+            Decision::Trade { .. } => {
+                panic!("expected pass due to enforced cooldown but got trade")
+            }
+        }
+    }
+
+    #[test]
+    fn test_enforce_limits_blocks_on_daily_loss() {
+        let mut account = AccountState::new(d("1000"));
+        let mut cfg = DeciderConfig::default();
+        cfg.enforce_limits = true;
+        account.last_trade_time_ms = chrono::Utc::now().timestamp_millis() - 60_000;
+        account.daily_pnl = d("-150");
+
+        let decision = decide(
+            Some(d("0.85")),
+            Some(d("0.15")),
+            1_700_000_000_000,
+            &account,
+            &cfg,
+            &[(100000.0, 0), (100000.0, 120_000)],
+        );
+
+        match decision {
+            Decision::Pass(reason) => assert_eq!(reason, "daily_loss_limit"),
+            Decision::Trade { .. } => {
+                panic!("expected pass due to enforced daily loss limit but got trade")
+            }
         }
     }
 }

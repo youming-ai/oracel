@@ -42,6 +42,18 @@ impl Settler {
 
     pub(crate) fn restore_positions(&mut self, positions: Vec<PendingPosition>) {
         for pos in positions {
+            // Skip duplicates based on condition_id
+            if self
+                .pending
+                .iter()
+                .any(|p| p.condition_id == pos.condition_id)
+            {
+                tracing::debug!(
+                    "[SETTLER] Skipping duplicate position restore for {}",
+                    pos.condition_id
+                );
+                continue;
+            }
             self.pending.push_back(pos);
         }
     }
@@ -51,6 +63,18 @@ impl Settler {
     }
 
     pub(crate) fn add_position(&mut self, pos: PendingPosition) {
+        // Prevent duplicate positions for same market
+        if self
+            .pending
+            .iter()
+            .any(|p| p.condition_id == pos.condition_id)
+        {
+            tracing::warn!(
+                "[SETTLER] Attempted to add duplicate position for {}",
+                pos.condition_id
+            );
+            return;
+        }
         self.pending.push_back(pos);
     }
 
@@ -68,9 +92,51 @@ impl Settler {
     }
 
     pub(crate) fn settle_by_slug(&mut self, slug: &str, won: bool) -> Option<SettlementResult> {
-        let idx = self.pending.iter().position(|p| p.market_slug == slug)?;
-        let pos = self.pending.remove(idx)?;
-        Some(self.finish_settlement(pos, won))
+        let matching: Vec<PendingPosition> = self
+            .pending
+            .iter()
+            .filter(|p| p.market_slug == slug)
+            .cloned()
+            .collect();
+
+        if matching.is_empty() {
+            return None;
+        }
+
+        self.pending.retain(|p| p.market_slug != slug);
+
+        let combined = self.combine_positions(matching, slug);
+        Some(self.finish_settlement(combined, won))
+    }
+
+    fn combine_positions(&self, positions: Vec<PendingPosition>, slug: &str) -> PendingPosition {
+        if positions.len() == 1 {
+            if let Some(position) = positions.into_iter().next() {
+                return position;
+            }
+            unreachable!("single-position combine must contain one position");
+        }
+
+        tracing::warn!(
+            "[SETTLER] Settling {} positions for {}",
+            positions.len(),
+            slug
+        );
+
+        let first = positions
+            .first()
+            .unwrap_or_else(|| unreachable!("combine_positions requires at least one position"));
+        PendingPosition {
+            direction: first.direction,
+            size_usdc: positions.iter().map(|p| p.size_usdc).sum(),
+            entry_price: first.entry_price,
+            filled_shares: positions.iter().map(|p| p.filled_shares).sum(),
+            cost: positions.iter().map(|p| p.cost).sum(),
+            settlement_time_ms: first.settlement_time_ms,
+            entry_btc_price: first.entry_btc_price,
+            condition_id: first.condition_id.clone(),
+            market_slug: first.market_slug.clone(),
+        }
     }
 
     fn finish_settlement(&mut self, pos: PendingPosition, won: bool) -> SettlementResult {
@@ -152,5 +218,65 @@ mod tests {
     fn test_settle_by_slug_none_when_empty() {
         let mut settler = Settler::new();
         assert!(settler.settle_by_slug("nonexistent", true).is_none());
+    }
+
+    #[test]
+    fn test_add_position_prevents_duplicates() {
+        let mut settler = Settler::new();
+        let pos1 = sample_pending();
+        let mut pos2 = sample_pending();
+        pos2.size_usdc = d("10.0");
+
+        settler.add_position(pos1);
+        settler.add_position(pos2);
+
+        assert_eq!(settler.pending_count(), 1);
+    }
+
+    #[test]
+    fn test_restore_positions_dedupes() {
+        let mut settler = Settler::new();
+        let pos1 = sample_pending();
+        let mut pos2 = sample_pending();
+        pos2.size_usdc = d("10.0");
+
+        settler.restore_positions(vec![pos1, pos2]);
+
+        assert_eq!(settler.pending_count(), 1);
+    }
+
+    #[test]
+    fn test_settle_by_slug_removes_all_duplicates() {
+        let mut settler = Settler::new();
+        let pos1 = sample_pending();
+        let mut pos2 = sample_pending();
+        pos2.condition_id = "cid2".to_string();
+
+        settler.restore_positions(vec![pos1, pos2]);
+        assert_eq!(settler.pending_count(), 2);
+
+        let result = settler.settle_by_slug("btc-updown-5m-1", true).unwrap();
+
+        assert_eq!(settler.pending_count(), 0);
+        assert_eq!(result.payout, d("50.0"));
+        assert_eq!(result.pnl, d("40.0"));
+    }
+
+    #[test]
+    fn test_settle_by_slug_combines_cost_and_shares() {
+        let mut settler = Settler::new();
+        let pos1 = sample_pending();
+        let mut pos2 = sample_pending();
+        pos2.condition_id = "cid2".to_string();
+        pos2.size_usdc = d("7.5");
+        pos2.filled_shares = d("30.0");
+        pos2.cost = d("7.5");
+
+        settler.restore_positions(vec![pos1, pos2]);
+
+        let result = settler.settle_by_slug("btc-updown-5m-1", true).unwrap();
+
+        assert_eq!(result.payout, d("55.0"));
+        assert_eq!(result.pnl, d("42.5"));
     }
 }

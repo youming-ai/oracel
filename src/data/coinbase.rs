@@ -13,6 +13,7 @@ const PRICE_CHANNEL_BUFFER: usize = 1000;
 #[derive(Debug, Clone)]
 pub(crate) struct TickerUpdate {
     pub price: f64,
+    pub timestamp_ms: i64,
 }
 
 pub(crate) struct CoinbaseClient {
@@ -122,7 +123,14 @@ impl CoinbaseClient {
                                         );
                                     }
                                 }
-                                if self.price_tx.send(TickerUpdate { price }).is_err() {
+                                if self
+                                    .price_tx
+                                    .send(TickerUpdate {
+                                        price,
+                                        timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                                    })
+                                    .is_err()
+                                {
                                     tracing::debug!("[WS] no price receivers");
                                 }
                             }
