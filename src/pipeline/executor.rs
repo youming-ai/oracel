@@ -31,6 +31,9 @@ pub(crate) struct ExecuteContext<'a> {
     pub token_no: &'a str,
     pub poly_yes: Option<Decimal>,
     pub poly_no: Option<Decimal>,
+    /// Best ask price from the order book (live mode only).
+    /// When set, FOK orders use this instead of mid price.
+    pub best_ask: Option<Decimal>,
     pub settlement_time_ms: i64,
     pub btc_price: f64,
 }
@@ -48,10 +51,20 @@ impl Executor {
                 size_usdc,
                 edge: _,
             } => {
-                let (token_id, price) = match direction {
+                let (token_id, mid_price) = match direction {
                     Direction::Up => (ctx.token_yes, ctx.poly_yes?),
                     Direction::Down => (ctx.token_no, ctx.poly_no?),
                 };
+                // Use best ask from orderbook when available (live mode),
+                // fall back to mid price (paper mode or if orderbook fetch failed)
+                let price = ctx.best_ask.unwrap_or(mid_price);
+                if ctx.best_ask.is_some() && price != mid_price {
+                    tracing::info!(
+                        "[EXEC] Using best ask {:.3} (mid was {:.3})",
+                        price,
+                        mid_price
+                    );
+                }
 
                 if price <= Decimal::new(1, 2) || price >= Decimal::new(99, 2) {
                     tracing::warn!("[EXEC] Extreme price {:.3}, skipping", price);
@@ -175,6 +188,7 @@ mod tests {
                 token_no: "no",
                 poly_yes: Some(d("0.201")),
                 poly_no: Some(d("0.799")),
+                best_ask: None,
                 settlement_time_ms: 123,
                 btc_price: 70000.0,
             })
@@ -202,6 +216,7 @@ mod tests {
                 token_no: "no",
                 poly_yes: None,
                 poly_no: Some(d("0.80")),
+                best_ask: None,
                 settlement_time_ms: 123,
                 btc_price: 70000.0,
             })
@@ -226,6 +241,7 @@ mod tests {
                 token_no: "no",
                 poly_yes: Some(d("0.99")),
                 poly_no: Some(d("0.01")),
+                best_ask: None,
                 settlement_time_ms: 123,
                 btc_price: 70000.0,
             })

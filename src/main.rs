@@ -69,6 +69,10 @@ struct BotState {
     last_no_trade_reason: String,
     /// Last idle reason from pre-signal filters (log on state change only)
     last_idle_reason: String,
+    /// FOK rejection count for the current market window
+    fok_rejections: u32,
+    /// Settlement timestamp of the market window being tracked for FOK retries
+    fok_market_ms: i64,
 }
 
 impl BotState {
@@ -77,6 +81,8 @@ impl BotState {
             no_trade_count: 0,
             last_no_trade_reason: String::new(),
             last_idle_reason: String::new(),
+            fok_rejections: 0,
+            fok_market_ms: 0,
         }
     }
 
@@ -623,10 +629,39 @@ impl Bot {
                     Direction::Down => poly_no_dec.unwrap_or_else(|| decimal("0.5")),
                 };
 
+                // Fetch best ask from orderbook for live mode to avoid FOK rejections
+                let best_ask = if self.config.trading.mode.is_live() {
+                    let token_id = match direction {
+                        Direction::Up => &mkt.token_yes,
+                        Direction::Down => &mkt.token_no,
+                    };
+                    match self.polymarket.fetch_best_ask(token_id).await {
+                        Ok(Some((ask_price, ask_size))) => {
+                            tracing::info!(
+                                "[BOOK] best ask={:.3} size={:.0} for {}",
+                                ask_price,
+                                ask_size,
+                                direction.as_str()
+                            );
+                            Some(ask_price)
+                        }
+                        Ok(None) => {
+                            tracing::warn!("[BOOK] No asks in orderbook, skipping trade");
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            tracing::warn!("[BOOK] Failed to fetch orderbook: {}, using mid price", e);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
                 tracing::info!(
                     "[TRADE] {} @ {:.3} edge={:.0}% BTC=${:.0}",
                     direction.as_str(),
-                    cheap_price,
+                    best_ask.unwrap_or(cheap_price),
                     (*edge * decimal("100")).round_dp(0),
                     btc_price,
                 );
@@ -639,10 +674,32 @@ impl Bot {
                         token_no: &mkt.token_no,
                         poly_yes: poly_yes_dec,
                         poly_no: poly_no_dec,
+                        best_ask,
                         settlement_time_ms: settlement_ms,
                         btc_price,
                     })
                     .await;
+
+                if order.is_none() && self.config.trading.mode.is_live() {
+                    let mut st = self.state.write().await;
+                    // Reset counter when market window changes
+                    if st.fok_market_ms != settlement_ms {
+                        st.fok_rejections = 0;
+                        st.fok_market_ms = settlement_ms;
+                    }
+                    st.fok_rejections += 1;
+                    let max = self.config.risk.max_fok_retries;
+                    if st.fok_rejections >= max {
+                        tracing::warn!(
+                            "[EXEC] {} FOK rejections, giving up on this market window",
+                            st.fok_rejections
+                        );
+                        self.account
+                            .write()
+                            .await
+                            .record_trade_for_market(settlement_ms);
+                    }
+                }
 
                 if let Some(order) = order {
                     {

@@ -172,6 +172,8 @@ pub(crate) struct RiskConfig {
     pub pause_long_ms: i64,
     #[serde(default = "default_pause_circuit_ms")]
     pub pause_circuit_ms: i64,
+    #[serde(default = "default_max_fok_retries")]
+    pub max_fok_retries: u32,
 }
 
 fn default_max_daily_loss_pct() -> Decimal {
@@ -188,6 +190,9 @@ fn default_pause_long_ms() -> i64 {
 }
 fn default_pause_circuit_ms() -> i64 {
     1_800_000
+}
+fn default_max_fok_retries() -> u32 {
+    3
 }
 
 // ─── Polling ───
@@ -330,6 +335,7 @@ impl Default for RiskConfig {
             pause_short_ms: 60_000,
             pause_long_ms: 300_000,
             pause_circuit_ms: 1_800_000,
+            max_fok_retries: 3,
         }
     }
 }
@@ -429,6 +435,7 @@ impl Config {
             && self.risk.pause_short_ms == defaults.risk.pause_short_ms
             && self.risk.pause_long_ms == defaults.risk.pause_long_ms
             && self.risk.pause_circuit_ms == defaults.risk.pause_circuit_ms
+            && self.risk.max_fok_retries == defaults.risk.max_fok_retries
             && self.polling.signal_interval_ms == defaults.polling.signal_interval_ms
             && self.polling.status_interval_ms == defaults.polling.status_interval_ms
     }
