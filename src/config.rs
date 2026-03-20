@@ -100,6 +100,15 @@ pub(crate) struct StrategyConfig {
     pub momentum_threshold: Decimal,
     #[serde(default = "default_momentum_lookback_ms")]
     pub momentum_lookback_ms: i64,
+    #[serde(default = "default_max_position", with = "rust_decimal::serde::float")]
+    pub max_position: Decimal,
+    #[serde(default = "default_min_position", with = "rust_decimal::serde::float")]
+    pub min_position: Decimal,
+    #[serde(
+        default = "default_max_risk_fraction",
+        with = "rust_decimal::serde::float"
+    )]
+    pub max_risk_fraction: Decimal,
 }
 
 fn default_extreme_threshold() -> Decimal {
@@ -116,6 +125,15 @@ fn default_momentum_threshold() -> Decimal {
 }
 fn default_momentum_lookback_ms() -> i64 {
     120_000
+}
+fn default_max_position() -> Decimal {
+    dec("10.0")
+}
+fn default_min_position() -> Decimal {
+    dec("1.0")
+}
+fn default_max_risk_fraction() -> Decimal {
+    dec("0.10")
 }
 
 // ─── Edge Thresholds ───
@@ -138,19 +156,13 @@ pub(crate) struct RiskConfig {
     pub max_daily_loss_pct: Decimal,
     #[serde(default = "default_cooldown_ms")]
     pub cooldown_ms: i64,
-    /// Whether to enforce risk limits as hard blocks (default: false = advisory only)
-    #[serde(default)]
-    pub enforce_limits: bool,
 }
 
 fn default_max_daily_loss_pct() -> Decimal {
-    dec("0.10")
+    dec("0.25")
 }
 fn default_cooldown_ms() -> i64 {
     5_000
-}
-fn default_enforce_limits() -> bool {
-    false
 }
 
 // ─── Polling ───
@@ -261,6 +273,9 @@ impl Default for StrategyConfig {
             btc_tiebreaker_usd: 5.0,
             momentum_threshold: dec("0.001"),
             momentum_lookback_ms: 120_000,
+            max_position: dec("10.0"),
+            min_position: dec("1.0"),
+            max_risk_fraction: dec("0.10"),
         }
     }
 }
@@ -277,9 +292,8 @@ impl Default for RiskConfig {
     fn default() -> Self {
         Self {
             max_consecutive_losses: 8,
-            max_daily_loss_pct: dec("0.10"),
+            max_daily_loss_pct: dec("0.25"),
             cooldown_ms: 5_000,
-            enforce_limits: default_enforce_limits(),
         }
     }
 }
@@ -366,6 +380,9 @@ impl Config {
             && self.strategy.btc_tiebreaker_usd == defaults.strategy.btc_tiebreaker_usd
             && self.strategy.momentum_threshold == defaults.strategy.momentum_threshold
             && self.strategy.momentum_lookback_ms == defaults.strategy.momentum_lookback_ms
+            && self.strategy.max_position == defaults.strategy.max_position
+            && self.strategy.min_position == defaults.strategy.min_position
+            && self.strategy.max_risk_fraction == defaults.strategy.max_risk_fraction
             && self.edge.edge_threshold_early == defaults.edge.edge_threshold_early
             && self.risk.max_consecutive_losses == defaults.risk.max_consecutive_losses
             && self.risk.max_daily_loss_pct == defaults.risk.max_daily_loss_pct
