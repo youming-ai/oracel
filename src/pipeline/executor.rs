@@ -49,8 +49,8 @@ impl Executor {
                 edge: _,
             } => {
                 let (token_id, price) = match direction {
-                    Direction::Up => (ctx.token_yes, ctx.poly_yes.unwrap_or(Decimal::new(5, 1))),
-                    Direction::Down => (ctx.token_no, ctx.poly_no.unwrap_or(Decimal::new(5, 1))),
+                    Direction::Up => (ctx.token_yes, ctx.poly_yes?),
+                    Direction::Down => (ctx.token_no, ctx.poly_no?),
                 };
 
                 if price <= Decimal::new(1, 2) || price >= Decimal::new(99, 2) {
@@ -159,5 +159,53 @@ mod tests {
         assert_eq!(result.filled_shares, d("24"));
         assert_eq!(result.cost, d("4.824"));
         assert!(result.cost <= d("5.00"));
+    }
+
+    #[tokio::test]
+    async fn test_returns_none_when_price_missing() {
+        let executor = Executor::new(TradingMode::Paper, None);
+        let decision = Decision::Trade {
+            direction: Direction::Up,
+            size_usdc: d("5.00"),
+            edge: d("0.20"),
+        };
+
+        let result = executor
+            .execute(&ExecuteContext {
+                decision: &decision,
+                token_yes: "yes",
+                token_no: "no",
+                poly_yes: None,
+                poly_no: Some(d("0.80")),
+                settlement_time_ms: 123,
+                btc_price: 70000.0,
+            })
+            .await;
+
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_rejects_extreme_price() {
+        let executor = Executor::new(TradingMode::Paper, None);
+        let decision = Decision::Trade {
+            direction: Direction::Down,
+            size_usdc: d("5.00"),
+            edge: d("0.40"),
+        };
+
+        let result = executor
+            .execute(&ExecuteContext {
+                decision: &decision,
+                token_yes: "yes",
+                token_no: "no",
+                poly_yes: Some(d("0.99")),
+                poly_no: Some(d("0.01")),
+                settlement_time_ms: 123,
+                btc_price: 70000.0,
+            })
+            .await;
+
+        assert!(result.is_none());
     }
 }

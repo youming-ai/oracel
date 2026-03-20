@@ -231,14 +231,25 @@ impl Bot {
         let tmp = Path::new(log_dir).join("balance.tmp");
         let dst = Path::new(log_dir).join("balance");
         let text = format!("{:.2}", bal);
-        let _ = tokio::fs::write(&tmp, &text).await;
-        let _ = tokio::fs::rename(&tmp, &dst).await;
+        if let Err(e) = tokio::fs::write(&tmp, &text).await {
+            tracing::warn!("[STATE] Failed to write balance: {}", e);
+            return;
+        }
+        if let Err(e) = tokio::fs::rename(&tmp, &dst).await {
+            tracing::warn!("[STATE] Failed to rename balance file: {}", e);
+        }
     }
 
     async fn load_state(log_dir: &str) -> PersistState {
         let path = Path::new(log_dir).join("state.json");
         match tokio::fs::read_to_string(&path).await {
-            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+            Ok(content) => match serde_json::from_str(&content) {
+                Ok(state) => state,
+                Err(e) => {
+                    tracing::warn!("[STATE] Failed to parse state.json: {}, using defaults", e);
+                    PersistState::default()
+                }
+            },
             Err(_) => PersistState::default(),
         }
     }
@@ -264,9 +275,17 @@ impl Bot {
         drop(acc);
         let tmp = Path::new(log_dir).join("state.json.tmp");
         let dst = Path::new(log_dir).join("state.json");
-        if let Ok(json) = serde_json::to_string(&state) {
-            let _ = tokio::fs::write(&tmp, &json).await;
-            let _ = tokio::fs::rename(&tmp, &dst).await;
+        match serde_json::to_string(&state) {
+            Ok(json) => {
+                if let Err(e) = tokio::fs::write(&tmp, &json).await {
+                    tracing::warn!("[STATE] Failed to write state.json: {}", e);
+                    return;
+                }
+                if let Err(e) = tokio::fs::rename(&tmp, &dst).await {
+                    tracing::warn!("[STATE] Failed to rename state.json: {}", e);
+                }
+            }
+            Err(e) => tracing::warn!("[STATE] Failed to serialize state: {}", e),
         }
     }
 
@@ -699,18 +718,11 @@ impl Bot {
         let account = self.account.clone();
         let price_source = self.price_source.clone();
         let discovery = self.discovery.clone();
-        let btc_tiebreaker_usd = self.config.strategy.btc_tiebreaker_usd;
         let max_consecutive_losses = self.config.risk.max_consecutive_losses;
-        let rpc = data::chainlink::rpc_url(self.config.trading.mode);
-        let mode = self.config.trading.mode;
         let redeemer = self.redeemer.clone();
         let log_dir = self.log_dir.clone();
 
         tokio::spawn(async move {
-            let http = reqwest::Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new());
             let mut interval = tokio::time::interval(Duration::from_secs(15));
             // Retry queue: (condition_id, direction_str, attempts_left)
             let mut redeem_queue: Vec<(String, String, u32)> = Vec::new();
@@ -718,67 +730,43 @@ impl Bot {
             loop {
                 interval.tick().await;
 
-                let (results, settlement_btc_price) = if mode.is_paper() {
-                    let btc_price = match data::chainlink::fetch_btc_price(&http, &rpc).await {
-                        Ok(p) => p,
+                let mut results = Vec::new();
+                let due = settler.read().await.due_positions();
+                for pos in due {
+                    let market = match discovery.fetch_market_by_slug(&pos.market_slug).await {
+                        Ok(market) => market,
                         Err(e) => {
-                            tracing::debug!("[SETTLE] Chainlink failed: {}, using Coinbase", e);
-                            match price_source.latest().await {
-                                Some(p) => p,
-                                None => continue,
-                            }
+                            tracing::warn!(
+                                "[SETTLE] Gamma fetch failed for {}: {}",
+                                pos.market_slug,
+                                e
+                            );
+                            continue;
                         }
                     };
 
-                    (
-                        settler
-                            .write()
-                            .await
-                            .check_settlements(btc_price, btc_tiebreaker_usd),
-                        Some(btc_price),
-                    )
-                } else {
-                    let mut results = Vec::new();
-                    let due = settler.read().await.due_positions();
-                    for pos in due {
-                        let market = match discovery.fetch_market_by_slug(&pos.market_slug).await {
-                            Ok(market) => market,
-                            Err(e) => {
-                                tracing::warn!(
-                                    "[SETTLE] Gamma fetch failed for {}: {}",
-                                    pos.market_slug,
-                                    e
-                                );
-                                continue;
-                            }
-                        };
-
-                        match infer_resolution_state(&market) {
-                            Some(ResolutionState::Resolved(winner)) => {
-                                tracing::info!(
-                                    "[SETTLE] {} resolved -> {} won",
-                                    pos.market_slug,
-                                    winner.as_str(),
-                                );
-                                let won = pos.direction == winner;
-                                if let Some(result) =
-                                    settler.write().await.settle_by_slug(&pos.market_slug, won)
-                                {
-                                    results.push(result);
-                                }
-                            }
-                            Some(ResolutionState::Pending) => {}
-                            None => {
-                                tracing::warn!(
-                                    "[SETTLE] resolution unclear for {}",
-                                    pos.market_slug
-                                );
+                    match infer_resolution_state(&market) {
+                        Some(ResolutionState::Resolved(winner)) => {
+                            tracing::info!(
+                                "[SETTLE] {} resolved -> {} won",
+                                pos.market_slug,
+                                winner.as_str(),
+                            );
+                            let won = pos.direction == winner;
+                            if let Some(result) =
+                                settler.write().await.settle_by_slug(&pos.market_slug, won)
+                            {
+                                results.push(result);
                             }
                         }
+                        Some(ResolutionState::Pending) => {}
+                        None => {
+                            tracing::warn!("[SETTLE] resolution unclear for {}", pos.market_slug);
+                        }
                     }
-                    let btc_price = price_source.latest().await.unwrap_or(0.0);
-                    (results, Some(btc_price))
-                };
+                }
+                let settlement_btc_price = price_source.latest().await;
+                let (results, settlement_btc_price) = (results, settlement_btc_price);
 
                 if !results.is_empty() {
                     let mut acc = account.write().await;

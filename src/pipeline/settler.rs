@@ -31,16 +31,12 @@ pub(crate) struct SettlementResult {
 
 pub(crate) struct Settler {
     pending: VecDeque<PendingPosition>,
-    total_wins: u32,
-    total_losses: u32,
 }
 
 impl Settler {
     pub(crate) fn new() -> Self {
         Self {
             pending: VecDeque::new(),
-            total_wins: 0,
-            total_losses: 0,
         }
     }
 
@@ -77,42 +73,6 @@ impl Settler {
         Some(self.finish_settlement(pos, won))
     }
 
-    pub(crate) fn check_settlements(
-        &mut self,
-        current_btc_price: f64,
-        btc_tiebreaker_usd: f64,
-    ) -> Vec<SettlementResult> {
-        let now = Utc::now().timestamp_millis();
-        let mut results = Vec::new();
-
-        while let Some(pos) = self.pending.front() {
-            if pos.settlement_time_ms > now {
-                break;
-            }
-            let Some(pos) = self.pending.pop_front() else {
-                break;
-            };
-
-            let btc_change = current_btc_price - pos.entry_btc_price;
-            let btc_went_up = if btc_change.abs() < btc_tiebreaker_usd {
-                // Tiebreaker: coin flip instead of biasing toward market sentiment
-                pos.settlement_time_ms % 2 == 0
-            } else {
-                btc_change > 0.0
-            };
-
-            let won = match pos.direction {
-                Direction::Up => btc_went_up,
-                Direction::Down => !btc_went_up,
-            };
-
-            tracing::debug!("[SETTLEMENT] Local simulation - may not match Polymarket resolution");
-            results.push(self.finish_settlement(pos, won));
-        }
-
-        results
-    }
-
     fn finish_settlement(&mut self, pos: PendingPosition, won: bool) -> SettlementResult {
         let payout = if won {
             pos.filled_shares
@@ -121,20 +81,12 @@ impl Settler {
         };
         let pnl = payout - pos.cost;
 
-        if won {
-            self.total_wins += 1;
-        } else {
-            self.total_losses += 1;
-        }
-
         tracing::info!(
-            "[SETTLED] {} {} stake={:.2} pnl={:+.2} {}W/{}L",
+            "[SETTLED] {} {} stake={:.2} pnl={:+.2}",
             if won { "WIN" } else { "LOSS" },
             pos.direction.as_str(),
             pos.size_usdc.round_dp(2),
             pnl.round_dp(2),
-            self.total_wins,
-            self.total_losses,
         );
 
         SettlementResult {

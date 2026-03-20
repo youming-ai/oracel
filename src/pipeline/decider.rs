@@ -243,8 +243,9 @@ pub(crate) fn decide(
 
     // 2. Risk check
     if !account.can_trade(cfg) {
-        if chrono::Utc::now().timestamp_millis() < account.pause_until_ms {
-            let remaining = (account.pause_until_ms - chrono::Utc::now().timestamp_millis()) / 1000;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        if now_ms < account.pause_until_ms {
+            let remaining = (account.pause_until_ms - now_ms) / 1000;
             return Decision::Pass(format!("loss_pause_{}s", remaining));
         }
         return Decision::Pass("risk_blocked".into());
