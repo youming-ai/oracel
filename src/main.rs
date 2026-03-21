@@ -30,7 +30,6 @@ fn decimal(value: &str) -> Decimal {
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct PersistState {
     pending_positions: Vec<PendingPosition>,
-    last_traded_settlement_ms: i64,
     #[serde(default)]
     consecutive_losses: u32,
     #[serde(default)]
@@ -39,10 +38,6 @@ struct PersistState {
     total_wins: u32,
     #[serde(default)]
     total_losses: u32,
-    #[serde(default)]
-    daily_pnl: String,
-    #[serde(default)]
-    pnl_reset_date: String,
 }
 
 use data::market_discovery::{
@@ -56,20 +51,12 @@ use pipeline::price_source::PriceSource;
 use pipeline::settler::{PendingPosition, Settler};
 use pipeline::signal::Direction;
 
-// ─── Bot State ───
-
 struct BotState {
-    /// Counter for throttling NO TRADE logs
     no_trade_count: u64,
-    /// Last logged reason (to avoid spamming same reason)
     last_no_trade_reason: String,
-    /// Last idle reason from pre-signal filters (log on state change only)
     last_idle_reason: String,
-    /// FOK rejection count for the current market window
     fok_rejections: u32,
-    /// Settlement timestamp of the market window being tracked for FOK retries
     fok_market_ms: i64,
-    /// Timestamp (ms) of last FOK rejection — used to enforce backoff between retries
     last_fok_rejection_ms: i64,
 }
 
@@ -91,7 +78,6 @@ impl BotState {
             tracing::info!("[IDLE] {} | {}", reason, detail);
         }
     }
-
 }
 
 #[derive(Debug, Clone, Default)]
@@ -109,8 +95,6 @@ impl MarketState {
     }
 }
 
-// ─── Bot ───
-
 struct Bot {
     config: Config,
     log_dir: String,
@@ -123,7 +107,6 @@ struct Bot {
     executor: Executor,
     redeemer: Option<Arc<CtfRedeemer>>,
     balance_checker: Option<BalanceChecker>,
-    // Dynamic market data
     market_state: Arc<RwLock<MarketState>>,
 }
 
@@ -159,7 +142,6 @@ impl Bot {
 
         let executor = Executor::new(config.trading.mode, auth_client);
 
-        // Create CTF redeemer for live mode
         let redeemer = if config.trading.mode.is_live()
             && !config.trading.private_key.expose_secret().is_empty()
         {
@@ -235,19 +217,10 @@ impl Bot {
             );
             settler.restore_positions(saved.pending_positions);
         }
-        if saved.last_traded_settlement_ms > 0 {
-            account.record_trade_for_market(saved.last_traded_settlement_ms);
-        }
         account.consecutive_losses = saved.consecutive_losses;
         account.consecutive_wins = saved.consecutive_wins;
         account.total_wins = saved.total_wins;
         account.total_losses = saved.total_losses;
-        // daily_pnl is intentionally NOT restored — restarting the bot resets
-        // the daily loss counter so it won't stay stuck on daily_loss_limit.
-        if !saved.pnl_reset_date.is_empty() {
-            account.pnl_reset_date = saved.pnl_reset_date;
-        }
-        account.check_daily_reset();
 
         Ok(Self {
             config,
@@ -308,13 +281,10 @@ impl Bot {
         let acc = account.read().await;
         let state = PersistState {
             pending_positions: positions,
-            last_traded_settlement_ms: acc.last_traded_settlement_ms,
             consecutive_losses: acc.consecutive_losses,
             consecutive_wins: acc.consecutive_wins,
             total_wins: acc.total_wins,
             total_losses: acc.total_losses,
-            daily_pnl: acc.daily_pnl.to_string(),
-            pnl_reset_date: acc.pnl_reset_date.clone(),
         };
         drop(acc);
         let tmp = Path::new(log_dir).join("state.json.tmp");
@@ -445,15 +415,9 @@ impl Bot {
     fn decider_cfg(&self) -> DeciderConfig {
         DeciderConfig {
             edge_threshold: self.config.edge.edge_threshold_early,
-            max_position: self.config.strategy.max_position,
-            min_position: self.config.strategy.min_position,
-            cooldown_ms: self.config.risk.cooldown_ms,
+            position_size_usdc: self.config.strategy.position_size_usdc,
             extreme_threshold: self.config.strategy.extreme_threshold,
             fair_value: self.config.strategy.fair_value,
-            max_daily_loss_pct: self.config.risk.max_daily_loss_pct,
-            momentum_threshold: self.config.strategy.momentum_threshold,
-            momentum_lookback_ms: self.config.strategy.momentum_lookback_ms,
-            position_size_pct: self.config.strategy.position_size_pct,
         }
     }
 
@@ -487,8 +451,8 @@ impl Bot {
                 };
 
                 tracing::info!(
-                    "[STATUS] {} | BTC=${:.0} | bal=${:.2} pnl={:+.2} | {}W/{}L streak={} | pending={} | ttl={}",
-                    mode, btc, acc.balance, acc.daily_pnl,
+                    "[STATUS] {} | BTC=${:.0} | bal=${:.2} | {}W/{}L streak={} | pending={} | ttl={}",
+                    mode, btc, acc.balance,
                     acc.total_wins, acc.total_losses,
                     if acc.consecutive_wins > 0 { format!("+{}", acc.consecutive_wins) }
                     else if acc.consecutive_losses > 0 { format!("-{}", acc.consecutive_losses) }
@@ -500,8 +464,6 @@ impl Bot {
     }
 
     async fn tick(&self) -> Result<()> {
-        self.account.write().await.check_daily_reset();
-
         if let Some(ref checker) = self.balance_checker {
             match checker.balance().await {
                 Ok(on_chain_bal) => {
@@ -516,7 +478,6 @@ impl Bot {
 
         let mkt = self.market_state.read().await.clone();
 
-        // 1. Get latest price
         let prices = self.price_source.history().await;
         let closes: Vec<f64> = prices.iter().map(|p| p.price).collect();
         let btc_price = match self.price_source.latest().await {
@@ -542,7 +503,6 @@ impl Bot {
             }
         }
 
-        // 2. Get market data FIRST (signal depends on it)
         if !mkt.is_ready() {
             self.state
                 .write()
@@ -583,14 +543,10 @@ impl Bot {
         let poly_yes_dec = poly_yes.and_then(|v| Decimal::try_from(v).ok());
         let poly_no_dec = poly_no.and_then(|v| Decimal::try_from(v).ok());
 
-        // 4. Decide trade (Stage 3)
         let account_read = self.account.read().await.clone();
-
         let decider_cfg = self.decider_cfg();
-
-        let timed_prices: Vec<(f64, i64)> =
-            prices.iter().map(|p| (p.price, p.timestamp_ms)).collect();
         let remaining_ms = settlement_ms - Utc::now().timestamp_millis();
+
         let decision = decider::decide(
             poly_yes_dec,
             poly_no_dec,
@@ -598,28 +554,23 @@ impl Bot {
             remaining_ms,
             &account_read,
             &decider_cfg,
-            &timed_prices,
         );
 
-        // 6. Execute trade (Stage 4)
         match &decision {
             decider::Decision::Pass(reason) => {
-                {
-                    let mut st = self.state.write().await;
-                    st.no_trade_count += 1;
-                    // Compare category only (strip trailing numbers/%)
-                    let category = reason
-                        .trim_end_matches(|c: char| c.is_ascii_digit() || c == '%' || c == '_');
-                    let prev_cat = st
-                        .last_no_trade_reason
-                        .trim_end_matches(|c: char| c.is_ascii_digit() || c == '%' || c == '_');
-                    let changed = category != prev_cat;
-                    if changed {
-                        st.last_no_trade_reason = reason.clone();
-                    }
-                    if changed {
-                        tracing::info!("[SKIP] {} | BTC=${:.0}", reason, btc_price);
-                    }
+                let mut st = self.state.write().await;
+                st.no_trade_count += 1;
+                let category =
+                    reason.trim_end_matches(|c: char| c.is_ascii_digit() || c == '%' || c == '_');
+                let prev_cat = st
+                    .last_no_trade_reason
+                    .trim_end_matches(|c: char| c.is_ascii_digit() || c == '%' || c == '_');
+                let changed = category != prev_cat;
+                if changed {
+                    st.last_no_trade_reason = reason.clone();
+                }
+                if changed {
+                    tracing::info!("[SKIP] {} | BTC=${:.0}", reason, btc_price);
                 }
             }
             decider::Decision::Trade {
@@ -628,7 +579,6 @@ impl Bot {
                 edge,
                 payoff_ratio,
             } => {
-                // FOK backoff: wait at least 3s after a rejection before retrying
                 {
                     let st = self.state.read().await;
                     if st.last_fok_rejection_ms > 0 {
@@ -646,7 +596,6 @@ impl Bot {
                     Direction::Down => poly_no_dec.unwrap_or_else(|| decimal("0.5")),
                 };
 
-                // Fetch best ask from orderbook to get real fill price
                 let token_id = match direction {
                     Direction::Up => &mkt.token_yes,
                     Direction::Down => &mkt.token_no,
@@ -698,7 +647,6 @@ impl Bot {
                 if order.is_none() && self.config.trading.mode.is_live() {
                     let mut st = self.state.write().await;
                     st.last_fok_rejection_ms = chrono::Utc::now().timestamp_millis();
-                    // Reset counter when market window changes
                     if st.fok_market_ms != settlement_ms {
                         st.fok_rejections = 0;
                         st.fok_market_ms = settlement_ms;
@@ -710,24 +658,15 @@ impl Bot {
                             "[EXEC] {} FOK rejections, giving up on this market window",
                             st.fok_rejections
                         );
-                        self.account
-                            .write()
-                            .await
-                            .record_trade_for_market(settlement_ms);
                     }
                 }
 
                 if let Some(order) = order {
                     {
                         let mut acc = self.account.write().await;
-                        // record_trade: deducts cost (paper) and stamps last_trade_time_ms (both modes).
-                        // In live mode the balance is overwritten by chain sync on the next tick;
-                        // the deduction here only matters intra-tick for cooldown ordering.
                         acc.record_trade(order.cost);
-                        acc.record_trade_for_market(settlement_ms);
                     }
 
-                    // Add to settler
                     self.settler.write().await.add_position(PendingPosition {
                         direction: order.direction,
                         size_usdc: order.size_usdc,
@@ -745,15 +684,12 @@ impl Bot {
                     let bal = self.account.read().await.balance;
                     Self::write_balance(&self.log_dir, bal).await;
 
-                    // Log to file — extended format with decision context
                     let order_id_short: String = order.order_id.chars().take(8).collect();
                     let ttl_secs = remaining_ms / 1000;
                     let yes_f = poly_yes_dec
                         .map(|v| format!("{:.3}", v))
                         .unwrap_or_default();
-                    let no_f = poly_no_dec
-                        .map(|v| format!("{:.3}", v))
-                        .unwrap_or_default();
+                    let no_f = poly_no_dec.map(|v| format!("{:.3}", v)).unwrap_or_default();
                     let log_line = format!(
                         "{},{},{},{:.3},{:.2},{:.1},{:.2},{}s,{},{},{:.1}x\n",
                         Utc::now().format("%H:%M:%S"),
@@ -824,7 +760,6 @@ impl Bot {
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(15));
-            // Retry queue: (condition_id, direction_str, attempts_left)
             let mut redeem_queue: Vec<(String, String, u32)> = Vec::new();
 
             loop {
@@ -870,22 +805,22 @@ impl Bot {
 
                 if !results.is_empty() {
                     let mut acc = account.write().await;
-                    acc.check_daily_reset();
                     for r in &results {
                         acc.record_settlement(r);
                     }
 
                     tracing::info!(
-                        "[BAL] ${:.2} pnl=${:+.2} settled={}",
+                        "[BAL] ${:.2} | {}W/{}L | settled={}",
                         acc.balance,
-                        acc.daily_pnl,
+                        acc.total_wins,
+                        acc.total_losses,
                         results.len(),
                     );
 
                     let bal = acc.balance;
                     drop(acc);
 
-                    Bot::save_state(&log_dir, &settler, &account).await;
+                    Self::save_state(&log_dir, &settler, &account).await;
 
                     if let Some(btc_price) = settlement_btc_price {
                         let mut log_lines = String::new();
@@ -918,21 +853,19 @@ impl Bot {
                         }
                     }
 
-                    Bot::write_balance(&log_dir, bal).await;
+                    Self::write_balance(&log_dir, bal).await;
 
-                    // Queue winning positions for on-chain redeem
                     for r in &results {
                         if r.won && !r.condition_id.is_empty() {
                             redeem_queue.push((
                                 r.condition_id.clone(),
                                 r.direction.as_str().to_string(),
-                                10, // max retries (~5 min at 30s intervals)
+                                10,
                             ));
                         }
                     }
                 }
 
-                // Process redeem retry queue
                 if let Some(ref redeemer) = redeemer {
                     let mut still_pending = Vec::new();
                     for (cid, dir, attempts) in redeem_queue.drain(..) {
@@ -980,8 +913,6 @@ impl Bot {
     }
 }
 
-// ─── Main ───
-
 fn load_dotenv() {
     if let Err(e) = dotenvy::dotenv() {
         if !e.not_found() {
@@ -999,7 +930,6 @@ async fn main() -> Result<()> {
 
     load_dotenv();
 
-    // Handle subcommands before full bot init
     if std::env::args().any(|a| a == "--derive-keys") {
         return derive_api_keys().await;
     }
@@ -1050,7 +980,6 @@ async fn main() -> Result<()> {
         );
     }
 
-    // Validate credentials for live mode
     if config.trading.mode.is_live() && config.trading.private_key.expose_secret().is_empty() {
         anyhow::bail!("PRIVATE_KEY not set in .env — required for live trading");
     }
@@ -1061,7 +990,6 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Redeem all winning outcome tokens for recent markets in the series.
 async fn redeem_all() -> Result<()> {
     eprintln!("Scanning recent markets for redeemable positions...\n");
 
@@ -1089,10 +1017,9 @@ async fn redeem_all() -> Result<()> {
     let gamma_url = &config.polyclob.gamma_api_url;
     let http = reqwest::Client::new();
 
-    // Scan past 24h of 5-minute windows (288 windows)
     let now_ts = chrono::Utc::now().timestamp();
     let base_ts = (now_ts / WINDOW_SECS) * WINDOW_SECS;
-    let mut condition_ids: Vec<(String, String)> = Vec::new(); // (condition_id, slug)
+    let mut condition_ids: Vec<(String, String)> = Vec::new();
 
     for i in 0..WINDOWS_PER_DAY {
         let ts = base_ts - i * WINDOW_SECS;
@@ -1236,7 +1163,6 @@ async fn redeem_one(slug: &str) -> Result<()> {
     Ok(())
 }
 
-/// Derive CLOB API credentials from wallet using the SDK and write to .env
 async fn derive_api_keys() -> Result<()> {
     use polymarket_client_sdk::auth::{LocalSigner, Signer as _};
     use polymarket_client_sdk::clob;
@@ -1244,7 +1170,7 @@ async fn derive_api_keys() -> Result<()> {
     use secrecy::ExposeSecret;
     use std::str::FromStr;
 
-    eprintln!("🔑 Deriving Polymarket CLOB API credentials...");
+    eprintln!("Deriving Polymarket CLOB API credentials...");
 
     let private_key = SecretString::new(
         std::env::var("PRIVATE_KEY")
@@ -1260,7 +1186,6 @@ async fn derive_api_keys() -> Result<()> {
         .map_err(|_| anyhow::anyhow!("Invalid PRIVATE_KEY in .env"))?
         .with_chain_id(Some(POLYGON));
 
-    // Create or derive API key via SDK
     let client = clob::Client::default();
     let creds = client
         .create_or_derive_api_key(&signer, None)

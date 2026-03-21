@@ -390,6 +390,9 @@ mod tests {
         };
 
         // Should be Pending (wait for data), not None (log error)
-        assert_eq!(infer_resolution_state(&market), Some(ResolutionState::Pending));
+        assert_eq!(
+            infer_resolution_state(&market),
+            Some(ResolutionState::Pending)
+        );
     }
 }

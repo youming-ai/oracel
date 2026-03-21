@@ -273,7 +273,9 @@ mod tests {
             })
             .await;
 
-        assert!(result.is_none(), "expected rejection when fill price erases edge");
+        assert!(
+            result.is_none(),
+            "expected rejection when fill price erases edge"
+        );
     }
-
 }

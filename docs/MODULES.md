@@ -32,10 +32,7 @@ pub struct Config {
 **`RiskConfig`** - Risk management settings
 ```rust
 pub struct RiskConfig {
-    pub max_consecutive_losses: u32,     // Circuit breaker threshold
-    pub max_daily_loss_pct: Decimal,     // Daily loss limit (0.10 = 10%)
-    pub cooldown_ms: i64,                // Minimum time between trades
-    pub enforce_limits: bool,            // Advisory vs strict mode
+    pub max_fok_retries: u32,            // Maximum FOK order retries
 }
 ```
 
@@ -56,8 +53,8 @@ The `validate()` method performs startup checks:
 | Signal interval | > 0 | `polling.signal_interval_ms must be > 0` |
 | Extreme threshold | 0 < value < 1 | `strategy.extreme_threshold must be in (0, 1)` |
 | Fair value | 0 < value < 1 | `strategy.fair_value must be in (0, 1)` |
-| Daily loss pct | 0 < value ≤ 1 | `risk.max_daily_loss_pct must be in (0, 1]` |
-| Window minutes | > 0 | `market.window_minutes must be > 0` |
+| Position size | > 0 | `strategy.position_size_usdc must be > 0` |
+| Edge threshold | 0 < value < 1 | `edge.edge_threshold_early must be in (0, 1)` |
 | Symbol format | Exchange-specific | `price_source.symbol must match...` |
 
 #### Symbol Format Validation
@@ -593,14 +590,14 @@ pub struct AccountState {
 **`DeciderConfig`** - Decision parameters
 ```rust
 pub struct DeciderConfig {
+    /// Minimum edge to trade (default: 15%)
     pub edge_threshold: Decimal,
-    pub cooldown_ms: i64,
+    /// Fixed position size per trade in USDC (default: 1.0)
+    pub position_size_usdc: Decimal,
+    /// Market price threshold to consider "extreme" (default: 0.80)
     pub extreme_threshold: Decimal,
+    /// Fair value assumption for binary outcome (default: 0.50)
     pub fair_value: Decimal,
-    pub max_daily_loss_pct: Decimal,
-    pub momentum_threshold: Decimal,
-    pub momentum_lookback_ms: i64,
-    pub enforce_limits: bool,
 }
 ```
 
@@ -612,6 +609,7 @@ pub enum Decision {
         direction: Direction,
         size_usdc: Decimal,
         edge: Decimal,
+        payoff_ratio: Decimal,  // (1 - cheap_price) / cheap_price
     },
 }
 ```
@@ -621,50 +619,25 @@ pub enum Decision {
 ```
 decide()
 ├── 1. Already traded? → Pass("already_traded")
-├── 2. Risk controls → Pass if enforce_limits=true and violated
-├── 3. Market data valid? → Pass("no_market_data")
-├── 4. Edge > threshold? → Pass("edge_X%<Y%")
-├── 5. Momentum check? → Pass("against_trend")
-├── 6. Balance > 0? → Pass("insufficient_balance")
+├── 2. Market data valid? → Pass("no_market_data")
+├── 3. Edge > threshold? → Pass("edge_X%<Y%")
+├── 4. Balance > 0? → Pass("insufficient_balance")
 └── TRADE: Calculate position size
-```
-
-#### Risk Control Logic
-
-**Advisory Mode** (`enforce_limits: false`):
-```rust
-fn check_risk_controls(&self, cfg: &DeciderConfig) -> Option<&'static str> {
-    if cooldown_active {
-        tracing::info!("[RISK] Cooldown... trading continues");
-    }
-    if daily_loss_exceeded {
-        tracing::warn!("[RISK] Daily loss... trading continues");
-    }
-    None  // Never blocks
-}
-```
-
-**Strict Mode** (`enforce_limits: true`):
-```rust
-fn check_risk_controls(&self, cfg: &DeciderConfig) -> Option<&'static str> {
-    if cooldown_active {
-        tracing::warn!("[RISK] Cooldown... blocking trade");
-        return Some("cooldown");
-    }
-    if daily_loss_exceeded {
-        tracing::error!("[RISK] Daily loss... blocking trade");
-        return Some("daily_loss_limit");
-    }
-    None
-}
 ```
 
 #### Position Sizing
 
 ```rust
-fn calculate_position_size(balance: Decimal) -> Decimal {
-    // 1% of balance, minimum $1
-    (balance / 100).max(decimal("1"))
+fn calculate_position_size(position_size_usdc: Decimal, entry_price: Decimal) -> Decimal {
+    // Calculate shares from fixed position size
+    let shares = (position_size_usdc / entry_price).floor();
+    
+    // Zero-share guard
+    if shares > Decimal::ZERO {
+        shares
+    } else {
+        Decimal::ZERO  // Reject order
+    }
 }
 ```
 
@@ -680,7 +653,6 @@ let decision = decide(
     settlement_ms,
     &account,
     &cfg,
-    &btc_prices,  // [(price, timestamp), ...]
 );
 
 match decision {

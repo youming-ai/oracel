@@ -48,10 +48,10 @@ The bot follows a 5-stage pipeline:
 4. **Executor** - Order execution (paper/live)
 5. **Settler** - Position settlement and PnL
 
-### Risk Control Modes
+### Risk Controls
 
-- **Advisory** (`enforce_limits: false`): Log warnings, continue trading
-- **Strict** (`enforce_limits: true`): Block trading on violations
+- **Balance guard**: Trades are rejected when balance ≤ 0
+- **FOK retries**: Failed orders are retried up to `max_fok_retries` times
 
 ### Trading Modes
 

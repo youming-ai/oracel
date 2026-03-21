@@ -169,15 +169,11 @@ pub fn decide(
 | Reason | Meaning |
 |--------|---------|
 | `"already_traded"` | Already traded this window |
-| `"cooldown"` | Cooldown period active (strict mode) |
-| `"daily_loss_limit"` | Daily loss limit reached (strict mode) |
 | `"insufficient_balance"` | Account balance ≤ 0 |
 | `"no_market_data"` | Missing or invalid market prices |
 | `"no_liquidity"` | Zero or negative total liquidity |
-| `"no_momentum_data"` | Insufficient BTC price history |
 | `"not_extreme_XX%"` | Market not extreme enough |
 | `"edge_X%<Y%"` | Edge below threshold |
-| `"against_trend_Z%"` | Trade against momentum |
 
 #### Example
 
@@ -563,14 +559,14 @@ pub struct SettlementResult {
 
 ```rust
 pub struct DeciderConfig {
+    /// Minimum edge to trade (default: 15%)
     pub edge_threshold: Decimal,
-    pub cooldown_ms: i64,
+    /// Fixed position size per trade in USDC (default: 1.0)
+    pub position_size_usdc: Decimal,
+    /// Market price threshold to consider "extreme" (default: 0.80)
     pub extreme_threshold: Decimal,
+    /// Fair value assumption for binary outcome (default: 0.50)
     pub fair_value: Decimal,
-    pub max_daily_loss_pct: Decimal,
-    pub momentum_threshold: Decimal,
-    pub momentum_lookback_ms: i64,
-    pub enforce_limits: bool,
 }
 ```
 
@@ -586,8 +582,8 @@ pub struct DeciderConfig {
 // Validation error
 Err(anyhow!("strategy.extreme_threshold must be in (0, 1)"))
 
-// Missing field
-Err(anyhow!("Missing required field: risk.cooldown_ms"))
+// Invalid symbol format
+Err(anyhow!("price_source.symbol must match Binance format like BTCUSDT when source=binance"))
 ```
 
 #### Network Errors

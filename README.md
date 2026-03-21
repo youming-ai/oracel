@@ -167,7 +167,6 @@ Trading mode and all strategy parameters are configured in `config.json`. See `c
 | Field | Default | Description |
 | --- | --- | --- |
 | `trading.mode` | `"paper"` | Runtime mode: `"paper"` or `"live"` |
-| `market.window_minutes` | `5.0` | Market window length in minutes |
 | `market.stale_threshold_ms` | `30000` | Max age of BTC price data before considered stale (ms) |
 | `market.min_ttl_ms` | `30000` | Minimum remaining time before market expiry to place a trade (ms) |
 | `polyclob.gamma_api_url` | `https://gamma-api.polymarket.com` | Gamma API base URL |
@@ -175,19 +174,9 @@ Trading mode and all strategy parameters are configured in `config.json`. See `c
 | `price_source.symbol` | `"BTCUSDT"` | Trading pair symbol (e.g., "BTCUSDT" for Binance, "BTC-USD" for Coinbase) |
 | `strategy.extreme_threshold` | `0.80` | Market bias threshold to consider sentiment extreme |
 | `strategy.fair_value` | `0.50` | Fair-value assumption for a binary 5-minute outcome |
-| `strategy.btc_tiebreaker_usd` | `5.0` | BTC price change threshold (unused after settlement refactor) |
-| `strategy.momentum_threshold` | `0.001` | BTC momentum threshold (0.1%) to filter counter-trend trades |
-| `strategy.momentum_lookback_ms` | `120000` | Momentum lookback window in milliseconds (2 minutes) |
-| `strategy.max_position` | `10.0` | Maximum position size in USDC |
-| `strategy.min_position` | `1.0` | Minimum position size in USDC |
-| `strategy.position_size_pct` | `1.0` | Position size as percentage of balance (1.0 = 1%) |
+| `strategy.position_size_usdc` | `1.0` | Fixed position size per trade in USDC |
 | `edge.edge_threshold_early` | `0.15` | Minimum edge required to place a trade (15%) |
-| `risk.max_consecutive_losses` | `8` | Circuit breaker threshold for consecutive losses |
-| `risk.max_daily_loss_pct` | `0.25` | Daily loss limit as fraction of balance |
-| `risk.cooldown_ms` | `5000` | Minimum milliseconds between trades |
-| `risk.pause_short_ms` | `60000` | Pause after 4-5 consecutive losses (1 min) |
-| `risk.pause_long_ms` | `300000` | Pause after 6-7 consecutive losses (5 min) |
-| `risk.pause_circuit_ms` | `1800000` | Pause at circuit breaker threshold (30 min) |
+| `risk.max_fok_retries` | `3` | Maximum retries for Fill-or-Kill orders |
 | `polling.signal_interval_ms` | `1000` | Main signal loop interval in milliseconds |
 | `polling.status_interval_ms` | `10000` | Status log printing interval in milliseconds |
 

@@ -38,7 +38,7 @@ Configuration in `config.json`:
 }
 ```
 
-The bot maintains a rolling buffer of price ticks (default 1000 samples) for momentum calculations. WebSocket connections automatically reconnect on disconnection.
+The bot maintains a rolling buffer of price ticks for momentum calculations. WebSocket connections automatically reconnect on disconnection.
 
 ## 3. Signal Detection
 
@@ -69,93 +69,46 @@ tick()
  │
  └── decide()
       ├── 6. One-trade-per-window: skip if this settlement window was already traded
-      ├── 7. Risk warnings: cooldown/loss/daily-loss are logged; zero balance still blocks (see section 7)
-      ├── 8. Market data: skip if yes or no price is missing or ≤ 0.01
-      ├── 9. Edge threshold: skip if edge < edge_threshold_early (default 15%)
-      ├── 10. Momentum filter: skip if BTC trend contradicts the trade direction
+      ├── 7. Market data: skip if yes or no price is missing or ≤ 0.01
+      ├── 8. Edge threshold: skip if edge < edge_threshold_early (default 15%)
+      ├── 9. Balance check: skip if balance ≤ 0
       │
       └── TRADE: size the position and execute
 ```
 
 The bot trades at most once per 5-minute settlement window.
 
-## 5. Momentum Filter
+## 5. Position Sizing
 
-Extreme pricing can sometimes reflect a real short-term trend instead of crowd overreaction. The strategy checks BTC momentum over a lookback window to avoid stepping in front of a strong move.
-
-```text
-momentum = (current_btc_price - lookback_btc_price) / lookback_btc_price
-
-if trade is DOWN and momentum > +threshold: skip (BTC is rising, DOWN bet is against trend)
-if trade is UP   and momentum < -threshold: skip (BTC is falling, UP bet is against trend)
-```
-
-Default settings:
-
-- `strategy.momentum_threshold = 0.001` (0.1%)
-- `strategy.momentum_lookback_ms = 120000` (2 minutes)
-
-At BTC ~$70,000, a 0.1% threshold corresponds to approximately $70 of price movement over 2 minutes.
-
-## 6. Position Sizing
-
-Position sizing uses a fixed fraction of balance:
+Position sizing uses a fixed amount per trade:
 
 ```text
-size_usdc = max(balance / 100, 1)
+size_usdc = position_size_usdc (default $1.0)
+shares = floor(size_usdc / entry_price)
 ```
 
-This allocates 1% of the current balance per trade, with a $1 floor. The approach is intentionally conservative: each losing trade costs roughly 1% of equity, while winners at extreme prices return far more due to the cheap entry.
+Example at different entry prices:
 
-Example at different balance levels:
-
-| Balance | Size (USDC) | At price 0.07 | Shares | Win payout | Loss |
-| --- | --- | --- | --- | --- | --- |
-| $1,000 | $10 | $10 / 0.07 | 142 | $142 | -$10 |
-| $100 | $1 | $1 / 0.07 | 14 | $14 | -$1 |
+| Entry Price | Size (USDC) | Shares | Win payout | Loss |
+| --- | --- | --- | --- | --- |
+| 0.07 | $1.0 | 14 | $14 | -$1 |
+| 0.15 | $1.0 | 6 | $6 | -$1 |
 
 Shares are floored to whole numbers so that the CLOB order amount stays within its 2-decimal-place precision limit. **Orders resulting in 0 shares are rejected** to prevent phantom trades.
 
-## 7. Risk Controls
+## 6. Risk Controls
 
-Risk controls are evaluated for monitoring. By default, cooldown, loss-pause/circuit-breaker, and daily-loss conditions generate warnings but **do not block trading**. Set `risk.enforce_limits=true` to make cooldown and daily loss into hard blocks. Zero balance remains a hard stop regardless of configuration so the bot never sizes a phantom $1 order from an empty account.
+The bot implements basic risk controls:
 
-### Risk Control Mechanisms
+| Mechanism | Rule | Behavior |
+| --- | --- | --- |
+| One trade per window | At most one trade per 5-minute settlement window | Hard limit |
+| Zero balance guard | Reject trades when balance ≤ 0 | Hard block |
+| FOK retries | Retry failed FOK orders up to `max_fok_retries` times | Automatic retry |
 
-| Mechanism | Rule | Config | Default Behavior | With `enforce_limits=true` |
-| --- | --- | --- | --- | --- |
-| One trade per window | At most one trade per 5-minute settlement window | — | Hard limit | Hard limit |
-| Cooldown | Minimum `cooldown_ms` between any two trades | `risk.cooldown_ms` (default 5000) | Logged warning, trading continues | Hard block, trading prevented |
-| Loss pause | 1-minute pause after 4–5 consecutive losses; 5-minute pause after 6–7 | — | Logged warning only | Logged warning only |
-| Circuit breaker | Stop trading after N consecutive losses | `risk.max_consecutive_losses` (default 8) | Logged warning only | Logged warning only |
-| Daily stop | When `daily_pnl ≤ -(balance × max_daily_loss_pct)` | `risk.max_daily_loss_pct` (default 0.10) | Logged warning, trading continues | Hard block, trading prevented |
-| Balance guard | Reject trades when balance ≤ 0 | — | Hard block | Hard block |
+**Note**: The bot focuses on capturing opportunities in the brief 5-minute window. Balance is the primary protection mechanism.
 
-### Configuration Examples
-
-**Advisory mode (default)** - Maximum opportunity capture:
-```json
-"risk": {
-  "enforce_limits": false,
-  "cooldown_ms": 5000,
-  "max_daily_loss_pct": 0.10
-}
-```
-
-**Strict mode** - Conservative risk management:
-```json
-"risk": {
-  "enforce_limits": true,
-  "cooldown_ms": 5000,
-  "max_daily_loss_pct": 0.10
-}
-```
-
-Daily PnL resets automatically at midnight UTC.
-
-**Note**: A zero-balance account always returns `insufficient_balance` and skips trading, regardless of the `enforce_limits` setting.
-
-## 8. Order Execution
+## 7. Order Execution
 
 ### Paper Mode
 
@@ -177,7 +130,7 @@ Daily PnL resets automatically at midnight UTC.
 
 Both modes skip execution if the target price is ≤ 0.01 or ≥ 0.99. This prevents placing orders at degenerate prices where the payout ratio collapses.
 
-## 9. Settlement
+## 8. Settlement
 
 Both paper and live modes use the Gamma API to check market resolution state. The settlement checker polls every 15 seconds for pending positions.
 
@@ -204,7 +157,7 @@ else:
 
 Both modes append settlement results to `logs/<mode>/trades.csv`.
 
-## 10. Live-Mode Redemption
+## 9. Live-Mode Redemption
 
 In live mode, the bot initializes a CTF (Conditional Tokens Framework) redeemer that can redeem winning positions on-chain after resolution.
 
@@ -223,7 +176,7 @@ cargo run --release -- --redeem-all
 
 This scans the last 24 hours of 5-minute markets (288 windows) and attempts redemption for any positions held on-chain.
 
-## 11. State Persistence
+## 10. State Persistence
 
 The bot persists the following to `logs/<mode>/state.json` after every trade and settlement:
 
@@ -234,11 +187,10 @@ The bot persists the following to `logs/<mode>/state.json` after every trade and
 
 On startup, the bot restores this state to continue seamlessly after a restart.
 
-## 12. Key Assumptions
+## 11. Key Assumptions
 
 1. A 5-minute BTC window is approximately a coin flip (`fair_value = 0.50`), since short-term BTC price movements are dominated by noise rather than directional signal
 2. Extreme market sentiment (>80% on one side) creates exploitable mispricing because the crowd overestimates the probability of a directional move
-3. Strong short-term BTC trends can justify extreme pricing, so the momentum filter is essential to avoid trading against genuine moves
-4. Settlement is based on Polymarket's official resolution via Gamma API, ensuring accurate accounting in both paper and live modes
-5. Conservative position sizing (1% per trade) ensures survivability through losing streaks while still capturing asymmetric payoffs at extreme prices
-6. **Most risk controls are advisory**: The bot logs cooldown, loss-streak, and daily-loss conditions to preserve opportunity capture in the brief 5-minute window, but it still rejects trades when balance is zero or negative
+3. Settlement is based on Polymarket's official resolution via Gamma API, ensuring accurate accounting in both paper and live modes
+4. Fixed position sizing keeps the strategy simple and predictable
+5. **Balance is the primary protection**: The bot rejects trades when balance is zero or negative

@@ -102,21 +102,10 @@ pub(crate) struct StrategyConfig {
     #[serde(default = "default_fair_value", with = "rust_decimal::serde::float")]
     pub fair_value: Decimal,
     #[serde(
-        default = "default_momentum_threshold",
+        default = "default_position_size_usdc",
         with = "rust_decimal::serde::float"
     )]
-    pub momentum_threshold: Decimal,
-    #[serde(default = "default_momentum_lookback_ms")]
-    pub momentum_lookback_ms: i64,
-    #[serde(default = "default_max_position", with = "rust_decimal::serde::float")]
-    pub max_position: Decimal,
-    #[serde(default = "default_min_position", with = "rust_decimal::serde::float")]
-    pub min_position: Decimal,
-    #[serde(
-        default = "default_position_size_pct",
-        with = "rust_decimal::serde::float"
-    )]
-    pub position_size_pct: Decimal,
+    pub position_size_usdc: Decimal,
 }
 
 fn default_extreme_threshold() -> Decimal {
@@ -125,19 +114,7 @@ fn default_extreme_threshold() -> Decimal {
 fn default_fair_value() -> Decimal {
     dec("0.50")
 }
-fn default_momentum_threshold() -> Decimal {
-    dec("0.001")
-}
-fn default_momentum_lookback_ms() -> i64 {
-    120_000
-}
-fn default_max_position() -> Decimal {
-    dec("10.0")
-}
-fn default_min_position() -> Decimal {
-    dec("1.0")
-}
-fn default_position_size_pct() -> Decimal {
+fn default_position_size_usdc() -> Decimal {
     dec("1.0")
 }
 // ─── Edge Thresholds ───
@@ -152,23 +129,10 @@ pub(crate) struct EdgeConfigFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RiskConfig {
-    #[serde(
-        default = "default_max_daily_loss_pct",
-        with = "rust_decimal::serde::float"
-    )]
-    pub max_daily_loss_pct: Decimal,
-    #[serde(default = "default_cooldown_ms")]
-    pub cooldown_ms: i64,
     #[serde(default = "default_max_fok_retries")]
     pub max_fok_retries: u32,
 }
 
-fn default_max_daily_loss_pct() -> Decimal {
-    dec("0.25")
-}
-fn default_cooldown_ms() -> i64 {
-    5_000
-}
 fn default_max_fok_retries() -> u32 {
     3
 }
@@ -285,11 +249,7 @@ impl Default for StrategyConfig {
         Self {
             extreme_threshold: dec("0.80"),
             fair_value: dec("0.50"),
-            momentum_threshold: dec("0.003"),
-            momentum_lookback_ms: 120_000,
-            max_position: dec("10.0"),
-            min_position: dec("1.0"),
-            position_size_pct: dec("1.0"),
+            position_size_usdc: dec("1.0"),
         }
     }
 }
@@ -304,11 +264,7 @@ impl Default for EdgeConfigFile {
 
 impl Default for RiskConfig {
     fn default() -> Self {
-        Self {
-            max_daily_loss_pct: dec("0.25"),
-            cooldown_ms: 5_000,
-            max_fok_retries: 3,
-        }
+        Self { max_fok_retries: 3 }
     }
 }
 
@@ -360,17 +316,8 @@ impl Config {
         if !(zero < self.strategy.fair_value && self.strategy.fair_value < one) {
             anyhow::bail!("strategy.fair_value must be in (0, 1)");
         }
-        if self.strategy.min_position <= zero {
-            anyhow::bail!("strategy.min_position must be > 0");
-        }
-        if !(zero < self.strategy.position_size_pct && self.strategy.position_size_pct <= dec("100")) {
-            anyhow::bail!("strategy.position_size_pct must be in (0, 100]");
-        }
-        if self.strategy.min_position > self.strategy.max_position {
-            anyhow::bail!("strategy.min_position must be <= max_position");
-        }
-        if !(zero < self.risk.max_daily_loss_pct && self.risk.max_daily_loss_pct <= one) {
-            anyhow::bail!("risk.max_daily_loss_pct must be in (0, 1]");
+        if self.strategy.position_size_usdc <= zero {
+            anyhow::bail!("strategy.position_size_usdc must be > 0");
         }
         if !(zero < self.edge.edge_threshold_early && self.edge.edge_threshold_early < one) {
             anyhow::bail!("edge.edge_threshold_early must be in (0, 1)");
@@ -402,14 +349,8 @@ impl Config {
             && self.polyclob.gamma_api_url == defaults.polyclob.gamma_api_url
             && self.strategy.extreme_threshold == defaults.strategy.extreme_threshold
             && self.strategy.fair_value == defaults.strategy.fair_value
-            && self.strategy.momentum_threshold == defaults.strategy.momentum_threshold
-            && self.strategy.momentum_lookback_ms == defaults.strategy.momentum_lookback_ms
-            && self.strategy.max_position == defaults.strategy.max_position
-            && self.strategy.min_position == defaults.strategy.min_position
-            && self.strategy.position_size_pct == defaults.strategy.position_size_pct
+            && self.strategy.position_size_usdc == defaults.strategy.position_size_usdc
             && self.edge.edge_threshold_early == defaults.edge.edge_threshold_early
-            && self.risk.max_daily_loss_pct == defaults.risk.max_daily_loss_pct
-            && self.risk.cooldown_ms == defaults.risk.cooldown_ms
             && self.risk.max_fok_retries == defaults.risk.max_fok_retries
             && self.polling.signal_interval_ms == defaults.polling.signal_interval_ms
             && self.polling.status_interval_ms == defaults.polling.status_interval_ms
@@ -490,31 +431,9 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_rejects_zero_position_size_pct() {
+    fn test_validate_rejects_zero_position_size_usdc() {
         let mut cfg = Config::default();
-        cfg.strategy.position_size_pct = Decimal::ZERO;
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_rejects_position_size_pct_above_100() {
-        let mut cfg = Config::default();
-        cfg.strategy.position_size_pct = dec("101.0");
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_rejects_non_positive_min_position() {
-        let mut cfg = Config::default();
-        cfg.strategy.min_position = Decimal::ZERO;
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_rejects_min_greater_than_max_position() {
-        let mut cfg = Config::default();
-        cfg.strategy.min_position = dec("15.0");
-        cfg.strategy.max_position = dec("10.0");
+        cfg.strategy.position_size_usdc = Decimal::ZERO;
         assert!(cfg.validate().is_err());
     }
 

@@ -68,18 +68,24 @@ else → Signal::None
 ```
 
 ### Stage 3: Decider
-**Purpose**: Trade decision and risk assessment
+**Purpose**: Trade decision logic
 
 **Key Responsibilities**:
 - One-trade-per-window enforcement
-- Risk control evaluation (cooldown, daily loss, balance)
+- Balance check (reject if ≤ 0)
 - Edge calculation: `edge = fair_value - cheap_side_price`
-- Momentum filter (avoid trading against strong trends)
 - Position sizing calculation
+- Market data validation
 
-**Risk Control Modes**:
-- **Advisory Mode** (`enforce_limits: false`): Log warnings, continue trading
-- **Strict Mode** (`enforce_limits: true`): Block trading on violations
+**Decision Pipeline**:
+```
+decide()
+├── 1. Already traded this window? → Pass("already_traded")
+├── 2. Market data valid? → Pass("no_market_data")
+├── 3. Edge > threshold? → Pass("edge_X%<Y%")
+├── 4. Balance > 0? → Pass("insufficient_balance")
+└── TRADE: Calculate position size
+```
 
 ### Stage 4: Executor
 **Purpose**: Order execution (paper or live)
@@ -89,6 +95,7 @@ else → Signal::None
 - Live mode: Place FOK (Fill-or-Kill) limit orders via CLOB
 - Zero-share order rejection
 - Order ID safe handling (prevent slicing panics)
+- FOK retry logic on failure
 
 ### Stage 5: Settler
 **Purpose**: Position settlement and PnL calculation
@@ -130,10 +137,9 @@ else → Signal::None
 ┌─────────────────────────────────────────┐
 │           Decision Pipeline             │
 │ - Already traded this window?           │
-│ - Risk controls pass?                   │
 │ - Market data valid?                    │
 │ - Edge > threshold?                     │
-│ - Momentum filter pass?                 │
+│ - Balance > 0?                          │
 └─────────────────────────────────────────┘
      │
      ▼
@@ -210,9 +216,9 @@ struct Bot {
    - Action: Log error and terminate/fail fast
    - Example: Binance -1121 (invalid symbol)
 
-3. **Business Logic Errors**: Insufficient balance, cooldown active
+3. **Business Logic Errors**: Insufficient balance, no extreme signal
    - Action: Skip trade, log reason
-   - Example: Risk control violations
+   - Example: Balance zero, not extreme market
 
 ### Error Propagation
 - `anyhow::Result` for top-level error handling
@@ -251,5 +257,5 @@ struct Bot {
 
 ### Safe Defaults
 - Paper mode default (no real trades without explicit opt-in)
-- Conservative position sizing (1% max per trade)
-- Risk controls advisory by default
+- Fixed position sizing for simplicity
+- Balance-based trade rejection

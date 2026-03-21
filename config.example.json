@@ -3,7 +3,6 @@
     "mode": "paper"
   },
   "market": {
-    "window_minutes": 5.0,
     "stale_threshold_ms": 30000,
     "min_ttl_ms": 30000
   },
@@ -17,23 +16,13 @@
   "strategy": {
     "extreme_threshold": 0.8,
     "fair_value": 0.5,
-    "btc_tiebreaker_usd": 5.0,
-    "momentum_threshold": 0.001,
-    "momentum_lookback_ms": 120000,
-    "max_position": 1.0,
-    "min_position": 1.0,
-    "position_size_pct": 0.0
+    "position_size_usdc": 1.0
   },
   "edge": {
     "edge_threshold_early": 0.15
   },
   "risk": {
-    "max_consecutive_losses": 10,
-    "max_daily_loss_pct": 0.25,
-    "cooldown_ms": 5000,
-    "pause_short_ms": 60000,
-    "pause_long_ms": 300000,
-    "pause_circuit_ms": 1800000
+    "max_fok_retries": 3
   },
   "polling": {
     "signal_interval_ms": 1000,

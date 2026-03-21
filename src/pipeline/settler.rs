@@ -130,13 +130,13 @@ impl Settler {
             direction: first.direction,
             size_usdc: positions.iter().map(|p| p.size_usdc).sum(),
             entry_price: {
-            let total_shares: Decimal = positions.iter().map(|p| p.filled_shares).sum();
-            if total_shares > Decimal::ZERO {
-                positions.iter().map(|p| p.cost).sum::<Decimal>() / total_shares
-            } else {
-                first.entry_price
-            }
-        },
+                let total_shares: Decimal = positions.iter().map(|p| p.filled_shares).sum();
+                if total_shares > Decimal::ZERO {
+                    positions.iter().map(|p| p.cost).sum::<Decimal>() / total_shares
+                } else {
+                    first.entry_price
+                }
+            },
             filled_shares: positions.iter().map(|p| p.filled_shares).sum(),
             cost: positions.iter().map(|p| p.cost).sum(),
             settlement_time_ms: first.settlement_time_ms,
