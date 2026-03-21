@@ -21,14 +21,8 @@ pub(crate) const SERIES_ID: &str = "btc-updown-5m";
 pub(crate) struct GammaMarket {
     #[serde(default)]
     pub slug: String,
-    #[serde(default)]
-    pub question: Option<String>,
-    #[serde(default)]
-    pub title: Option<String>,
     #[serde(rename = "endDate", default)]
     pub end_date: String,
-    #[serde(rename = "eventStartTime", default)]
-    pub event_start_time: Option<String>,
     #[serde(rename = "clobTokenIds", default)]
     pub clob_token_ids: Option<serde_json::Value>,
     #[serde(rename = "conditionId", default)]
@@ -63,14 +57,6 @@ pub(crate) struct ActiveMarket {
 #[derive(Debug, Clone)]
 pub(crate) struct DiscoveryConfig {
     pub gamma_api_url: String,
-}
-
-impl Default for DiscoveryConfig {
-    fn default() -> Self {
-        Self {
-            gamma_api_url: "https://gamma-api.polymarket.com".to_string(),
-        }
-    }
 }
 
 // ─── Market Discovery ───
@@ -293,10 +279,7 @@ mod tests {
     fn test_infer_resolved_direction_yes_wins() {
         let market = GammaMarket {
             slug: "btc-updown-5m-1".into(),
-            question: None,
-            title: None,
             end_date: String::new(),
-            event_start_time: None,
             clob_token_ids: None,
             condition_id: None,
             closed: Some(true),
@@ -315,10 +298,7 @@ mod tests {
     fn test_infer_resolved_direction_no_wins() {
         let market = GammaMarket {
             slug: "btc-updown-5m-1".into(),
-            question: None,
-            title: None,
             end_date: String::new(),
-            event_start_time: None,
             clob_token_ids: None,
             condition_id: None,
             closed: Some(true),
@@ -337,10 +317,7 @@ mod tests {
     fn test_infer_resolved_direction_up_wins() {
         let market = GammaMarket {
             slug: "btc-updown-5m-1".into(),
-            question: None,
-            title: None,
             end_date: String::new(),
-            event_start_time: None,
             clob_token_ids: None,
             condition_id: None,
             closed: Some(true),
@@ -359,10 +336,7 @@ mod tests {
     fn test_infer_resolved_direction_down_wins() {
         let market = GammaMarket {
             slug: "btc-updown-5m-1".into(),
-            question: None,
-            title: None,
             end_date: String::new(),
-            event_start_time: None,
             clob_token_ids: None,
             condition_id: None,
             closed: Some(true),
@@ -381,10 +355,7 @@ mod tests {
     fn test_infer_resolved_direction_none_when_unresolved() {
         let market = GammaMarket {
             slug: "btc-updown-5m-1".into(),
-            question: None,
-            title: None,
             end_date: String::new(),
-            event_start_time: None,
             clob_token_ids: None,
             condition_id: None,
             closed: Some(false),

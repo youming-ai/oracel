@@ -9,7 +9,6 @@ mod pipeline;
 use anyhow::Result;
 use chrono::Utc;
 use config::{Config, TradingMode};
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use secrecy::{ExposeSecret, SecretString};
 use std::path::Path;
@@ -44,8 +43,6 @@ struct PersistState {
     daily_pnl: String,
     #[serde(default)]
     pnl_reset_date: String,
-    #[serde(default)]
-    pause_until_ms: i64,
 }
 
 use data::market_discovery::{
@@ -57,7 +54,6 @@ use pipeline::decider::{self, AccountState, DeciderConfig};
 use pipeline::executor::{ExecuteContext, Executor};
 use pipeline::price_source::PriceSource;
 use pipeline::settler::{PendingPosition, Settler};
-use pipeline::signal;
 use pipeline::signal::Direction;
 
 // ─── Bot State ───
@@ -93,9 +89,6 @@ impl BotState {
         }
     }
 
-    fn clear_idle(&mut self) {
-        self.last_idle_reason.clear();
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -209,7 +202,6 @@ impl Bot {
         if !saved.pnl_reset_date.is_empty() {
             account.pnl_reset_date = saved.pnl_reset_date;
         }
-        account.pause_until_ms = saved.pause_until_ms;
         account.check_daily_reset();
 
         Ok(Self {
@@ -277,7 +269,6 @@ impl Bot {
             total_losses: acc.total_losses,
             daily_pnl: acc.daily_pnl.to_string(),
             pnl_reset_date: acc.pnl_reset_date.clone(),
-            pause_until_ms: acc.pause_until_ms,
         };
         drop(acc);
         let tmp = Path::new(log_dir).join("state.json.tmp");
@@ -411,16 +402,12 @@ impl Bot {
             max_position: self.config.strategy.max_position,
             min_position: self.config.strategy.min_position,
             cooldown_ms: self.config.risk.cooldown_ms,
-            max_consecutive_losses: self.config.risk.max_consecutive_losses,
             extreme_threshold: self.config.strategy.extreme_threshold,
             fair_value: self.config.strategy.fair_value,
             max_daily_loss_pct: self.config.risk.max_daily_loss_pct,
             momentum_threshold: self.config.strategy.momentum_threshold,
             momentum_lookback_ms: self.config.strategy.momentum_lookback_ms,
             position_size_pct: self.config.strategy.position_size_pct,
-            pause_short_ms: self.config.risk.pause_short_ms,
-            pause_long_ms: self.config.risk.pause_long_ms,
-            pause_circuit_ms: self.config.risk.pause_circuit_ms,
         }
     }
 
@@ -557,30 +544,6 @@ impl Bot {
 
         let poly_yes_dec = poly_yes.and_then(|v| Decimal::try_from(v).ok());
         let poly_no_dec = poly_no.and_then(|v| Decimal::try_from(v).ok());
-
-        let yes_f64 = poly_yes;
-        let no_f64 = poly_no;
-        let extreme_f64 = self
-            .config
-            .strategy
-            .extreme_threshold
-            .to_f64()
-            .unwrap_or(0.80);
-        if !signal::is_market_extreme(yes_f64, no_f64, extreme_f64) {
-            let detail = format!(
-                "Yes={:.3} No={:.3} thr={:.2}",
-                yes_f64.unwrap_or(0.0),
-                no_f64.unwrap_or(0.0),
-                extreme_f64,
-            );
-            self.state
-                .write()
-                .await
-                .log_idle_change("not_extreme", &detail);
-            return Ok(());
-        }
-
-        self.state.write().await.clear_idle();
 
         // 4. Decide trade (Stage 3)
         let account_read = self.account.read().await.clone();
@@ -789,7 +752,6 @@ impl Bot {
         let account = self.account.clone();
         let price_source = self.price_source.clone();
         let discovery = self.discovery.clone();
-        let settle_decider_cfg = self.decider_cfg();
         let redeemer = self.redeemer.clone();
         let log_dir = self.log_dir.clone();
 
@@ -843,7 +805,7 @@ impl Bot {
                     let mut acc = account.write().await;
                     acc.check_daily_reset();
                     for r in &results {
-                        acc.record_settlement(r, &settle_decider_cfg);
+                        acc.record_settlement(r);
                     }
 
                     tracing::info!(

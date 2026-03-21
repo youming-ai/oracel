@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::broadcast;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 const WS_URL: &str = "wss://advanced-trade-ws.coinbase.com";
@@ -19,7 +19,6 @@ pub(crate) struct TickerUpdate {
 pub(crate) struct CoinbaseClient {
     product_id: String,
     price_tx: broadcast::Sender<TickerUpdate>,
-    latest_price: Arc<RwLock<Option<f64>>>,
 }
 
 impl CoinbaseClient {
@@ -28,7 +27,6 @@ impl CoinbaseClient {
         Self {
             product_id: product_id.to_string(),
             price_tx,
-            latest_price: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -113,16 +111,6 @@ impl CoinbaseClient {
                                 .and_then(|v| v.as_str())
                                 .and_then(|s| s.parse::<f64>().ok())
                             {
-                                match self.latest_price.try_write() {
-                                    Ok(mut guard) => {
-                                        *guard = Some(price);
-                                    }
-                                    Err(_) => {
-                                        tracing::debug!(
-                                            "[WS] Price update dropped (lock contended)"
-                                        );
-                                    }
-                                }
                                 if self
                                     .price_tx
                                     .send(TickerUpdate {

@@ -4,7 +4,7 @@ use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::broadcast;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 const WS_URL: &str = "wss://stream.binance.com:9443/ws";
@@ -24,7 +24,6 @@ enum WsLoopError {
 pub(crate) struct BinanceClient {
     symbol: String,
     price_tx: broadcast::Sender<TickerUpdate>,
-    latest_price: Arc<RwLock<Option<f64>>>,
 }
 
 impl BinanceClient {
@@ -33,7 +32,6 @@ impl BinanceClient {
         Self {
             symbol: symbol.to_string(),
             price_tx,
-            latest_price: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -124,15 +122,6 @@ impl BinanceClient {
                     .get("E")
                     .and_then(|v| v.as_i64())
                     .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
-
-                match self.latest_price.try_write() {
-                    Ok(mut guard) => {
-                        *guard = Some(price);
-                    }
-                    Err(_) => {
-                        tracing::debug!("[WS] Price update dropped (lock contended)");
-                    }
-                }
 
                 if self
                     .price_tx

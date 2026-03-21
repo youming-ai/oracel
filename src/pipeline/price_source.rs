@@ -7,11 +7,37 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 use tokio::sync::RwLock;
 
 use crate::config::PriceSourceType;
 use crate::data::binance::BinanceClient;
 use crate::data::coinbase::CoinbaseClient;
+
+/// Uniform ticker update shared across all price source backends.
+#[derive(Debug, Clone, Copy)]
+struct TickerUpdate {
+    price: f64,
+    timestamp_ms: i64,
+}
+
+impl From<crate::data::binance::TickerUpdate> for TickerUpdate {
+    fn from(t: crate::data::binance::TickerUpdate) -> Self {
+        Self {
+            price: t.price,
+            timestamp_ms: t.timestamp_ms,
+        }
+    }
+}
+
+impl From<crate::data::coinbase::TickerUpdate> for TickerUpdate {
+    fn from(t: crate::data::coinbase::TickerUpdate) -> Self {
+        Self {
+            price: t.price,
+            timestamp_ms: t.timestamp_ms,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PriceTick {
@@ -72,30 +98,42 @@ impl PriceSource {
 
         match &self.client {
             PriceClient::Binance(client) => {
-                self.spawn_binance_tasks(client.clone());
+                let ws_client = client.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = ws_client.start_ticker_ws().await {
+                        tracing::error!("[WS] Binance WS stopped: {}", e);
+                    }
+                });
+                Self::spawn_receiver(self.buffer.clone(), self.max, client.subscribe(), "Binance");
             }
             PriceClient::Coinbase(client) => {
-                self.spawn_coinbase_tasks(client.clone());
+                let ws_client = client.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = ws_client.start_ticker_ws().await {
+                        tracing::error!("[WS] Coinbase WS stopped: {}", e);
+                    }
+                });
+                Self::spawn_receiver(
+                    self.buffer.clone(),
+                    self.max,
+                    client.subscribe(),
+                    "Coinbase",
+                );
             }
         }
     }
 
-    fn spawn_binance_tasks(&self, client: Arc<BinanceClient>) {
-        let client_for_ws = client.clone();
-        tokio::spawn(async move {
-            if let Err(e) = client_for_ws.start_ticker_ws().await {
-                tracing::error!("[WS] Binance WS stopped: {}", e);
-            }
-        });
-
-        let buf = self.buffer.clone();
-        let max = self.max;
-        let mut rx = client.subscribe();
-
+    fn spawn_receiver<T: Into<TickerUpdate> + Clone + Send + 'static>(
+        buf: Arc<RwLock<VecDeque<PriceTick>>>,
+        max: usize,
+        mut rx: broadcast::Receiver<T>,
+        source: &'static str,
+    ) {
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
-                    Ok(ticker) => {
+                    Ok(raw) => {
+                        let ticker: TickerUpdate = raw.into();
                         let mut h = buf.write().await;
                         if h.back()
                             .map(|last| ticker.timestamp_ms >= last.timestamp_ms)
@@ -110,65 +148,18 @@ impl PriceSource {
                             }
                         } else {
                             tracing::debug!(
-                                "[WS] Ignoring out-of-order Binance tick ts={} < {}",
+                                "[WS] Ignoring out-of-order {} tick ts={} < {}",
+                                source,
                                 ticker.timestamp_ms,
                                 h.back().map(|last| last.timestamp_ms).unwrap_or(0)
                             );
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
                         tracing::debug!("[WS] Price receiver lagged by {} messages", n);
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        tracing::error!("[WS] Binance price channel closed");
-                        break;
-                    }
-                }
-            }
-        });
-    }
-
-    fn spawn_coinbase_tasks(&self, client: Arc<CoinbaseClient>) {
-        let client_for_ws = client.clone();
-        tokio::spawn(async move {
-            if let Err(e) = client_for_ws.start_ticker_ws().await {
-                tracing::error!("[WS] Coinbase WS stopped: {}", e);
-            }
-        });
-
-        let buf = self.buffer.clone();
-        let max = self.max;
-        let mut rx = client.subscribe();
-
-        tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(ticker) => {
-                        let mut h = buf.write().await;
-                        if h.back()
-                            .map(|last| ticker.timestamp_ms >= last.timestamp_ms)
-                            .unwrap_or(true)
-                        {
-                            h.push_back(PriceTick {
-                                price: ticker.price,
-                                timestamp_ms: ticker.timestamp_ms,
-                            });
-                            if h.len() > max {
-                                h.pop_front();
-                            }
-                        } else {
-                            tracing::debug!(
-                                "[WS] Ignoring out-of-order Coinbase tick ts={} < {}",
-                                ticker.timestamp_ms,
-                                h.back().map(|last| last.timestamp_ms).unwrap_or(0)
-                            );
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::debug!("[WS] Price receiver lagged by {} messages", n);
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        tracing::error!("[WS] Coinbase price channel closed");
+                    Err(broadcast::error::RecvError::Closed) => {
+                        tracing::error!("[WS] {} price channel closed", source);
                         break;
                     }
                 }

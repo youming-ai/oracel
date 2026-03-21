@@ -30,9 +30,6 @@ pub(crate) struct DeciderConfig {
     pub min_position: Decimal,
     /// Cooldown between trades (ms)
     pub cooldown_ms: i64,
-    /// Circuit breaker: max consecutive losses before longest pause (unused - pause disabled)
-    #[allow(dead_code)]
-    pub max_consecutive_losses: u32,
     /// Market price threshold to consider "extreme" (e.g. 0.80)
     pub extreme_threshold: Decimal,
     /// Fair value assumption for binary outcome (e.g. 0.50)
@@ -45,15 +42,6 @@ pub(crate) struct DeciderConfig {
     pub momentum_lookback_ms: i64,
     /// Position size as percentage of balance (e.g. 1.0 = 1%)
     pub position_size_pct: Decimal,
-    /// Pause duration after 4-5 consecutive losses (ms) (unused - pause disabled)
-    #[allow(dead_code)]
-    pub pause_short_ms: i64,
-    /// Pause duration after 6-7 consecutive losses (ms) (unused - pause disabled)
-    #[allow(dead_code)]
-    pub pause_long_ms: i64,
-    /// Pause duration at circuit breaker (ms) (unused - pause disabled)
-    #[allow(dead_code)]
-    pub pause_circuit_ms: i64,
 }
 
 impl Default for DeciderConfig {
@@ -63,16 +51,12 @@ impl Default for DeciderConfig {
             max_position: decimal("10.0"),
             min_position: decimal("1.0"),
             cooldown_ms: 5_000,
-            max_consecutive_losses: 8,
             extreme_threshold: decimal("0.80"),
             fair_value: decimal("0.50"),
             max_daily_loss_pct: decimal("0.25"),
             momentum_threshold: decimal("0.003"),
             momentum_lookback_ms: 120_000,
             position_size_pct: decimal("1.0"),
-            pause_short_ms: 60_000,
-            pause_long_ms: 300_000,
-            pause_circuit_ms: 1_800_000,
         }
     }
 }
@@ -92,7 +76,6 @@ pub(crate) struct AccountState {
     pub daily_pnl: Decimal,
     pub pnl_reset_date: String,
     pub last_traded_settlement_ms: i64,
-    pub pause_until_ms: i64,
 }
 
 impl AccountState {
@@ -107,7 +90,6 @@ impl AccountState {
             daily_pnl: Decimal::ZERO,
             pnl_reset_date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
             last_traded_settlement_ms: 0,
-            pause_until_ms: 0,
         }
     }
 
@@ -149,15 +131,6 @@ impl AccountState {
             return Some("cooldown");
         }
 
-        if now < self.pause_until_ms {
-            let remaining = (self.pause_until_ms - now) / 1000;
-            tracing::warn!(
-                "[RISK] Loss pause active: {}s remaining, blocking trade",
-                remaining
-            );
-            return Some("loss_pause");
-        }
-
         if self.daily_pnl <= -(self.balance * cfg.max_daily_loss_pct) {
             tracing::error!(
                 "[RISK] Daily loss limit reached: pnl={:.2}, limit={:.2}, blocking trade",
@@ -170,13 +143,6 @@ impl AccountState {
         None
     }
 
-    /// Check if we should pause after losses (trend detection)
-    /// Returns pause duration in ms, or 0 if no pause needed
-    fn loss_pause_duration(&self, _cfg: &DeciderConfig) -> i64 {
-        // Pause mechanism disabled
-        0
-    }
-
     pub(crate) fn record_trade(&mut self, cost: Decimal) {
         self.balance -= cost;
         self.last_trade_time_ms = chrono::Utc::now().timestamp_millis();
@@ -185,7 +151,6 @@ impl AccountState {
     pub(crate) fn record_settlement(
         &mut self,
         result: &crate::pipeline::settler::SettlementResult,
-        cfg: &DeciderConfig,
     ) {
         self.balance += result.payout;
         self.daily_pnl += result.pnl;
@@ -198,16 +163,6 @@ impl AccountState {
             self.consecutive_losses += 1;
             self.consecutive_wins = 0;
             self.total_losses += 1;
-
-            let pause_ms = self.loss_pause_duration(cfg);
-            if pause_ms > 0 {
-                self.pause_until_ms = chrono::Utc::now().timestamp_millis() + pause_ms;
-                tracing::warn!(
-                    "[RISK] {} consecutive losses, pausing for {}s",
-                    self.consecutive_losses,
-                    pause_ms / 1000
-                );
-            }
         }
     }
 
@@ -305,10 +260,6 @@ pub(crate) fn decide(
         }
     }
 
-    if account.balance <= Decimal::ZERO {
-        return Decision::Pass("insufficient_balance".into());
-    }
-
     // Position sizing: fixed % of balance, clamped to [min_position, max_position]
     let size = (account.balance * cfg.position_size_pct / decimal("100"))
         .max(cfg.min_position)
@@ -370,7 +321,7 @@ mod tests {
         };
 
         account.record_trade(d("5.0"));
-        account.record_settlement(&result, &DeciderConfig::default());
+        account.record_settlement(&result);
 
         assert_eq!(account.balance, d("1019.99"));
         assert_eq!(account.daily_pnl, d("19.99"));
@@ -379,11 +330,6 @@ mod tests {
     /// BTC prices with downward momentum (>0.3% drop) for confirming DOWN direction
     fn btc_down_momentum() -> Vec<(f64, i64)> {
         vec![(100400.0, 0), (100000.0, 120_000)]
-    }
-
-    /// BTC prices with upward momentum (>0.3% rise) for confirming UP direction
-    fn btc_up_momentum() -> Vec<(f64, i64)> {
-        vec![(100000.0, 0), (100400.0, 120_000)]
     }
 
     #[test]
@@ -488,30 +434,6 @@ mod tests {
         match decision {
             Decision::Pass(reason) => assert_eq!(reason, "already_traded"),
             Decision::Trade { .. } => panic!("expected pass but got trade"),
-        }
-    }
-
-    #[test]
-    fn test_risk_controls_do_not_block_after_loss_pause_when_disabled() {
-        let mut account = AccountState::new(d("1000"));
-        let cfg = DeciderConfig::default();
-        account.consecutive_losses = 8;
-        account.pause_until_ms = chrono::Utc::now().timestamp_millis() + 60_000;
-        account.last_trade_time_ms = chrono::Utc::now().timestamp_millis() - 60_000;
-
-        // Pause mechanism is disabled, so trade should still happen
-        let decision = decide(
-            Some(d("0.85")),
-            Some(d("0.15")),
-            1_700_000_000_000,
-            &account,
-            &cfg,
-            &btc_down_momentum(),
-        );
-
-        match decision {
-            Decision::Trade { .. } => { /* expected - pause is disabled */ }
-            Decision::Pass(reason) => panic!("expected trade but got pass: {}", reason),
         }
     }
 

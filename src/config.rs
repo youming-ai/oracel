@@ -70,7 +70,6 @@ fn default_private_key() -> SecretString {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MarketConfig {
-    pub window_minutes: f64,
     #[serde(default = "default_stale_threshold_ms")]
     pub stale_threshold_ms: i64,
     #[serde(default = "default_min_ttl_ms")]
@@ -102,8 +101,6 @@ pub(crate) struct StrategyConfig {
     pub extreme_threshold: Decimal,
     #[serde(default = "default_fair_value", with = "rust_decimal::serde::float")]
     pub fair_value: Decimal,
-    #[serde(default = "default_btc_tiebreaker_usd")]
-    pub btc_tiebreaker_usd: f64,
     #[serde(
         default = "default_momentum_threshold",
         with = "rust_decimal::serde::float"
@@ -127,9 +124,6 @@ fn default_extreme_threshold() -> Decimal {
 }
 fn default_fair_value() -> Decimal {
     dec("0.50")
-}
-fn default_btc_tiebreaker_usd() -> f64 {
-    5.0
 }
 fn default_momentum_threshold() -> Decimal {
     dec("0.001")
@@ -158,7 +152,6 @@ pub(crate) struct EdgeConfigFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RiskConfig {
-    pub max_consecutive_losses: u32,
     #[serde(
         default = "default_max_daily_loss_pct",
         with = "rust_decimal::serde::float"
@@ -166,12 +159,6 @@ pub(crate) struct RiskConfig {
     pub max_daily_loss_pct: Decimal,
     #[serde(default = "default_cooldown_ms")]
     pub cooldown_ms: i64,
-    #[serde(default = "default_pause_short_ms")]
-    pub pause_short_ms: i64,
-    #[serde(default = "default_pause_long_ms")]
-    pub pause_long_ms: i64,
-    #[serde(default = "default_pause_circuit_ms")]
-    pub pause_circuit_ms: i64,
     #[serde(default = "default_max_fok_retries")]
     pub max_fok_retries: u32,
 }
@@ -181,15 +168,6 @@ fn default_max_daily_loss_pct() -> Decimal {
 }
 fn default_cooldown_ms() -> i64 {
     5_000
-}
-fn default_pause_short_ms() -> i64 {
-    60_000
-}
-fn default_pause_long_ms() -> i64 {
-    300_000
-}
-fn default_pause_circuit_ms() -> i64 {
-    1_800_000
 }
 fn default_max_fok_retries() -> u32 {
     3
@@ -288,7 +266,6 @@ impl Default for TradingConfig {
 impl Default for MarketConfig {
     fn default() -> Self {
         Self {
-            window_minutes: 5.0,
             stale_threshold_ms: 30_000,
             min_ttl_ms: 30_000,
         }
@@ -308,7 +285,6 @@ impl Default for StrategyConfig {
         Self {
             extreme_threshold: dec("0.80"),
             fair_value: dec("0.50"),
-            btc_tiebreaker_usd: 5.0,
             momentum_threshold: dec("0.003"),
             momentum_lookback_ms: 120_000,
             max_position: dec("10.0"),
@@ -329,12 +305,8 @@ impl Default for EdgeConfigFile {
 impl Default for RiskConfig {
     fn default() -> Self {
         Self {
-            max_consecutive_losses: 8,
             max_daily_loss_pct: dec("0.25"),
             cooldown_ms: 5_000,
-            pause_short_ms: 60_000,
-            pause_long_ms: 300_000,
-            pause_circuit_ms: 1_800_000,
             max_fok_retries: 3,
         }
     }
@@ -391,9 +363,6 @@ impl Config {
         if !(zero < self.risk.max_daily_loss_pct && self.risk.max_daily_loss_pct <= one) {
             anyhow::bail!("risk.max_daily_loss_pct must be in (0, 1]");
         }
-        if self.market.window_minutes <= 0.0 {
-            anyhow::bail!("market.window_minutes must be > 0");
-        }
         if self.price_source.source.expects_dash_symbol() {
             if !is_valid_coinbase_symbol(&self.price_source.symbol) {
                 anyhow::bail!(
@@ -416,25 +385,19 @@ impl Config {
     pub(crate) fn is_default_non_trading(&self) -> bool {
         let defaults = Config::default();
 
-        self.market.window_minutes == defaults.market.window_minutes
-            && self.market.stale_threshold_ms == defaults.market.stale_threshold_ms
+        self.market.stale_threshold_ms == defaults.market.stale_threshold_ms
             && self.market.min_ttl_ms == defaults.market.min_ttl_ms
             && self.polyclob.gamma_api_url == defaults.polyclob.gamma_api_url
             && self.strategy.extreme_threshold == defaults.strategy.extreme_threshold
             && self.strategy.fair_value == defaults.strategy.fair_value
-            && self.strategy.btc_tiebreaker_usd == defaults.strategy.btc_tiebreaker_usd
             && self.strategy.momentum_threshold == defaults.strategy.momentum_threshold
             && self.strategy.momentum_lookback_ms == defaults.strategy.momentum_lookback_ms
             && self.strategy.max_position == defaults.strategy.max_position
             && self.strategy.min_position == defaults.strategy.min_position
             && self.strategy.position_size_pct == defaults.strategy.position_size_pct
             && self.edge.edge_threshold_early == defaults.edge.edge_threshold_early
-            && self.risk.max_consecutive_losses == defaults.risk.max_consecutive_losses
             && self.risk.max_daily_loss_pct == defaults.risk.max_daily_loss_pct
             && self.risk.cooldown_ms == defaults.risk.cooldown_ms
-            && self.risk.pause_short_ms == defaults.risk.pause_short_ms
-            && self.risk.pause_long_ms == defaults.risk.pause_long_ms
-            && self.risk.pause_circuit_ms == defaults.risk.pause_circuit_ms
             && self.risk.max_fok_retries == defaults.risk.max_fok_retries
             && self.polling.signal_interval_ms == defaults.polling.signal_interval_ms
             && self.polling.status_interval_ms == defaults.polling.status_interval_ms
