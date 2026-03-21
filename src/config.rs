@@ -360,8 +360,11 @@ impl Config {
         if !(zero < self.strategy.fair_value && self.strategy.fair_value < one) {
             anyhow::bail!("strategy.fair_value must be in (0, 1)");
         }
-        if self.strategy.position_size_pct <= zero {
-            anyhow::bail!("strategy.position_size_pct must be > 0");
+        if self.strategy.min_position <= zero {
+            anyhow::bail!("strategy.min_position must be > 0");
+        }
+        if !(zero < self.strategy.position_size_pct && self.strategy.position_size_pct <= dec("100")) {
+            anyhow::bail!("strategy.position_size_pct must be in (0, 100]");
         }
         if self.strategy.min_position > self.strategy.max_position {
             anyhow::bail!("strategy.min_position must be <= max_position");
@@ -490,6 +493,20 @@ mod tests {
     fn test_validate_rejects_zero_position_size_pct() {
         let mut cfg = Config::default();
         cfg.strategy.position_size_pct = Decimal::ZERO;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_position_size_pct_above_100() {
+        let mut cfg = Config::default();
+        cfg.strategy.position_size_pct = dec("101.0");
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_non_positive_min_position() {
+        let mut cfg = Config::default();
+        cfg.strategy.min_position = Decimal::ZERO;
         assert!(cfg.validate().is_err());
     }
 
