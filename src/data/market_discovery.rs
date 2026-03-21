@@ -218,10 +218,10 @@ fn parse_json_string_array(value: &Option<String>) -> Option<Vec<String>> {
 }
 
 pub(crate) fn infer_resolution_state(market: &GammaMarket) -> Option<ResolutionState> {
-    let status = market
-        .uma_resolution_status
-        .as_deref()?
-        .to_ascii_lowercase();
+    let status = match market.uma_resolution_status.as_deref() {
+        Some(s) => s.to_ascii_lowercase(),
+        None => return Some(ResolutionState::Pending), // not yet published, wait silently
+    };
     if !status.contains("resolved") {
         return Some(ResolutionState::Pending);
     }
