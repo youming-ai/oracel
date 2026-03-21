@@ -360,8 +360,17 @@ impl Config {
         if !(zero < self.strategy.fair_value && self.strategy.fair_value < one) {
             anyhow::bail!("strategy.fair_value must be in (0, 1)");
         }
+        if self.strategy.position_size_pct <= zero {
+            anyhow::bail!("strategy.position_size_pct must be > 0");
+        }
+        if self.strategy.min_position > self.strategy.max_position {
+            anyhow::bail!("strategy.min_position must be <= max_position");
+        }
         if !(zero < self.risk.max_daily_loss_pct && self.risk.max_daily_loss_pct <= one) {
             anyhow::bail!("risk.max_daily_loss_pct must be in (0, 1]");
+        }
+        if !(zero < self.edge.edge_threshold_early && self.edge.edge_threshold_early < one) {
+            anyhow::bail!("edge.edge_threshold_early must be in (0, 1)");
         }
         if self.price_source.source.expects_dash_symbol() {
             if !is_valid_coinbase_symbol(&self.price_source.symbol) {
@@ -475,5 +484,27 @@ mod tests {
         cfg.price_source.symbol = "BTC-USD".to_string();
 
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_position_size_pct() {
+        let mut cfg = Config::default();
+        cfg.strategy.position_size_pct = Decimal::ZERO;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_min_greater_than_max_position() {
+        let mut cfg = Config::default();
+        cfg.strategy.min_position = dec("15.0");
+        cfg.strategy.max_position = dec("10.0");
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_edge_threshold() {
+        let mut cfg = Config::default();
+        cfg.edge.edge_threshold_early = Decimal::ZERO;
+        assert!(cfg.validate().is_err());
     }
 }
