@@ -158,7 +158,7 @@ impl Bot {
         let initial_balance = if config.trading.mode.is_paper() {
             Self::load_balance(&log_dir)
                 .await
-                .unwrap_or_else(|| decimal("1000"))
+                .unwrap_or_else(|| decimal("100"))
         } else {
             let rpc = data::chainlink::rpc_url(config.trading.mode);
             if let Some(ref r) = redeemer {
@@ -579,6 +579,11 @@ impl Bot {
                 edge,
                 payoff_ratio,
             } => {
+                // One trade per market window
+                if self.settler.read().await.pending_count() > 0 {
+                    return Ok(());
+                }
+
                 {
                     let st = self.state.read().await;
                     if st.last_fok_rejection_ms > 0 {
@@ -602,13 +607,30 @@ impl Bot {
                 };
                 let best_ask = match self.polymarket.fetch_best_ask(token_id).await {
                     Ok(Some((ask_price, ask_size))) => {
-                        tracing::info!(
-                            "[BOOK] best ask={:.3} size={:.0} for {}",
-                            ask_price,
-                            ask_size,
-                            direction.as_str()
-                        );
-                        Some(ask_price)
+                        if ask_price <= Decimal::new(1, 2) || ask_price >= Decimal::new(99, 2) {
+                            if self.config.trading.mode.is_live() {
+                                self.state.write().await.log_idle_change(
+                                    "extreme_ask",
+                                    &format!("{:.3} for {}", ask_price, direction.as_str()),
+                                );
+                                return Ok(());
+                            }
+                            // paper mode: extreme ask means no real liquidity,
+                            // fall back to mid price for simulated fill
+                            self.state.write().await.log_idle_change(
+                                "extreme_ask_paper_fallback",
+                                &format!("{:.3} for {}, using mid", ask_price, direction.as_str()),
+                            );
+                            None
+                        } else {
+                            tracing::info!(
+                                "[BOOK] best ask={:.3} size={:.0} for {}",
+                                ask_price,
+                                ask_size,
+                                direction.as_str()
+                            );
+                            Some(ask_price)
+                        }
                     }
                     Ok(None) => {
                         tracing::warn!("[BOOK] No asks in orderbook, skipping trade");
