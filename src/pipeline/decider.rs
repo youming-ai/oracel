@@ -168,14 +168,9 @@ impl AccountState {
 
     /// Check if we should pause after losses (trend detection)
     /// Returns pause duration in ms, or 0 if no pause needed
-    fn loss_pause_duration(&self, cfg: &DeciderConfig) -> i64 {
-        match self.consecutive_losses {
-            0..=3 => 0,
-            4..=5 => cfg.pause_short_ms,
-            6..=7 => cfg.pause_long_ms,
-            _ if self.consecutive_losses >= cfg.max_consecutive_losses => cfg.pause_circuit_ms,
-            _ => 0,
-        }
+    fn loss_pause_duration(&self, _cfg: &DeciderConfig) -> i64 {
+        // Pause mechanism disabled
+        0
     }
 
     pub(crate) fn record_trade(&mut self, cost: Decimal) {
@@ -493,12 +488,14 @@ mod tests {
     }
 
     #[test]
-    fn test_risk_controls_block_after_loss_pause() {
+    fn test_risk_controls_do_not_block_after_loss_pause_when_disabled() {
         let mut account = AccountState::new(d("1000"));
         let cfg = DeciderConfig::default();
         account.consecutive_losses = 8;
         account.pause_until_ms = chrono::Utc::now().timestamp_millis() + 60_000;
+        account.last_trade_time_ms = chrono::Utc::now().timestamp_millis() - 60_000;
 
+        // Pause mechanism is disabled, so trade should still happen
         let decision = decide(
             Some(d("0.85")),
             Some(d("0.15")),
@@ -509,10 +506,8 @@ mod tests {
         );
 
         match decision {
-            Decision::Pass(reason) => assert_eq!(reason, "loss_pause"),
-            Decision::Trade { .. } => {
-                panic!("expected pass due to loss pause but got trade")
-            }
+            Decision::Trade { .. } => { /* expected - pause is disabled */ }
+            Decision::Pass(reason) => panic!("expected trade but got pass: {}", reason),
         }
     }
 

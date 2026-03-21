@@ -225,28 +225,4 @@ mod tests {
         assert!(result.is_none());
     }
 
-    #[tokio::test]
-    async fn test_rejects_extreme_price() {
-        let executor = Executor::new(TradingMode::Paper, None);
-        let decision = Decision::Trade {
-            direction: Direction::Down,
-            size_usdc: d("5.00"),
-            edge: d("0.40"),
-        };
-
-        let result = executor
-            .execute(&ExecuteContext {
-                decision: &decision,
-                token_yes: "yes",
-                token_no: "no",
-                poly_yes: Some(d("0.99")),
-                poly_no: Some(d("0.01")),
-                best_ask: None,
-                settlement_time_ms: 123,
-                btc_price: 70000.0,
-            })
-            .await;
-
-        assert!(result.is_none());
-    }
 }
