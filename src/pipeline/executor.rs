@@ -56,41 +56,16 @@ impl Executor {
                     Direction::Up => (ctx.token_yes, ctx.poly_yes?),
                     Direction::Down => (ctx.token_no, ctx.poly_no?),
                 };
-                // Use best ask from orderbook when available, but reject if
-                // it deviates too far from mid price (indicates thin liquidity).
-                // Max allowed: 2× mid price — beyond that, the fill price
-                // destroys the strategy's edge.
-                let price = match ctx.best_ask {
-                    Some(ask) if ask <= mid_price * Decimal::TWO => {
-                        if ask != mid_price {
-                            tracing::info!(
-                                "[EXEC] Using best ask {:.3} (mid was {:.3})",
-                                ask,
-                                mid_price
-                            );
-                        }
-                        ask
-                    }
-                    Some(ask) => {
-                        tracing::warn!(
-                            "[EXEC] Best ask {:.3} too far from mid {:.3} (>{:.0}×), skipping",
-                            ask,
-                            mid_price,
-                            ask / mid_price,
-                        );
-                        return None;
-                    }
-                    None => {
-                        // Paper mode: simulate spread by adding 1 cent to mid price.
-                        // Real orderbooks rarely fill at mid — this makes paper
-                        // results more representative of live execution.
-                        if self.mode.is_paper() {
-                            mid_price + Decimal::new(1, 2)
-                        } else {
-                            mid_price
-                        }
-                    }
-                };
+                // Use best ask from orderbook when available (live mode),
+                // fall back to mid price (paper mode or if orderbook fetch failed)
+                let price = ctx.best_ask.unwrap_or(mid_price);
+                if ctx.best_ask.is_some() && price != mid_price {
+                    tracing::info!(
+                        "[EXEC] Using best ask {:.3} (mid was {:.3})",
+                        price,
+                        mid_price
+                    );
+                }
 
                 if price <= Decimal::new(1, 2) || price >= Decimal::new(99, 2) {
                     tracing::warn!("[EXEC] Extreme price {:.3}, skipping", price);
