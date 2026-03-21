@@ -591,6 +591,7 @@ impl Bot {
                 direction,
                 size_usdc: _,
                 edge,
+                payoff_ratio,
             } => {
                 // FOK backoff: wait at least 3s after a rejection before retrying
                 {
@@ -639,10 +640,11 @@ impl Bot {
                 };
 
                 tracing::info!(
-                    "[TRADE] {} @ {:.3} edge={:.0}% BTC=${:.0}",
+                    "[TRADE] {} @ {:.3} edge={:.0}% payoff={:.1}x BTC=${:.0}",
                     direction.as_str(),
                     best_ask.unwrap_or(cheap_price),
                     (*edge * decimal("100")).round_dp(0),
+                    payoff_ratio,
                     btc_price,
                 );
 
@@ -717,7 +719,7 @@ impl Bot {
                         .map(|v| format!("{:.3}", v))
                         .unwrap_or_default();
                     let log_line = format!(
-                        "{},{},{},{:.3},{:.2},{:.1},{:.2},{}s,{},{}\n",
+                        "{},{},{},{:.3},{:.2},{:.1},{:.2},{}s,{},{},{:.1}x\n",
                         Utc::now().format("%H:%M:%S"),
                         order.direction.as_str(),
                         order_id_short,
@@ -728,6 +730,7 @@ impl Bot {
                         ttl_secs,
                         yes_f,
                         no_f,
+                        payoff_ratio,
                     );
                     let trades_path = Path::new(&self.log_dir).join("trades.csv");
                     match tokio::task::spawn_blocking(move || -> std::io::Result<()> {

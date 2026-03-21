@@ -17,6 +17,8 @@ pub(crate) enum Decision {
         direction: Direction,
         size_usdc: Decimal,
         edge: Decimal,
+        /// (1 - cheap_price) / cheap_price — the core "以小搏大" metric.
+        payoff_ratio: Decimal,
     },
 }
 
@@ -266,31 +268,55 @@ pub(crate) fn decide(
         ));
     }
 
-    match btc_momentum(btc_prices, cfg.momentum_lookback_ms) {
-        None => {
-            return Decision::Pass("no_momentum_data".into());
-        }
-        Some(momentum) => {
-            let momentum_threshold = cfg.momentum_threshold.to_f64().unwrap_or(0.0);
-            // Block if momentum is against our trade direction
-            let against_trend = match direction {
-                Direction::Down => momentum > momentum_threshold,
-                Direction::Up => momentum < -momentum_threshold,
-            };
-            if against_trend {
-                return Decision::Pass(format!("against_trend_{:+.2}%", momentum * 100.0));
+    // Momentum filter — relaxed for very cheap entries.
+    // The cheaper the entry, the higher the payoff ratio, and the less we
+    // need the market to be wrong.  At $0.10 (9x payoff) we only need 10%
+    // win rate, so fighting a short-term trend is acceptable.
+    //
+    // Threshold scaling:  base threshold × payoff_ratio_factor
+    //   payoff ≥ 9x  (price ≤ $0.10) → skip momentum filter entirely
+    //   payoff 4-9x  (price $0.10-$0.20) → 3× looser threshold
+    //   payoff < 4x  (price > $0.20) → normal threshold
+    let cheap_price = match direction {
+        Direction::Down => no / total,
+        Direction::Up => yes / total,
+    };
+    let payoff_ratio = if cheap_price > Decimal::ZERO {
+        (Decimal::ONE - cheap_price) / cheap_price
+    } else {
+        Decimal::new(99, 0)
+    };
+
+    let skip_momentum = payoff_ratio >= Decimal::new(9, 0); // ≥ 9x
+    if !skip_momentum {
+        match btc_momentum(btc_prices, cfg.momentum_lookback_ms) {
+            None => {
+                return Decision::Pass("no_momentum_data".into());
+            }
+            Some(momentum) => {
+                let base_threshold = cfg.momentum_threshold.to_f64().unwrap_or(0.0);
+                // Relax threshold for better payoff ratios (4x-9x → 3× looser)
+                let effective_threshold = if payoff_ratio >= Decimal::new(4, 0) {
+                    base_threshold * 3.0
+                } else {
+                    base_threshold
+                };
+                let against_trend = match direction {
+                    Direction::Down => momentum > effective_threshold,
+                    Direction::Up => momentum < -effective_threshold,
+                };
+                if against_trend {
+                    return Decision::Pass(format!("against_trend_{:+.2}%", momentum * 100.0));
+                }
             }
         }
     }
 
-    // Position sizing: base = balance × pct%, then scale up linearly with edge.
-    // A 30% edge trade gets 2× the size of a 15% edge trade (at threshold).
-    let edge_multiplier = if cfg.edge_threshold > Decimal::ZERO {
-        edge / cfg.edge_threshold
-    } else {
-        Decimal::ONE
-    };
-    let size = (account.balance * cfg.position_size_pct / decimal("100") * edge_multiplier)
+    // Position sizing: fixed % of balance, clamped to [min, max].
+    // For asymmetric payoff strategies ("以小搏大"), each bet should be
+    // consistently small.  Profit comes from the payoff ratio, not from
+    // scaling position size.
+    let size = (account.balance * cfg.position_size_pct / decimal("100"))
         .max(cfg.min_position)
         .min(cfg.max_position);
 
@@ -298,6 +324,7 @@ pub(crate) fn decide(
         direction,
         size_usdc: size,
         edge,
+        payoff_ratio,
     }
 }
 
@@ -379,22 +406,26 @@ mod tests {
 
         match decision {
             Decision::Trade {
-                direction, edge, ..
+                direction,
+                edge,
+                payoff_ratio,
+                ..
             } => {
                 assert_eq!(direction, Direction::Down);
                 assert_eq!(edge, d("0.35"));
+                // cheap_price = 0.15, payoff = 0.85/0.15 ≈ 5.67
+                assert!(payoff_ratio > d("5.66") && payoff_ratio < d("5.67"));
             }
             Decision::Pass(reason) => panic!("expected trade but got pass: {}", reason),
         }
     }
 
     #[test]
-    fn test_position_size_scales_with_edge() {
+    fn test_position_size_is_fixed_pct_of_balance() {
         let mut account = AccountState::new(d("500"));
         account.last_trade_time_ms = chrono::Utc::now().timestamp_millis() - 60_000;
         let cfg = DeciderConfig::default();
-        // edge=0.35, threshold=0.15 → multiplier ≈ 2.33
-        // base = 500 * 1% = 5, scaled = 5 * 2.33 = 11.67, clamped to max 10
+        // 500 * 1% = 5, no edge scaling (以小搏大: fixed bet size)
         let decision = decide(
             Some(d("0.85")),
             Some(d("0.15")),
@@ -405,17 +436,17 @@ mod tests {
             &btc_down_momentum(),
         );
         match decision {
-            Decision::Trade { size_usdc, .. } => assert_eq!(size_usdc, d("10.0")),
+            Decision::Trade { size_usdc, .. } => assert_eq!(size_usdc, d("5")),
             Decision::Pass(reason) => panic!("expected trade but got pass: {}", reason),
         }
     }
 
     #[test]
     fn test_position_size_floor_at_one_usdc() {
-        let mut account = AccountState::new(d("30"));
+        let mut account = AccountState::new(d("50"));
         account.last_trade_time_ms = chrono::Utc::now().timestamp_millis() - 60_000;
         let cfg = DeciderConfig::default();
-        // base = 30 * 1% = 0.30, × 2.33 = 0.70, clamped to min 1
+        // 50 * 1% = 0.50, clamped to min 1
         let decision = decide(
             Some(d("0.85")),
             Some(d("0.15")),

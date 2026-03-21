@@ -50,6 +50,7 @@ impl Executor {
                 direction,
                 size_usdc,
                 edge,
+                ..
             } => {
                 let (token_id, mid_price) = match direction {
                     Direction::Up => (ctx.token_yes, ctx.poly_yes?),
@@ -218,6 +219,7 @@ mod tests {
             direction: Direction::Up,
             size_usdc: d("5.00"),
             edge: d("0.20"),
+            payoff_ratio: d("3.98"),
         };
 
         let result = executor
@@ -247,6 +249,7 @@ mod tests {
             direction: Direction::Up,
             size_usdc: d("5.00"),
             edge: d("0.20"),
+            payoff_ratio: d("3.98"),
         };
 
         let result = executor
