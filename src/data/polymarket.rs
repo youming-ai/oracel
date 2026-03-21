@@ -345,6 +345,49 @@ impl CtfRedeemer {
     }
 }
 
+/// Reusable on-chain USDC balance checker.
+/// Connects once during construction and reuses the provider for all balance queries.
+pub(crate) struct BalanceChecker {
+    wallet: Address,
+    #[allow(dead_code)]
+    rpc_url: String,
+    provider: alloy::providers::RootProvider<alloy::network::Ethereum>,
+}
+
+impl BalanceChecker {
+    /// Connects to the RPC once. Returns Err if connection fails.
+    pub(crate) async fn new(wallet: Address, rpc_url: String) -> anyhow::Result<Self> {
+        let provider = tokio::time::timeout(
+            Duration::from_secs(15),
+            ProviderBuilder::default().connect(&rpc_url),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("RPC connect timed out"))?
+        .context("RPC connect failed")?;
+
+        Ok(Self {
+            wallet,
+            rpc_url,
+            provider,
+        })
+    }
+
+    pub(crate) async fn balance(&self) -> anyhow::Result<rust_decimal::Decimal> {
+        use rust_decimal::Decimal;
+
+        let usdc = IERC20::new(POLYGON_USDC, &self.provider);
+        let raw = usdc
+            .balanceOf(self.wallet)
+            .call()
+            .await
+            .map_err(|e| anyhow::anyhow!("USDC balanceOf failed: {}", e))?;
+        let raw_u128: u128 = raw
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("USDC balance too large for u128"))?;
+        Ok(Decimal::from(raw_u128) / Decimal::from(1_000_000u64))
+    }
+}
+
 pub(crate) async fn query_usdc_balance(
     rpc_url: &str,
     wallet: alloy::primitives::Address,

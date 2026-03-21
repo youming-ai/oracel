@@ -48,7 +48,7 @@ struct PersistState {
 use data::market_discovery::{
     infer_resolution_state, DiscoveryConfig, MarketDiscovery, ResolutionState,
 };
-use data::polymarket::{AuthenticatedPolyClient, CtfRedeemer, PolymarketClient};
+use data::polymarket::{AuthenticatedPolyClient, BalanceChecker, CtfRedeemer, PolymarketClient};
 
 use pipeline::decider::{self, AccountState, DeciderConfig};
 use pipeline::executor::{ExecuteContext, Executor};
@@ -122,6 +122,7 @@ struct Bot {
     settler: Arc<RwLock<Settler>>,
     executor: Executor,
     redeemer: Option<Arc<CtfRedeemer>>,
+    balance_checker: Option<BalanceChecker>,
     // Dynamic market data
     market_state: Arc<RwLock<MarketState>>,
 }
@@ -195,6 +196,34 @@ impl Bot {
         tracing::info!("[INIT] Starting balance: ${:.2}", initial_balance);
         Self::write_balance(&log_dir, initial_balance).await;
 
+        let balance_checker = if config.trading.mode.is_live() {
+            if let Some(ref r) = redeemer {
+                match r.wallet_address() {
+                    Ok(wallet) => {
+                        let rpc = data::chainlink::rpc_url(config.trading.mode);
+                        match BalanceChecker::new(wallet, rpc).await {
+                            Ok(checker) => {
+                                tracing::info!("[INIT] BalanceChecker connected");
+                                Some(checker)
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "[INIT] BalanceChecker init failed: {}, will query per-tick",
+                                    e
+                                );
+                                None
+                            }
+                        }
+                    }
+                    Err(_) => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let mut settler = Settler::new();
         let mut account = AccountState::new(initial_balance);
 
@@ -231,6 +260,7 @@ impl Bot {
             settler: Arc::new(RwLock::new(settler)),
             executor,
             redeemer,
+            balance_checker,
             market_state: Arc::new(RwLock::new(MarketState::default())),
         })
     }
@@ -472,22 +502,14 @@ impl Bot {
     async fn tick(&self) -> Result<()> {
         self.account.write().await.check_daily_reset();
 
-        if self.config.trading.mode.is_live() {
-            let rpc = data::chainlink::rpc_url(self.config.trading.mode);
-            if let Some(ref redeemer) = self.redeemer {
-                match redeemer.wallet_address() {
-                    Ok(wallet) => match data::polymarket::query_usdc_balance(&rpc, wallet).await {
-                        Ok(on_chain_bal) => {
-                            self.account.write().await.balance = on_chain_bal;
-                            Self::write_balance(&self.log_dir, on_chain_bal).await;
-                        }
-                        Err(e) => {
-                            tracing::warn!("[BAL] Failed to query on-chain USDC balance: {}", e);
-                        }
-                    },
-                    Err(e) => {
-                        tracing::warn!("[BAL] Failed to derive wallet address: {}", e);
-                    }
+        if let Some(ref checker) = self.balance_checker {
+            match checker.balance().await {
+                Ok(on_chain_bal) => {
+                    self.account.write().await.balance = on_chain_bal;
+                    Self::write_balance(&self.log_dir, on_chain_bal).await;
+                }
+                Err(e) => {
+                    tracing::warn!("[BAL] Failed to query on-chain USDC balance: {}", e);
                 }
             }
         }
