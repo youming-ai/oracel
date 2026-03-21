@@ -129,7 +129,14 @@ impl Settler {
         PendingPosition {
             direction: first.direction,
             size_usdc: positions.iter().map(|p| p.size_usdc).sum(),
-            entry_price: first.entry_price,
+            entry_price: {
+            let total_shares: Decimal = positions.iter().map(|p| p.filled_shares).sum();
+            if total_shares > Decimal::ZERO {
+                positions.iter().map(|p| p.cost).sum::<Decimal>() / total_shares
+            } else {
+                first.entry_price
+            }
+        },
             filled_shares: positions.iter().map(|p| p.filled_shares).sum(),
             cost: positions.iter().map(|p| p.cost).sum(),
             settlement_time_ms: first.settlement_time_ms,
@@ -278,5 +285,39 @@ mod tests {
 
         assert_eq!(result.payout, d("55.0"));
         assert_eq!(result.pnl, d("42.5"));
+    }
+
+    #[test]
+    fn test_combine_positions_weighted_entry_price_value() {
+        // 25 shares at 0.20 + 30 shares at 0.10 → weighted = 8.0 / 55 ≈ 0.1454
+        // The combined position should NOT have entry_price = 0.20 (first only)
+        let mut settler = Settler::new();
+
+        let pos1 = PendingPosition {
+            direction: Direction::Up,
+            size_usdc: d("5.0"),
+            entry_price: d("0.20"),
+            filled_shares: d("25.0"),
+            cost: d("5.0"),
+            settlement_time_ms: 0,
+            entry_btc_price: 70000.0,
+            condition_id: "cid1".into(),
+            market_slug: "slug".into(),
+        };
+        let pos2 = PendingPosition {
+            direction: Direction::Up,
+            size_usdc: d("3.0"),
+            entry_price: d("0.10"),
+            filled_shares: d("30.0"),
+            cost: d("3.0"),
+            settlement_time_ms: 0,
+            entry_btc_price: 70000.0,
+            condition_id: "cid2".into(),
+            market_slug: "slug".into(),
+        };
+
+        settler.restore_positions(vec![pos1, pos2]);
+        let result = settler.settle_by_slug("slug", true).unwrap();
+        assert_eq!(result.pnl, d("47.0")); // 55 - 8 = 47
     }
 }
