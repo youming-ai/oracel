@@ -31,8 +31,8 @@ pub(crate) struct ExecuteContext<'a> {
     pub token_no: &'a str,
     pub poly_yes: Option<Decimal>,
     pub poly_no: Option<Decimal>,
-    /// Best ask price from the order book (live mode only).
-    /// When set, FOK orders use this instead of mid price.
+    /// Best ask price from the order book. `None` if the orderbook fetch failed.
+    /// When set, this is used as fill price instead of mid price.
     pub best_ask: Option<Decimal>,
     pub settlement_time_ms: i64,
     pub btc_price: f64,
@@ -244,6 +244,36 @@ mod tests {
             .await;
 
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_returns_none_when_fill_price_erases_edge() {
+        // edge = 0.20, so edge/2 = 0.10
+        // real_edge = fair_value(0.50) - fill_price
+        // If fill_price = 0.42 → real_edge = 0.08 < 0.10 → should reject
+        let executor = Executor::new(TradingMode::Paper, None);
+        let decision = Decision::Trade {
+            direction: Direction::Up,
+            size_usdc: d("5.00"),
+            edge: d("0.20"),
+            payoff_ratio: d("1.19"),
+        };
+
+        let result = executor
+            .execute(&ExecuteContext {
+                decision: &decision,
+                token_yes: "yes",
+                token_no: "no",
+                poly_yes: Some(d("0.42")),
+                poly_no: Some(d("0.58")),
+                best_ask: Some(d("0.42")),
+                settlement_time_ms: 123,
+                btc_price: 70000.0,
+                fair_value: d("0.50"),
+            })
+            .await;
+
+        assert!(result.is_none(), "expected rejection when fill price erases edge");
     }
 
 }
