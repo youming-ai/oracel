@@ -30,7 +30,8 @@ pub(crate) struct DeciderConfig {
     pub min_position: Decimal,
     /// Cooldown between trades (ms)
     pub cooldown_ms: i64,
-    /// Circuit breaker: max consecutive losses before longest pause
+    /// Circuit breaker: max consecutive losses before longest pause (unused - pause disabled)
+    #[allow(dead_code)]
     pub max_consecutive_losses: u32,
     /// Market price threshold to consider "extreme" (e.g. 0.80)
     pub extreme_threshold: Decimal,
@@ -44,11 +45,14 @@ pub(crate) struct DeciderConfig {
     pub momentum_lookback_ms: i64,
     /// Position size as percentage of balance (e.g. 1.0 = 1%)
     pub position_size_pct: Decimal,
-    /// Pause duration after 4-5 consecutive losses (ms)
+    /// Pause duration after 4-5 consecutive losses (ms) (unused - pause disabled)
+    #[allow(dead_code)]
     pub pause_short_ms: i64,
-    /// Pause duration after 6-7 consecutive losses (ms)
+    /// Pause duration after 6-7 consecutive losses (ms) (unused - pause disabled)
+    #[allow(dead_code)]
     pub pause_long_ms: i64,
-    /// Pause duration at circuit breaker (ms)
+    /// Pause duration at circuit breaker (ms) (unused - pause disabled)
+    #[allow(dead_code)]
     pub pause_circuit_ms: i64,
 }
 
