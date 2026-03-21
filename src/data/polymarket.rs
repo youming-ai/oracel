@@ -376,11 +376,13 @@ impl BalanceChecker {
         use rust_decimal::Decimal;
 
         let usdc = IERC20::new(POLYGON_USDC, &self.provider);
-        let raw = usdc
-            .balanceOf(self.wallet)
-            .call()
-            .await
-            .map_err(|e| anyhow::anyhow!("USDC balanceOf failed: {}", e))?;
+        let raw = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            usdc.balanceOf(self.wallet).call(),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("USDC balanceOf timed out"))?
+        .map_err(|e| anyhow::anyhow!("USDC balanceOf failed: {}", e))?;
         let raw_u128: u128 = raw
             .try_into()
             .map_err(|_| anyhow::anyhow!("USDC balance too large for u128"))?;
