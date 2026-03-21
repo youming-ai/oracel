@@ -230,25 +230,31 @@ pub(crate) fn infer_resolution_state(market: &GammaMarket) -> Option<ResolutionS
         return Some(ResolutionState::Pending);
     }
 
+    // Market is resolved and closed — try to determine winner.
+    // If winner can't be parsed, return Pending rather than None so the
+    // settler doesn't log "resolution unclear" on every check cycle.
+    let winner = parse_winner(market);
+    Some(winner.map_or(ResolutionState::Pending, ResolutionState::Resolved))
+}
+
+fn parse_winner(market: &GammaMarket) -> Option<Direction> {
     let outcomes = parse_json_string_array(&market.outcomes)?;
     let prices = parse_json_string_array(&market.outcome_prices)?;
     if outcomes.len() != prices.len() {
         return None;
     }
-
     for (outcome, price) in outcomes.iter().zip(prices.iter()) {
         let parsed = price.parse::<f64>().ok()?;
         let normalized = outcome.to_ascii_lowercase();
         if parsed >= 0.999 {
             if normalized == "yes" || normalized == "up" {
-                return Some(ResolutionState::Resolved(Direction::Up));
+                return Some(Direction::Up);
             }
             if normalized == "no" || normalized == "down" {
-                return Some(ResolutionState::Resolved(Direction::Down));
+                return Some(Direction::Down);
             }
         }
     }
-
     None
 }
 
@@ -368,5 +374,22 @@ mod tests {
             infer_resolution_state(&market),
             Some(ResolutionState::Pending)
         );
+    }
+
+    #[test]
+    fn test_infer_returns_pending_when_resolved_closed_but_prices_unparseable() {
+        let market = GammaMarket {
+            slug: "btc-updown-5m-1".into(),
+            end_date: String::new(),
+            clob_token_ids: None,
+            condition_id: None,
+            closed: Some(true),
+            uma_resolution_status: Some("resolved".into()),
+            outcomes: Some("[\"Yes\",\"No\"]".into()),
+            outcome_prices: Some("not-valid-json".into()), // unparseable
+        };
+
+        // Should be Pending (wait for data), not None (log error)
+        assert_eq!(infer_resolution_state(&market), Some(ResolutionState::Pending));
     }
 }
