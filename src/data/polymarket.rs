@@ -10,7 +10,7 @@ use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::{LocalSigner, Normal, Signer as _};
 use polymarket_client_sdk::clob;
 use polymarket_client_sdk::clob::types::{
-    request::{OrderBookSummaryRequest, PriceRequest},
+    request::PriceRequest,
     OrderType, Side,
 };
 use polymarket_client_sdk::ctf;
@@ -78,25 +78,6 @@ impl PolymarketClient {
         Ok(price)
     }
 
-    /// Fetch the best ask price and total available size from the order book.
-    /// Returns (best_ask_price, total_size_at_best_ask) or None if no asks.
-    pub(crate) async fn fetch_best_ask(
-        &self,
-        token_id: &str,
-    ) -> Result<Option<(rust_decimal::Decimal, rust_decimal::Decimal)>> {
-        let tid = U256::from_str(token_id).context("Invalid token_id")?;
-        let req = OrderBookSummaryRequest::builder()
-            .token_id(tid)
-            .side(Side::Sell)
-            .build();
-        let book = tokio::time::timeout(Duration::from_secs(10), self.unauth.order_book(&req))
-            .await
-            .map_err(|_| anyhow::anyhow!("CLOB order_book request timed out after 10s"))?
-            .context("CLOB order_book request failed")?;
-
-        // asks are sorted ascending by price; first entry is best ask
-        Ok(book.asks.first().map(|a| (a.price, a.size)))
-    }
 }
 
 /// Authenticated client for order placement.
