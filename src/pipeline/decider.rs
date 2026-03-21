@@ -126,7 +126,7 @@ impl AccountState {
 
         if now - self.last_trade_time_ms < cfg.cooldown_ms {
             let remaining = cfg.cooldown_ms - (now - self.last_trade_time_ms);
-            tracing::warn!(
+            tracing::debug!(
                 "[RISK] Cooldown active: {}ms remaining, blocking trade",
                 remaining
             );
@@ -508,6 +508,27 @@ mod tests {
         match decision {
             Decision::Pass(reason) => assert_eq!(reason, "already_traded"),
             Decision::Trade { .. } => panic!("expected pass but got trade"),
+        }
+    }
+
+    #[test]
+    fn test_cooldown_reason_string() {
+        let mut account = AccountState::new(d("1000"));
+        account.last_trade_time_ms = chrono::Utc::now().timestamp_millis(); // just traded
+
+        let decision = decide(
+            Some(d("0.85")),
+            Some(d("0.15")),
+            1_700_000_000_000,
+            240_000,
+            &account,
+            &DeciderConfig::default(),
+            &[(100400.0, 0), (100000.0, 120_000)],
+        );
+
+        match decision {
+            Decision::Pass(r) => assert_eq!(r, "cooldown"),
+            Decision::Trade { .. } => panic!("expected cooldown pass"),
         }
     }
 
