@@ -177,7 +177,20 @@ impl Bot {
                 .await
                 .unwrap_or_else(|| decimal("1000"))
         } else {
-            Self::load_balance(&log_dir).await.unwrap_or(Decimal::ZERO)
+            let rpc = data::chainlink::rpc_url(config.trading.mode);
+            if let Some(ref r) = redeemer {
+                match r.wallet_address() {
+                    Ok(wallet) => data::polymarket::query_usdc_balance(&rpc, wallet)
+                        .await
+                        .unwrap_or(Decimal::ZERO),
+                    Err(e) => {
+                        tracing::warn!("[INIT] Could not derive wallet for balance query: {}", e);
+                        Decimal::ZERO
+                    }
+                }
+            } else {
+                Decimal::ZERO
+            }
         };
         tracing::info!("[INIT] Starting balance: ${:.2}", initial_balance);
         Self::write_balance(&log_dir, initial_balance).await;
@@ -600,6 +613,7 @@ impl Bot {
                         let elapsed =
                             chrono::Utc::now().timestamp_millis() - st.last_fok_rejection_ms;
                         if elapsed < 3_000 {
+                            tracing::debug!("[FOK] backoff {}ms remaining", 3_000 - elapsed);
                             return Ok(());
                         }
                     }
@@ -610,33 +624,29 @@ impl Bot {
                     Direction::Down => poly_no_dec.unwrap_or_else(|| decimal("0.5")),
                 };
 
-                // Fetch best ask from orderbook for live mode to avoid FOK rejections
-                let best_ask = if self.config.trading.mode.is_live() {
-                    let token_id = match direction {
-                        Direction::Up => &mkt.token_yes,
-                        Direction::Down => &mkt.token_no,
-                    };
-                    match self.polymarket.fetch_best_ask(token_id).await {
-                        Ok(Some((ask_price, ask_size))) => {
-                            tracing::info!(
-                                "[BOOK] best ask={:.3} size={:.0} for {}",
-                                ask_price,
-                                ask_size,
-                                direction.as_str()
-                            );
-                            Some(ask_price)
-                        }
-                        Ok(None) => {
-                            tracing::warn!("[BOOK] No asks in orderbook, skipping trade");
-                            return Ok(());
-                        }
-                        Err(e) => {
-                            tracing::warn!("[BOOK] Failed to fetch orderbook: {}, using mid price", e);
-                            None
-                        }
+                // Fetch best ask from orderbook to get real fill price
+                let token_id = match direction {
+                    Direction::Up => &mkt.token_yes,
+                    Direction::Down => &mkt.token_no,
+                };
+                let best_ask = match self.polymarket.fetch_best_ask(token_id).await {
+                    Ok(Some((ask_price, ask_size))) => {
+                        tracing::info!(
+                            "[BOOK] best ask={:.3} size={:.0} for {}",
+                            ask_price,
+                            ask_size,
+                            direction.as_str()
+                        );
+                        Some(ask_price)
                     }
-                } else {
-                    None
+                    Ok(None) => {
+                        tracing::warn!("[BOOK] No asks in orderbook, skipping trade");
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        tracing::warn!("[BOOK] Failed to fetch orderbook: {}, using mid price", e);
+                        None
+                    }
                 };
 
                 tracing::info!(
@@ -659,6 +669,7 @@ impl Bot {
                         best_ask,
                         settlement_time_ms: settlement_ms,
                         btc_price,
+                        fair_value: self.config.strategy.fair_value,
                     })
                     .await;
 
@@ -687,6 +698,9 @@ impl Bot {
                 if let Some(order) = order {
                     {
                         let mut acc = self.account.write().await;
+                        // record_trade: deducts cost (paper) and stamps last_trade_time_ms (both modes).
+                        // In live mode the balance is overwritten by chain sync on the next tick;
+                        // the deduction here only matters intra-tick for cooldown ordering.
                         acc.record_trade(order.cost);
                         acc.record_trade_for_market(settlement_ms);
                     }

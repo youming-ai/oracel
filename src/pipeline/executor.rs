@@ -36,6 +36,7 @@ pub(crate) struct ExecuteContext<'a> {
     pub best_ask: Option<Decimal>,
     pub settlement_time_ms: i64,
     pub btc_price: f64,
+    pub fair_value: Decimal,
 }
 
 impl Executor {
@@ -56,8 +57,8 @@ impl Executor {
                     Direction::Up => (ctx.token_yes, ctx.poly_yes?),
                     Direction::Down => (ctx.token_no, ctx.poly_no?),
                 };
-                // Use best ask from orderbook when available (live mode),
-                // fall back to mid price (paper mode or if orderbook fetch failed)
+                // Use best ask from orderbook when available,
+                // fall back to mid price if orderbook fetch failed
                 let price = ctx.best_ask.unwrap_or(mid_price);
                 if ctx.best_ask.is_some() && price != mid_price {
                     tracing::info!(
@@ -75,7 +76,7 @@ impl Executor {
                 // Real-edge check: the decider computed edge using mid price,
                 // but the actual fill price may be worse.  Recompute edge at
                 // fill price and reject if it drops below half the original.
-                let real_edge = Decimal::new(50, 2) - price; // fair_value - fill_price
+                let real_edge = ctx.fair_value - price; // fair_value - fill_price
                 if real_edge < *edge / Decimal::TWO {
                     tracing::warn!(
                         "[EXEC] Fill price {:.3} erases edge: real={:.0}% vs signal={:.0}%, skipping",
@@ -207,13 +208,14 @@ mod tests {
                 best_ask: None,
                 settlement_time_ms: 123,
                 btc_price: 70000.0,
+                fair_value: d("0.50"),
             })
             .await
             .expect("expected paper order");
 
-        // Paper mode adds 1¢ spread: mid 0.201 → simulated 0.211
-        assert_eq!(result.filled_shares, d("23"));
-        assert_eq!(result.cost, d("4.853"));
+        // With no spread: floor(5.00 / 0.201) = 24 shares, cost = 24 × 0.201 = 4.824
+        assert_eq!(result.filled_shares, d("24"));
+        assert_eq!(result.cost, d("4.824"));
         assert!(result.cost <= d("5.00"));
     }
 
@@ -237,6 +239,7 @@ mod tests {
                 best_ask: None,
                 settlement_time_ms: 123,
                 btc_price: 70000.0,
+                fair_value: d("0.50"),
             })
             .await;
 

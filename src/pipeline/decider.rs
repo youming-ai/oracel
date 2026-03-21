@@ -177,13 +177,18 @@ fn btc_momentum(prices: &[(f64, i64)], lookback_ms: i64) -> Option<f64> {
     let (now_price, now_ts) = prices[prices.len() - 1];
     let cutoff = now_ts - lookback_ms;
 
-    let past = prices
+    let (past_price, past_ts) = prices
         .iter()
         .rev()
         .find(|(_, ts)| *ts <= cutoff)
-        .map(|(p, _)| *p);
+        .copied()?;
 
-    let past_price = past?;
+    // Reject stale past price: if it's more than 2x the lookback window behind
+    // the cutoff, there was a data gap (e.g. WS reconnect) and momentum is unreliable.
+    if cutoff - past_ts > lookback_ms {
+        return None;
+    }
+
     if past_price <= 0.0 {
         return None;
     }
