@@ -601,51 +601,10 @@ impl Bot {
                     Direction::Down => poly_no_dec.unwrap_or_else(|| decimal("0.5")),
                 };
 
-                let token_id = match direction {
-                    Direction::Up => &mkt.token_yes,
-                    Direction::Down => &mkt.token_no,
-                };
-                let best_ask = match self.polymarket.fetch_best_ask(token_id).await {
-                    Ok(Some((ask_price, ask_size))) => {
-                        if ask_price <= Decimal::new(1, 2) || ask_price >= Decimal::new(99, 2) {
-                            if self.config.trading.mode.is_live() {
-                                self.state.write().await.log_idle_change(
-                                    "extreme_ask",
-                                    &format!("{:.3} for {}", ask_price, direction.as_str()),
-                                );
-                                return Ok(());
-                            }
-                            // paper mode: extreme ask means no real liquidity,
-                            // fall back to mid price for simulated fill
-                            self.state.write().await.log_idle_change(
-                                "extreme_ask_paper_fallback",
-                                &format!("{:.3} for {}, using mid", ask_price, direction.as_str()),
-                            );
-                            None
-                        } else {
-                            tracing::info!(
-                                "[BOOK] best ask={:.3} size={:.0} for {}",
-                                ask_price,
-                                ask_size,
-                                direction.as_str()
-                            );
-                            Some(ask_price)
-                        }
-                    }
-                    Ok(None) => {
-                        tracing::warn!("[BOOK] No asks in orderbook, skipping trade");
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        tracing::warn!("[BOOK] Failed to fetch orderbook: {}, using mid price", e);
-                        None
-                    }
-                };
-
                 tracing::info!(
                     "[TRADE] {} @ {:.3} edge={:.0}% payoff={:.1}x BTC=${:.0}",
                     direction.as_str(),
-                    best_ask.unwrap_or(cheap_price),
+                    cheap_price,
                     (*edge * decimal("100")).round_dp(0),
                     payoff_ratio,
                     btc_price,
@@ -659,10 +618,8 @@ impl Bot {
                         token_no: &mkt.token_no,
                         poly_yes: poly_yes_dec,
                         poly_no: poly_no_dec,
-                        best_ask,
                         settlement_time_ms: settlement_ms,
                         btc_price,
-                        fair_value: self.config.strategy.fair_value,
                     })
                     .await;
 

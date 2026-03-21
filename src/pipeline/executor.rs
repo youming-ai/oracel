@@ -31,12 +31,8 @@ pub(crate) struct ExecuteContext<'a> {
     pub token_no: &'a str,
     pub poly_yes: Option<Decimal>,
     pub poly_no: Option<Decimal>,
-    /// Best ask price from the order book. `None` if the orderbook fetch failed.
-    /// When set, this is used as fill price instead of mid price.
-    pub best_ask: Option<Decimal>,
     pub settlement_time_ms: i64,
     pub btc_price: f64,
-    pub fair_value: Decimal,
 }
 
 impl Executor {
@@ -50,40 +46,15 @@ impl Executor {
             Decision::Trade {
                 direction,
                 size_usdc,
-                edge,
                 ..
             } => {
-                let (token_id, mid_price) = match direction {
+                let (token_id, price) = match direction {
                     Direction::Up => (ctx.token_yes, ctx.poly_yes?),
                     Direction::Down => (ctx.token_no, ctx.poly_no?),
                 };
-                // Use best ask from orderbook when available,
-                // fall back to mid price if orderbook fetch failed
-                let price = ctx.best_ask.unwrap_or(mid_price);
-                if ctx.best_ask.is_some() && price != mid_price {
-                    tracing::info!(
-                        "[EXEC] Using best ask {:.3} (mid was {:.3})",
-                        price,
-                        mid_price
-                    );
-                }
 
                 if price <= Decimal::new(1, 2) || price >= Decimal::new(99, 2) {
                     tracing::warn!("[EXEC] Extreme price {:.3}, skipping", price);
-                    return None;
-                }
-
-                // Real-edge check: the decider computed edge using mid price,
-                // but the actual fill price may be worse.  Recompute edge at
-                // fill price and reject if it drops below half the original.
-                let real_edge = ctx.fair_value - price; // fair_value - fill_price
-                if real_edge < *edge / Decimal::TWO {
-                    tracing::warn!(
-                        "[EXEC] Fill price {:.3} erases edge: real={:.0}% vs signal={:.0}%, skipping",
-                        price,
-                        real_edge * Decimal::ONE_HUNDRED,
-                        *edge * Decimal::ONE_HUNDRED,
-                    );
                     return None;
                 }
 
@@ -205,10 +176,8 @@ mod tests {
                 token_no: "no",
                 poly_yes: Some(d("0.201")),
                 poly_no: Some(d("0.799")),
-                best_ask: None,
                 settlement_time_ms: 123,
                 btc_price: 70000.0,
-                fair_value: d("0.50"),
             })
             .await
             .expect("expected paper order");
@@ -236,46 +205,12 @@ mod tests {
                 token_no: "no",
                 poly_yes: None,
                 poly_no: Some(d("0.80")),
-                best_ask: None,
                 settlement_time_ms: 123,
                 btc_price: 70000.0,
-                fair_value: d("0.50"),
             })
             .await;
 
         assert!(result.is_none());
     }
 
-    #[tokio::test]
-    async fn test_returns_none_when_fill_price_erases_edge() {
-        // edge = 0.20, so edge/2 = 0.10
-        // real_edge = fair_value(0.50) - fill_price
-        // If fill_price = 0.42 → real_edge = 0.08 < 0.10 → should reject
-        let executor = Executor::new(TradingMode::Paper, None);
-        let decision = Decision::Trade {
-            direction: Direction::Up,
-            size_usdc: d("5.00"),
-            edge: d("0.20"),
-            payoff_ratio: d("1.19"),
-        };
-
-        let result = executor
-            .execute(&ExecuteContext {
-                decision: &decision,
-                token_yes: "yes",
-                token_no: "no",
-                poly_yes: Some(d("0.42")),
-                poly_no: Some(d("0.58")),
-                best_ask: Some(d("0.42")),
-                settlement_time_ms: 123,
-                btc_price: 70000.0,
-                fair_value: d("0.50"),
-            })
-            .await;
-
-        assert!(
-            result.is_none(),
-            "expected rejection when fill price erases edge"
-        );
-    }
 }
