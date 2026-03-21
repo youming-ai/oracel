@@ -69,6 +69,8 @@ struct BotState {
     fok_rejections: u32,
     /// Settlement timestamp of the market window being tracked for FOK retries
     fok_market_ms: i64,
+    /// Timestamp (ms) of last FOK rejection — used to enforce backoff between retries
+    last_fok_rejection_ms: i64,
 }
 
 impl BotState {
@@ -79,6 +81,7 @@ impl BotState {
             last_idle_reason: String::new(),
             fok_rejections: 0,
             fok_market_ms: 0,
+            last_fok_rejection_ms: 0,
         }
     }
 
@@ -552,10 +555,12 @@ impl Bot {
 
         let timed_prices: Vec<(f64, i64)> =
             prices.iter().map(|p| (p.price, p.timestamp_ms)).collect();
+        let remaining_ms = settlement_ms - Utc::now().timestamp_millis();
         let decision = decider::decide(
             poly_yes_dec,
             poly_no_dec,
             settlement_ms,
+            remaining_ms,
             &account_read,
             &decider_cfg,
             &timed_prices,
@@ -587,6 +592,18 @@ impl Bot {
                 size_usdc: _,
                 edge,
             } => {
+                // FOK backoff: wait at least 3s after a rejection before retrying
+                {
+                    let st = self.state.read().await;
+                    if st.last_fok_rejection_ms > 0 {
+                        let elapsed =
+                            chrono::Utc::now().timestamp_millis() - st.last_fok_rejection_ms;
+                        if elapsed < 3_000 {
+                            return Ok(());
+                        }
+                    }
+                }
+
                 let cheap_price = match direction {
                     Direction::Up => poly_yes_dec.unwrap_or_else(|| decimal("0.5")),
                     Direction::Down => poly_no_dec.unwrap_or_else(|| decimal("0.5")),
@@ -645,6 +662,7 @@ impl Bot {
 
                 if order.is_none() && self.config.trading.mode.is_live() {
                     let mut st = self.state.write().await;
+                    st.last_fok_rejection_ms = chrono::Utc::now().timestamp_millis();
                     // Reset counter when market window changes
                     if st.fok_market_ms != settlement_ms {
                         st.fok_rejections = 0;
@@ -689,10 +707,17 @@ impl Bot {
                     let bal = self.account.read().await.balance;
                     Self::write_balance(&self.log_dir, bal).await;
 
-                    // Log to file
+                    // Log to file — extended format with decision context
                     let order_id_short: String = order.order_id.chars().take(8).collect();
+                    let ttl_secs = remaining_ms / 1000;
+                    let yes_f = poly_yes_dec
+                        .map(|v| format!("{:.3}", v))
+                        .unwrap_or_default();
+                    let no_f = poly_no_dec
+                        .map(|v| format!("{:.3}", v))
+                        .unwrap_or_default();
                     let log_line = format!(
-                        "{},{},{},{:.3},{:.2},{:.1},{:.2}\n",
+                        "{},{},{},{:.3},{:.2},{:.1},{:.2},{}s,{},{}\n",
                         Utc::now().format("%H:%M:%S"),
                         order.direction.as_str(),
                         order_id_short,
@@ -700,6 +725,9 @@ impl Bot {
                         order.cost,
                         (*edge * decimal("100")).round_dp(1),
                         bal,
+                        ttl_secs,
+                        yes_f,
+                        no_f,
                     );
                     let trades_path = Path::new(&self.log_dir).join("trades.csv");
                     match tokio::task::spawn_blocking(move || -> std::io::Result<()> {

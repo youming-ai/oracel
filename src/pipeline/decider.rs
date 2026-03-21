@@ -192,6 +192,7 @@ pub(crate) fn decide(
     market_yes: Option<Decimal>,
     market_no: Option<Decimal>,
     settlement_ms: i64,
+    remaining_ms: i64,
     account: &AccountState,
     cfg: &DeciderConfig,
     btc_prices: &[(f64, i64)],
@@ -216,14 +217,36 @@ pub(crate) fn decide(
         return Decision::Pass("no_liquidity".into());
     }
 
+    // Spread check: if yes + no < 0.80, liquidity is too thin and mid prices
+    // are unreliable.  Skip to avoid adverse fills.
+    if total < decimal("0.80") {
+        return Decision::Pass(format!(
+            "wide_spread_{:.0}%",
+            ((Decimal::ONE - total) * decimal("100")).round_dp(0)
+        ));
+    }
+
     let mkt_up = yes / total;
 
-    // 4. Market extreme check + edge calculation
-    let (edge, direction) = if mkt_up > cfg.extreme_threshold {
+    // 4. Market extreme check — time-weighted threshold.
+    //    Early in window (>3min left): use configured threshold (e.g. 0.80).
+    //    Late in window (<2min left):  require stronger extreme (0.90) because
+    //    the market is more likely correct as outcome becomes clearer.
+    let extreme_thr = if remaining_ms > 180_000 {
+        cfg.extreme_threshold
+    } else if remaining_ms > 120_000 {
+        // Linear ramp from threshold → 0.90 between 3min and 2min
+        let frac = Decimal::from(180_000 - remaining_ms) / Decimal::from(60_000_i64);
+        cfg.extreme_threshold + (decimal("0.90") - cfg.extreme_threshold) * frac
+    } else {
+        decimal("0.90")
+    };
+
+    let (edge, direction) = if mkt_up > extreme_thr {
         let cheap_price = no / total;
         let edge = cfg.fair_value - cheap_price;
         (edge, Direction::Down)
-    } else if mkt_up < (Decimal::ONE - cfg.extreme_threshold) {
+    } else if mkt_up < (Decimal::ONE - extreme_thr) {
         let cheap_price = yes / total;
         let edge = cfg.fair_value - cheap_price;
         (edge, Direction::Up)
@@ -260,8 +283,14 @@ pub(crate) fn decide(
         }
     }
 
-    // Position sizing: fixed % of balance, clamped to [min_position, max_position]
-    let size = (account.balance * cfg.position_size_pct / decimal("100"))
+    // Position sizing: base = balance × pct%, then scale up linearly with edge.
+    // A 30% edge trade gets 2× the size of a 15% edge trade (at threshold).
+    let edge_multiplier = if cfg.edge_threshold > Decimal::ZERO {
+        edge / cfg.edge_threshold
+    } else {
+        Decimal::ONE
+    };
+    let size = (account.balance * cfg.position_size_pct / decimal("100") * edge_multiplier)
         .max(cfg.min_position)
         .min(cfg.max_position);
 
@@ -297,6 +326,7 @@ mod tests {
             Some(d("0.65")),
             Some(d("0.35")),
             1_700_000_000_000,
+            240_000,
             &account,
             &cfg_for_threshold_test(),
             &[(100400.0, 0), (100000.0, 120_000)],
@@ -341,6 +371,7 @@ mod tests {
             Some(d("0.85")),
             Some(d("0.15")),
             1_700_000_000_000,
+            240_000,
             &account,
             &cfg,
             &btc_down_momentum(),
@@ -358,33 +389,38 @@ mod tests {
     }
 
     #[test]
-    fn test_position_size_is_one_percent_of_balance() {
+    fn test_position_size_scales_with_edge() {
         let mut account = AccountState::new(d("500"));
         account.last_trade_time_ms = chrono::Utc::now().timestamp_millis() - 60_000;
         let cfg = DeciderConfig::default();
+        // edge=0.35, threshold=0.15 → multiplier ≈ 2.33
+        // base = 500 * 1% = 5, scaled = 5 * 2.33 = 11.67, clamped to max 10
         let decision = decide(
             Some(d("0.85")),
             Some(d("0.15")),
             1_700_000_000_000,
+            240_000,
             &account,
             &cfg,
             &btc_down_momentum(),
         );
         match decision {
-            Decision::Trade { size_usdc, .. } => assert_eq!(size_usdc, d("5")),
+            Decision::Trade { size_usdc, .. } => assert_eq!(size_usdc, d("10.0")),
             Decision::Pass(reason) => panic!("expected trade but got pass: {}", reason),
         }
     }
 
     #[test]
     fn test_position_size_floor_at_one_usdc() {
-        let mut account = AccountState::new(d("50"));
+        let mut account = AccountState::new(d("30"));
         account.last_trade_time_ms = chrono::Utc::now().timestamp_millis() - 60_000;
         let cfg = DeciderConfig::default();
+        // base = 30 * 1% = 0.30, × 2.33 = 0.70, clamped to min 1
         let decision = decide(
             Some(d("0.85")),
             Some(d("0.15")),
             1_700_000_000_000,
+            240_000,
             &account,
             &cfg,
             &btc_down_momentum(),
@@ -404,6 +440,7 @@ mod tests {
             Some(d("0.55")),
             Some(d("0.45")),
             1_700_000_000_000,
+            240_000,
             &account,
             &cfg,
             &[],
@@ -426,6 +463,7 @@ mod tests {
             Some(d("0.85")),
             Some(d("0.15")),
             settlement_ms,
+            240_000,
             &account,
             &cfg,
             &[],
@@ -447,6 +485,7 @@ mod tests {
             Some(d("0.85")),
             Some(d("0.15")),
             1_700_000_000_000,
+            240_000,
             &account,
             &cfg,
             &btc_down_momentum(),
@@ -469,6 +508,7 @@ mod tests {
             Some(d("0.85")),
             Some(d("0.15")),
             1_700_000_000_000,
+            240_000,
             &account,
             &cfg,
             &btc_down_momentum(),
@@ -491,6 +531,7 @@ mod tests {
             Some(d("0.85")),
             Some(d("0.15")),
             1_700_000_000_000,
+            240_000,
             &account,
             &cfg,
             &btc_down_momentum(),
@@ -513,6 +554,7 @@ mod tests {
             None,
             Some(d("0.15")),
             1_700_000_000_000,
+            240_000,
             &account,
             &cfg,
             &[],
@@ -533,6 +575,7 @@ mod tests {
             Some(d("0.85")),
             Some(d("0.15")),
             1_700_000_000_000,
+            240_000,
             &account,
             &cfg,
             &[],
