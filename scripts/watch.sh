@@ -27,8 +27,11 @@ while true; do
         /\[IDLE\]|\[SKIP\]/ { signal = $0 }
         /\[TRADE\]/   { trade = $0 }
         /\[SETTLED\]|\[TRADE\]|\[RISK\]/ {
-            act[++ai] = $0
-            if (ai > 5) { for (i=1;i<5;i++) act[i]=act[i+1]; ai=5 }
+            if ($0 != last_act) {
+                act[++ai] = $0
+                last_act = $0
+                if (ai > 5) { for (i=1;i<5;i++) act[i]=act[i+1]; ai=5 }
+            }
         }
         END {
             gsub(/'\''/, "'\''\\'\'''\''", status)
