@@ -450,9 +450,10 @@ impl Bot {
                     "?".into()
                 };
 
+                let pnl = acc.pnl();
                 tracing::info!(
-                    "[STATUS] {} | BTC=${:.0} | bal=${:.2} | {}W/{}L streak={} | pending={} | ttl={}",
-                    mode, btc, acc.balance,
+                    "[STATUS] {} | BTC=${:.0} | bal=${:.2} pnl={:+.2} | {}W/{}L streak={} | pending={} | ttl={}",
+                    mode, btc, acc.balance, pnl,
                     acc.total_wins, acc.total_losses,
                     if acc.consecutive_wins > 0 { format!("+{}", acc.consecutive_wins) }
                     else if acc.consecutive_losses > 0 { format!("-{}", acc.consecutive_losses) }

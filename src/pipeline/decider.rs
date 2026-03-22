@@ -51,6 +51,7 @@ fn decimal(value: &str) -> Decimal {
 #[derive(Debug, Clone)]
 pub(crate) struct AccountState {
     pub balance: Decimal,
+    pub initial_balance: Decimal,
     pub consecutive_losses: u32,
     pub consecutive_wins: u32,
     pub total_wins: u32,
@@ -61,11 +62,16 @@ impl AccountState {
     pub(crate) fn new(balance: Decimal) -> Self {
         Self {
             balance,
+            initial_balance: balance,
             consecutive_losses: 0,
             consecutive_wins: 0,
             total_wins: 0,
             total_losses: 0,
         }
+    }
+
+    pub(crate) fn pnl(&self) -> Decimal {
+        self.balance - self.initial_balance
     }
 
     pub(crate) fn record_trade(&mut self, cost: Decimal) {
