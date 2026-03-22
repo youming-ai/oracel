@@ -9,10 +9,7 @@ use futures_util::stream::{self, StreamExt};
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::{LocalSigner, Normal, Signer as _};
 use polymarket_client_sdk::clob;
-use polymarket_client_sdk::clob::types::{
-    request::PriceRequest,
-    OrderType, Side,
-};
+use polymarket_client_sdk::clob::types::{request::PriceRequest, OrderType, Side};
 use polymarket_client_sdk::ctf;
 use polymarket_client_sdk::ctf::types::RedeemPositionsRequest;
 use polymarket_client_sdk::types::{address, Decimal, U256};
@@ -77,7 +74,6 @@ impl PolymarketClient {
             .context("Failed to convert Decimal price to f64")?;
         Ok(price)
     }
-
 }
 
 /// Authenticated client for order placement.
@@ -330,8 +326,6 @@ impl CtfRedeemer {
 /// Connects once during construction and reuses the provider for all balance queries.
 pub(crate) struct BalanceChecker {
     wallet: Address,
-    #[allow(dead_code)]
-    rpc_url: String,
     provider: alloy::providers::RootProvider<alloy::network::Ethereum>,
 }
 
@@ -346,11 +340,7 @@ impl BalanceChecker {
         .map_err(|_| anyhow::anyhow!("RPC connect timed out"))?
         .context("RPC connect failed")?;
 
-        Ok(Self {
-            wallet,
-            rpc_url,
-            provider,
-        })
+        Ok(Self { wallet, provider })
     }
 
     pub(crate) async fn balance(&self) -> anyhow::Result<rust_decimal::Decimal> {
@@ -369,31 +359,4 @@ impl BalanceChecker {
             .map_err(|_| anyhow::anyhow!("USDC balance too large for u128"))?;
         Ok(Decimal::from(raw_u128) / Decimal::from(1_000_000u64))
     }
-}
-
-pub(crate) async fn query_usdc_balance(
-    rpc_url: &str,
-    wallet: alloy::primitives::Address,
-) -> anyhow::Result<rust_decimal::Decimal> {
-    use rust_decimal::Decimal;
-
-    let provider = tokio::time::timeout(
-        Duration::from_secs(15),
-        alloy::providers::ProviderBuilder::new().connect(rpc_url),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("RPC connect timed out querying USDC balance"))?
-    .context("RPC connect failed")?;
-
-    let usdc = IERC20::new(POLYGON_USDC, &provider);
-    let raw = usdc
-        .balanceOf(wallet)
-        .call()
-        .await
-        .map_err(|e| anyhow::anyhow!("USDC balanceOf failed: {}", e))?;
-
-    let raw_u128: u128 = raw
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("USDC balance too large for u128"))?;
-    Ok(Decimal::from(raw_u128) / Decimal::from(1_000_000u64))
 }

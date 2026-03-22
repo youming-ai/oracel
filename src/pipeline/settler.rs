@@ -14,7 +14,7 @@ pub(crate) struct PendingPosition {
     pub filled_shares: Decimal,
     pub cost: Decimal,
     pub settlement_time_ms: i64,
-    pub entry_btc_price: f64,
+    pub entry_btc_price: Decimal,
     pub condition_id: String,
     pub market_slug: String,
 }
@@ -26,7 +26,7 @@ pub(crate) struct SettlementResult {
     pub pnl: Decimal,
     pub won: bool,
     pub condition_id: String,
-    pub entry_btc_price: f64,
+    pub entry_btc_price: Decimal,
 }
 
 pub(crate) struct Settler {
@@ -176,10 +176,7 @@ impl Settler {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn d(value: &str) -> rust_decimal::Decimal {
-        rust_decimal::Decimal::from_str_exact(value).expect("valid decimal")
-    }
+    use crate::pipeline::test_helpers::d;
 
     fn sample_pending() -> PendingPosition {
         PendingPosition {
@@ -189,7 +186,7 @@ mod tests {
             filled_shares: d("25.00"),
             cost: d("5.0"),
             settlement_time_ms: 0,
-            entry_btc_price: 70000.0,
+            entry_btc_price: d("70000"),
             condition_id: "cid".into(),
             market_slug: "btc-updown-5m-1".into(),
         }
@@ -300,7 +297,7 @@ mod tests {
             filled_shares: d("25.0"),
             cost: d("5.0"),
             settlement_time_ms: 0,
-            entry_btc_price: 70000.0,
+            entry_btc_price: d("70000"),
             condition_id: "cid1".into(),
             market_slug: "slug".into(),
         };
@@ -311,7 +308,7 @@ mod tests {
             filled_shares: d("30.0"),
             cost: d("3.0"),
             settlement_time_ms: 0,
-            entry_btc_price: 70000.0,
+            entry_btc_price: d("70000"),
             condition_id: "cid2".into(),
             market_slug: "slug".into(),
         };

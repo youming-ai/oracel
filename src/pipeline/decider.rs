@@ -132,13 +132,13 @@ pub(crate) fn decide(
     let mkt_up = yes / total;
 
     // 3. Market extreme check — time-weighted threshold.
-    //    Early in window (>3min left): use configured threshold (e.g. 0.80).
-    //    Late in window (<2min left):  require stronger extreme (0.90) because
+    //    Early in window (>=3min left): use configured threshold (e.g. 0.80).
+    //    Late in window (<2min left):   require stronger extreme (0.90) because
     //    the market is more likely correct as outcome becomes clearer.
     let extreme_thr = if remaining_ms > 180_000 {
         cfg.extreme_threshold
     } else if remaining_ms > 120_000 {
-        // Linear ramp from threshold → 0.90 between 3min and 2min
+        // Linear ramp from threshold → 0.90 between 3min and 2min (exclusive)
         let frac = Decimal::from(180_000 - remaining_ms) / Decimal::from(60_000_i64);
         cfg.extreme_threshold + (decimal("0.90") - cfg.extreme_threshold) * frac
     } else {
@@ -193,10 +193,7 @@ pub(crate) fn decide(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn d(value: &str) -> rust_decimal::Decimal {
-        rust_decimal::Decimal::from_str_exact(value).expect("valid decimal")
-    }
+    use crate::pipeline::test_helpers::d;
 
     fn cfg_for_threshold_test() -> DeciderConfig {
         DeciderConfig {
@@ -234,7 +231,7 @@ mod tests {
             pnl: d("19.99"),
             won: true,
             condition_id: "cid".into(),
-            entry_btc_price: 70000.0,
+            entry_btc_price: d("70000"),
         };
 
         account.record_trade(d("5.0"));

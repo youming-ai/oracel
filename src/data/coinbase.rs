@@ -2,6 +2,8 @@
 
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
+use rust_decimal::Decimal;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -12,7 +14,7 @@ const PRICE_CHANNEL_BUFFER: usize = 1000;
 
 #[derive(Debug, Clone)]
 pub(crate) struct TickerUpdate {
-    pub price: f64,
+    pub price: Decimal,
     pub timestamp_ms: i64,
 }
 
@@ -42,11 +44,11 @@ impl CoinbaseClient {
         loop {
             match self.ws_loop().await {
                 Ok(_) => {
-                    tracing::warn!("WS disconnected, reconnecting...");
+                    tracing::warn!("[WS] disconnected, reconnecting...");
                     backoff_secs = 1;
                 }
                 Err(e) => {
-                    tracing::error!("WS error: {}, reconnecting in {}s...", e, backoff_secs);
+                    tracing::error!("[WS] error: {}, reconnecting in {}s...", e, backoff_secs);
                 }
             }
             tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
@@ -81,7 +83,7 @@ impl CoinbaseClient {
                 }
                 Ok(Message::Close(_)) => break,
                 Err(e) => {
-                    tracing::warn!("WS error: {}", e);
+                    tracing::warn!("[WS] error: {}", e);
                     break;
                 }
                 _ => {}
@@ -95,6 +97,12 @@ impl CoinbaseClient {
             if root.get("channel").and_then(|v| v.as_str()) != Some("ticker") {
                 return;
             }
+            let timestamp_ms = root
+                .get("timestamp")
+                .and_then(|v| v.as_str())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.timestamp_millis())
+                .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
             if let Some(events) = root.get("events").and_then(|v| v.as_array()) {
                 for event in events {
                     if let Some(tickers) = event.get("tickers").and_then(|v| v.as_array()) {
@@ -109,13 +117,13 @@ impl CoinbaseClient {
                             if let Some(price) = ticker
                                 .get("price")
                                 .and_then(|v| v.as_str())
-                                .and_then(|s| s.parse::<f64>().ok())
+                                .and_then(|s| Decimal::from_str(s).ok())
                             {
                                 if self
                                     .price_tx
                                     .send(TickerUpdate {
                                         price,
-                                        timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                                        timestamp_ms,
                                     })
                                     .is_err()
                                 {

@@ -14,10 +14,12 @@ use crate::config::PriceSourceType;
 use crate::data::binance::BinanceClient;
 use crate::data::coinbase::CoinbaseClient;
 
+use rust_decimal::Decimal;
+
 /// Uniform ticker update shared across all price source backends.
 #[derive(Debug, Clone, Copy)]
 struct TickerUpdate {
-    price: f64,
+    price: Decimal,
     timestamp_ms: i64,
 }
 
@@ -41,7 +43,7 @@ impl From<crate::data::coinbase::TickerUpdate> for TickerUpdate {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PriceTick {
-    pub price: f64,
+    pub price: Decimal,
     pub timestamp_ms: i64,
 }
 
@@ -77,7 +79,7 @@ impl PriceSource {
     }
 
     #[inline]
-    pub(crate) async fn latest(&self) -> Option<f64> {
+    pub(crate) async fn latest(&self) -> Option<Decimal> {
         self.buffer.read().await.back().map(|t| t.price)
     }
 

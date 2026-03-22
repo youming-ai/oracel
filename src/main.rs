@@ -9,6 +9,7 @@ mod pipeline;
 use anyhow::Result;
 use chrono::Utc;
 use config::{Config, TradingMode};
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use secrecy::{ExposeSecret, SecretString};
 use std::path::Path;
@@ -163,9 +164,16 @@ impl Bot {
             let rpc = data::chainlink::rpc_url(config.trading.mode);
             if let Some(ref r) = redeemer {
                 match r.wallet_address() {
-                    Ok(wallet) => data::polymarket::query_usdc_balance(&rpc, wallet)
-                        .await
-                        .unwrap_or(Decimal::ZERO),
+                    Ok(wallet) => {
+                        let bc = data::polymarket::BalanceChecker::new(wallet, rpc.clone()).await;
+                        match bc {
+                            Ok(bc) => bc.balance().await.unwrap_or(Decimal::ZERO),
+                            Err(e) => {
+                                tracing::warn!("[INIT] BalanceChecker creation failed: {}", e);
+                                Decimal::ZERO
+                            }
+                        }
+                    }
                     Err(e) => {
                         tracing::warn!("[INIT] Could not derive wallet for balance query: {}", e);
                         Decimal::ZERO
@@ -434,7 +442,7 @@ impl Bot {
             loop {
                 interval.tick().await;
 
-                let btc = price_source.latest().await.unwrap_or(0.0);
+                let btc = price_source.latest().await.unwrap_or(Decimal::ZERO);
                 let acc = account.read().await;
                 let pending = settler.read().await.pending_count();
                 let settle = market_state.read().await.settlement_ms;
@@ -453,7 +461,7 @@ impl Bot {
                 let pnl = acc.pnl();
                 tracing::info!(
                     "[STATUS] {} | BTC=${:.0} | bal=${:.2} pnl={:+.2} | {}W/{}L streak={} | pending={} | ttl={}",
-                    mode, btc, acc.balance, pnl,
+                    mode, btc.to_f64().unwrap_or(0.0), acc.balance, pnl,
                     acc.total_wins, acc.total_losses,
                     if acc.consecutive_wins > 0 { format!("+{}", acc.consecutive_wins) }
                     else if acc.consecutive_losses > 0 { format!("-{}", acc.consecutive_losses) }
@@ -480,7 +488,7 @@ impl Bot {
         let mkt = self.market_state.read().await.clone();
 
         let prices = self.price_source.history().await;
-        let closes: Vec<f64> = prices.iter().map(|p| p.price).collect();
+        let closes: Vec<Decimal> = prices.iter().map(|p| p.price).collect();
         let btc_price = match self.price_source.latest().await {
             Some(p) => p,
             None => return Ok(()),
@@ -571,7 +579,11 @@ impl Bot {
                     st.last_no_trade_reason = reason.clone();
                 }
                 if changed {
-                    tracing::info!("[SKIP] {} | BTC=${:.0}", reason, btc_price);
+                    tracing::info!(
+                        "[SKIP] {} | BTC=${:.0}",
+                        reason,
+                        btc_price.to_f64().unwrap_or(0.0)
+                    );
                 }
             }
             decider::Decision::Trade {
@@ -608,7 +620,7 @@ impl Bot {
                     cheap_price,
                     (*edge * decimal("100")).round_dp(0),
                     payoff_ratio,
-                    btc_price,
+                    btc_price.to_f64().unwrap_or(0.0),
                 );
 
                 let order = self
@@ -812,7 +824,7 @@ impl Bot {
                                 r.direction.as_str(),
                                 r.pnl.round_dp(2),
                                 r.entry_btc_price,
-                                btc_price,
+                                btc_price.to_f64().unwrap_or(0.0),
                             ));
                         }
                         let trades_path = Path::new(&log_dir).join("trades.csv");

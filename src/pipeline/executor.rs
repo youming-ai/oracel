@@ -17,7 +17,7 @@ pub(crate) struct OrderResult {
     pub filled_shares: Decimal,
     pub cost: Decimal,
     pub settlement_time_ms: i64,
-    pub entry_btc_price: f64,
+    pub entry_btc_price: Decimal,
 }
 
 pub(crate) struct Executor {
@@ -32,7 +32,7 @@ pub(crate) struct ExecuteContext<'a> {
     pub poly_yes: Option<Decimal>,
     pub poly_no: Option<Decimal>,
     pub settlement_time_ms: i64,
-    pub btc_price: f64,
+    pub btc_price: Decimal,
 }
 
 impl Executor {
@@ -154,10 +154,7 @@ impl Executor {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn d(value: &str) -> rust_decimal::Decimal {
-        rust_decimal::Decimal::from_str_exact(value).expect("valid decimal")
-    }
+    use crate::pipeline::test_helpers::d;
 
     #[tokio::test]
     async fn test_execute_tracks_filled_shares_and_effective_cost() {
@@ -177,7 +174,7 @@ mod tests {
                 poly_yes: Some(d("0.201")),
                 poly_no: Some(d("0.799")),
                 settlement_time_ms: 123,
-                btc_price: 70000.0,
+                btc_price: d("70000"),
             })
             .await
             .expect("expected paper order");
@@ -206,11 +203,24 @@ mod tests {
                 poly_yes: None,
                 poly_no: Some(d("0.80")),
                 settlement_time_ms: 123,
-                btc_price: 70000.0,
+                btc_price: d("70000"),
             })
             .await;
 
         assert!(result.is_none());
     }
 
+    #[tokio::test]
+    async fn test_compute_filled_shares_returns_none_for_tiny_orders() {
+        // When size_usdc < price, floor(size/price) = 0, should return None
+        let result = Executor::compute_filled_shares(d("0.50"), d("0.60"));
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_compute_filled_shares_returns_some_for_valid_orders() {
+        // When size_usdc >= price, should return Some(shares)
+        let result = Executor::compute_filled_shares(d("5.00"), d("0.20"));
+        assert_eq!(result, Some(d("25"))); // floor(5/0.2) = 25
+    }
 }

@@ -2,6 +2,8 @@
 
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
+use rust_decimal::Decimal;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -12,7 +14,7 @@ const PRICE_CHANNEL_BUFFER: usize = 1000;
 
 #[derive(Debug, Clone)]
 pub(crate) struct TickerUpdate {
-    pub price: f64,
+    pub price: Decimal,
     pub timestamp_ms: i64,
 }
 
@@ -116,7 +118,7 @@ impl BinanceClient {
             if let Some(price) = data
                 .get("c")
                 .and_then(|v| v.as_str())
-                .and_then(|s| s.parse::<f64>().ok())
+                .and_then(|s| Decimal::from_str(s).ok())
             {
                 let timestamp_ms = data
                     .get("E")
