@@ -88,12 +88,12 @@ impl Executor {
                         Err(e) => {
                             let msg = format!("{:#}", e);
                             if msg.contains("not matched")
-                                || msg.contains("FOK")
+                                || msg.contains("FAK")
                                 || msg.contains("no fill")
                                 || msg.contains("fully filled")
                             {
                                 tracing::warn!(
-                                    "[EXEC] FOK rejected (no liquidity at {:.3})",
+                                    "[EXEC] FAK rejected (no liquidity at {:.3})",
                                     price
                                 );
                             } else {
