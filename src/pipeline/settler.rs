@@ -3,6 +3,7 @@
 use chrono::Utc;
 use rust_decimal::Decimal;
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use crate::pipeline::signal::Direction;
 
@@ -15,8 +16,8 @@ pub(crate) struct PendingPosition {
     pub cost: Decimal,
     pub settlement_time_ms: i64,
     pub entry_btc_price: Decimal,
-    pub condition_id: String,
-    pub market_slug: String,
+    pub condition_id: Arc<str>,
+    pub market_slug: Arc<str>,
 }
 
 #[derive(Debug, Clone)]
@@ -95,7 +96,7 @@ impl Settler {
         let matching: Vec<PendingPosition> = self
             .pending
             .iter()
-            .filter(|p| p.market_slug == slug)
+            .filter(|p| p.market_slug == slug.into())
             .cloned()
             .collect();
 
@@ -103,7 +104,7 @@ impl Settler {
             return None;
         }
 
-        self.pending.retain(|p| p.market_slug != slug);
+        self.pending.retain(|p| p.market_slug != slug.into());
 
         let combined = self.combine_positions(matching, slug);
         Some(self.finish_settlement(combined, won))
@@ -167,7 +168,7 @@ impl Settler {
             payout,
             pnl,
             won,
-            condition_id: pos.condition_id,
+            condition_id: pos.condition_id.to_string(),
             entry_btc_price: pos.entry_btc_price,
         }
     }
@@ -254,7 +255,7 @@ mod tests {
         let mut settler = Settler::new();
         let pos1 = sample_pending();
         let mut pos2 = sample_pending();
-        pos2.condition_id = "cid2".to_string();
+        pos2.condition_id = "cid2".into();
 
         settler.restore_positions(vec![pos1, pos2]);
         assert_eq!(settler.pending_count(), 2);
@@ -271,7 +272,7 @@ mod tests {
         let mut settler = Settler::new();
         let pos1 = sample_pending();
         let mut pos2 = sample_pending();
-        pos2.condition_id = "cid2".to_string();
+        pos2.condition_id = "cid2".into();
         pos2.size_usdc = d("7.5");
         pos2.filled_shares = d("30.0");
         pos2.cost = d("7.5");

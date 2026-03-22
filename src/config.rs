@@ -17,7 +17,6 @@ pub(crate) struct Config {
     pub market: MarketConfig,
     pub polyclob: PolymarketConfig,
     pub strategy: StrategyConfig,
-    pub edge: EdgeConfigFile,
     pub risk: RiskConfig,
     pub polling: PollingConfig,
     #[serde(default)]
@@ -117,24 +116,22 @@ fn default_fair_value() -> Decimal {
 fn default_position_size_usdc() -> Decimal {
     dec("1.0")
 }
-// ─── Edge Thresholds ───
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct EdgeConfigFile {
-    #[serde(with = "rust_decimal::serde::float")]
-    pub edge_threshold_early: Decimal,
-}
-
 // ─── Risk ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RiskConfig {
     #[serde(default = "default_max_fok_retries")]
     pub max_fok_retries: u32,
+    #[serde(default = "default_fok_backoff_ms")]
+    pub fok_backoff_ms: u64,
 }
 
 fn default_max_fok_retries() -> u32 {
     3
+}
+
+fn default_fok_backoff_ms() -> u64 {
+    3_000
 }
 
 // ─── Polling ───
@@ -254,17 +251,12 @@ impl Default for StrategyConfig {
     }
 }
 
-impl Default for EdgeConfigFile {
-    fn default() -> Self {
-        Self {
-            edge_threshold_early: dec("0.15"),
-        }
-    }
-}
-
 impl Default for RiskConfig {
     fn default() -> Self {
-        Self { max_fok_retries: 3 }
+        Self {
+            max_fok_retries: 3,
+            fok_backoff_ms: 3_000,
+        }
     }
 }
 
@@ -316,11 +308,23 @@ impl Config {
         if !(zero < self.strategy.fair_value && self.strategy.fair_value < one) {
             anyhow::bail!("strategy.fair_value must be in (0, 1)");
         }
+        // Validate threshold > fair_value (otherwise edge can never be positive)
+        if self.strategy.extreme_threshold <= self.strategy.fair_value {
+            anyhow::bail!(
+                "strategy.extreme_threshold ({}) must be > fair_value ({})",
+                self.strategy.extreme_threshold,
+                self.strategy.fair_value
+            );
+        }
+        // Warn if threshold is very high (may result in few trades)
+        if self.strategy.extreme_threshold > dec("0.95") {
+            tracing::warn!(
+                "extreme_threshold > 0.95 (current: {}) may result in very few trades",
+                self.strategy.extreme_threshold
+            );
+        }
         if self.strategy.position_size_usdc <= zero {
             anyhow::bail!("strategy.position_size_usdc must be > 0");
-        }
-        if !(zero < self.edge.edge_threshold_early && self.edge.edge_threshold_early < one) {
-            anyhow::bail!("edge.edge_threshold_early must be in (0, 1)");
         }
         if self.price_source.source.expects_dash_symbol() {
             if !is_valid_coinbase_symbol(&self.price_source.symbol) {
@@ -350,7 +354,6 @@ impl Config {
             && self.strategy.extreme_threshold == defaults.strategy.extreme_threshold
             && self.strategy.fair_value == defaults.strategy.fair_value
             && self.strategy.position_size_usdc == defaults.strategy.position_size_usdc
-            && self.edge.edge_threshold_early == defaults.edge.edge_threshold_early
             && self.risk.max_fok_retries == defaults.risk.max_fok_retries
             && self.polling.signal_interval_ms == defaults.polling.signal_interval_ms
             && self.polling.status_interval_ms == defaults.polling.status_interval_ms
@@ -434,13 +437,6 @@ mod tests {
     fn test_validate_rejects_zero_position_size_usdc() {
         let mut cfg = Config::default();
         cfg.strategy.position_size_usdc = Decimal::ZERO;
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_rejects_zero_edge_threshold() {
-        let mut cfg = Config::default();
-        cfg.edge.edge_threshold_early = Decimal::ZERO;
         assert!(cfg.validate().is_err());
     }
 }

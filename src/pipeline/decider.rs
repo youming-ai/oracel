@@ -6,7 +6,6 @@
 //! Direction is determined by market price extremes.
 
 use crate::pipeline::signal::Direction;
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 
 #[derive(Debug, Clone)]
@@ -23,8 +22,6 @@ pub(crate) enum Decision {
 
 #[derive(Debug, Clone)]
 pub(crate) struct DeciderConfig {
-    /// Minimum edge to trade (15%)
-    pub edge_threshold: Decimal,
     /// Fixed position size per trade (USDC)
     pub position_size_usdc: Decimal,
     /// Market price threshold to consider "extreme" (e.g. 0.80)
@@ -36,7 +33,6 @@ pub(crate) struct DeciderConfig {
 impl Default for DeciderConfig {
     fn default() -> Self {
         Self {
-            edge_threshold: decimal("0.15"),
             position_size_usdc: decimal("1.0"),
             extreme_threshold: decimal("0.80"),
             fair_value: decimal("0.50"),
@@ -132,17 +128,21 @@ pub(crate) fn decide(
     let mkt_up = yes / total;
 
     // 3. Market extreme check — time-weighted threshold.
-    //    Early in window (>=3min left): use configured threshold (e.g. 0.80).
-    //    Late in window (<2min left):   require stronger extreme (0.90) because
-    //    the market is more likely correct as outcome becomes clearer.
+    //    Early in window (>=3min left): use configured threshold.
+    //    Late in window (<2min left):   require at least as strong, never weaker.
+    let late_floor = decimal("0.90");
+    let late_threshold = if cfg.extreme_threshold > late_floor {
+        cfg.extreme_threshold
+    } else {
+        late_floor
+    };
     let extreme_thr = if remaining_ms > 180_000 {
         cfg.extreme_threshold
     } else if remaining_ms > 120_000 {
-        // Linear ramp from threshold → 0.90 between 3min and 2min (exclusive)
         let frac = Decimal::from(180_000 - remaining_ms) / Decimal::from(60_000_i64);
-        cfg.extreme_threshold + (decimal("0.90") - cfg.extreme_threshold) * frac
+        cfg.extreme_threshold + (late_threshold - cfg.extreme_threshold) * frac
     } else {
-        decimal("0.90")
+        late_threshold
     };
 
     let (edge, direction) = if mkt_up > extreme_thr {
@@ -159,15 +159,6 @@ pub(crate) fn decide(
             (mkt_up * decimal("100")).round_dp(0)
         ));
     };
-
-    // 4. Edge threshold
-    if edge < cfg.edge_threshold {
-        return Decision::Pass(format!(
-            "edge_{:.0}%<{:.0}%",
-            edge.to_f64().unwrap_or(0.0) * 100.0,
-            cfg.edge_threshold.to_f64().unwrap_or(0.0) * 100.0
-        ));
-    }
 
     // Calculate payoff ratio for logging
     let cheap_price = match direction {

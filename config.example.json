@@ -18,9 +18,6 @@
     "fair_value": 0.5,
     "position_size_usdc": 1.0
   },
-  "edge": {
-    "edge_threshold_early": 0.15
-  },
   "risk": {
     "max_fok_retries": 3
   },

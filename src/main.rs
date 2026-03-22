@@ -9,6 +9,7 @@ mod pipeline;
 use anyhow::Result;
 use chrono::Utc;
 use config::{Config, TradingMode};
+use futures_util::future::join_all;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use secrecy::{ExposeSecret, SecretString};
@@ -83,10 +84,10 @@ impl BotState {
 
 #[derive(Debug, Clone, Default)]
 struct MarketState {
-    token_yes: String,
-    token_no: String,
-    condition_id: String,
-    market_slug: String,
+    token_yes: Arc<str>,
+    token_no: Arc<str>,
+    condition_id: Arc<str>,
+    market_slug: Arc<str>,
     settlement_ms: i64,
 }
 
@@ -163,24 +164,17 @@ impl Bot {
         } else {
             let rpc = data::chainlink::rpc_url(config.trading.mode);
             if let Some(ref r) = redeemer {
-                match r.wallet_address() {
-                    Ok(wallet) => {
-                        let bc = data::polymarket::BalanceChecker::new(wallet, rpc.clone()).await;
-                        match bc {
-                            Ok(bc) => bc.balance().await.unwrap_or(Decimal::ZERO),
-                            Err(e) => {
-                                tracing::warn!("[INIT] BalanceChecker creation failed: {}", e);
-                                Decimal::ZERO
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("[INIT] Could not derive wallet for balance query: {}", e);
-                        Decimal::ZERO
-                    }
-                }
+                let wallet = r
+                    .wallet_address()
+                    .map_err(|e| anyhow::anyhow!("[INIT] Wallet derivation failed: {}", e))?;
+                let bc = data::polymarket::BalanceChecker::new(wallet, rpc.clone())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("[INIT] BalanceChecker creation failed: {}", e))?;
+                bc.balance()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("[INIT] Balance query failed: {}", e))?
             } else {
-                Decimal::ZERO
+                anyhow::bail!("[INIT] Live mode requires redeemer for balance query")
             }
         };
         tracing::info!("[INIT] Starting balance: ${:.2}", initial_balance);
@@ -401,13 +395,13 @@ impl Bot {
                 match discovery.discover().await {
                     Ok(active) => {
                         let current_yes = market_state.read().await.token_yes.clone();
-                        if current_yes != active.token_id_yes {
+                        if current_yes != active.token_id_yes.clone().into() {
                             tracing::info!("[MKT] {} ends {}", active.market.slug, active.end_date);
                             *market_state.write().await = MarketState {
-                                token_yes: active.token_id_yes,
-                                token_no: active.token_id_no,
-                                condition_id: active.condition_id,
-                                market_slug: active.market.slug,
+                                token_yes: active.token_id_yes.into(),
+                                token_no: active.token_id_no.into(),
+                                condition_id: active.condition_id.into(),
+                                market_slug: active.market.slug.into(),
                                 settlement_ms: active.end_date.timestamp_millis(),
                             };
                         }
@@ -422,7 +416,6 @@ impl Bot {
 
     fn decider_cfg(&self) -> DeciderConfig {
         DeciderConfig {
-            edge_threshold: self.config.edge.edge_threshold_early,
             position_size_usdc: self.config.strategy.position_size_usdc,
             extreme_threshold: self.config.strategy.extreme_threshold,
             fair_value: self.config.strategy.fair_value,
@@ -447,16 +440,16 @@ impl Bot {
                 let pending = settler.read().await.pending_count();
                 let settle = market_state.read().await.settlement_ms;
 
-                let ttl = if settle > 0 {
-                    let remaining_s = (settle - Utc::now().timestamp_millis()) / 1000;
-                    if remaining_s > 0 {
-                        format!("{}m{}s", remaining_s / 60, remaining_s % 60)
-                    } else {
-                        "expired".into()
-                    }
-                } else {
-                    "?".into()
-                };
+                #[allow(clippy::obfuscated_if_else)]
+                let ttl = (settle > 0)
+                    .then(|| {
+                        let remaining_s = (settle - Utc::now().timestamp_millis()) / 1000;
+                        match remaining_s {
+                            r if r > 0 => format!("{}m{}s", r / 60, r % 60),
+                            _ => "expired".into(),
+                        }
+                    })
+                    .unwrap_or_else(|| "?".into());
 
                 let pnl = acc.pnl();
                 tracing::info!(
@@ -597,13 +590,17 @@ impl Bot {
                     return Ok(());
                 }
 
+                let fok_backoff_ms = self.config.risk.fok_backoff_ms as i64;
                 {
                     let st = self.state.read().await;
                     if st.last_fok_rejection_ms > 0 {
                         let elapsed =
                             chrono::Utc::now().timestamp_millis() - st.last_fok_rejection_ms;
-                        if elapsed < 3_000 {
-                            tracing::debug!("[FOK] backoff {}ms remaining", 3_000 - elapsed);
+                        if elapsed < fok_backoff_ms {
+                            tracing::debug!(
+                                "[FOK] backoff {}ms remaining",
+                                fok_backoff_ms - elapsed
+                            );
                             return Ok(());
                         }
                     }
@@ -667,8 +664,8 @@ impl Bot {
                         cost: order.cost,
                         settlement_time_ms: order.settlement_time_ms,
                         entry_btc_price: order.entry_btc_price,
-                        condition_id: mkt.condition_id.clone(),
-                        market_slug: mkt.market_slug.clone(),
+                        condition_id: Arc::clone(&mkt.condition_id),
+                        market_slug: Arc::clone(&mkt.market_slug),
                     });
 
                     Self::save_state(&self.log_dir, &self.settler, &self.account).await;
@@ -677,13 +674,8 @@ impl Bot {
                     Self::write_balance(&self.log_dir, bal).await;
 
                     let order_id_short: String = order.order_id.chars().take(8).collect();
-                    let ttl_secs = remaining_ms / 1000;
-                    let yes_f = poly_yes_dec
-                        .map(|v| format!("{:.3}", v))
-                        .unwrap_or_default();
-                    let no_f = poly_no_dec.map(|v| format!("{:.3}", v)).unwrap_or_default();
                     let log_line = format!(
-                        "{},{},{},{:.3},{:.2},{:.1},{:.2},{}s,{},{},{:.1}x\n",
+                        "{},{},{},{:.3},{:.2},{:.1},{:.2},{}s,{:.3},{:.3},{:.1}x\n",
                         Utc::now().format("%H:%M:%S"),
                         order.direction.as_str(),
                         order_id_short,
@@ -691,9 +683,9 @@ impl Bot {
                         order.cost,
                         (*edge * decimal("100")).round_dp(1),
                         bal,
-                        ttl_secs,
-                        yes_f,
-                        no_f,
+                        remaining_ms / 1000,
+                        poly_yes_dec.unwrap_or_default(),
+                        poly_no_dec.unwrap_or_default(),
                         payoff_ratio,
                     );
                     let trades_path = Path::new(&self.log_dir).join("trades.csv");
@@ -729,10 +721,10 @@ impl Bot {
                     &active.condition_id[..8.min(active.condition_id.len())]
                 );
                 *self.market_state.write().await = MarketState {
-                    token_yes: active.token_id_yes,
-                    token_no: active.token_id_no,
-                    condition_id: active.condition_id,
-                    market_slug: active.market.slug,
+                    token_yes: active.token_id_yes.into(),
+                    token_no: active.token_id_no.into(),
+                    condition_id: active.condition_id.into(),
+                    market_slug: active.market.slug.into(),
                     settlement_ms: active.end_date.timestamp_millis(),
                 };
             }
@@ -759,9 +751,17 @@ impl Bot {
 
                 let mut results = Vec::new();
                 let due = settler.read().await.due_positions();
-                for pos in due {
-                    let market = match discovery.fetch_market_by_slug(&pos.market_slug).await {
-                        Ok(market) => market,
+
+                // Fetch all markets in parallel
+                let fetch_futures = due.iter().map(|pos| async {
+                    let result = discovery.fetch_market_by_slug(&pos.market_slug).await;
+                    (pos.clone(), result)
+                });
+                let fetch_results = join_all(fetch_futures).await;
+
+                for (pos, market_result) in fetch_results {
+                    let market = match market_result {
+                        Ok(m) => m,
                         Err(e) => {
                             tracing::warn!(
                                 "[SETTLE] Gamma fetch failed for {}: {}",
