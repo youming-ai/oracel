@@ -42,11 +42,9 @@ Then edit `config.json` with your settings.
     "fair_value": 0.5,
     "position_size_usdc": 1.0
   },
-  "edge": {
-    "edge_threshold_early": 0.15
-  },
   "risk": {
-    "max_fok_retries": 3
+    "max_fok_retries": 3,
+    "fok_backoff_ms": 3000
   },
   "polling": {
     "signal_interval_ms": 1000,
@@ -72,7 +70,7 @@ Then edit `config.json` with your settings.
 **Paper Mode**:
 - Simulated trading with no real orders
 - Uses local UUIDs as order IDs
-- Starts with $1,000 simulated balance
+- Starts with $100 simulated balance
 - No private key required
 
 **Live Mode**:
@@ -193,40 +191,9 @@ otherwise → No trade
 
 The bot uses a fixed position size per trade:
 
-```
-position_size_usdc = 1.0  // $1 per trade
-```
-
-Shares are calculated as: `shares = floor(position_size_usdc / entry_price)`
-
 **Zero-share guard**: Orders resulting in 0 shares are rejected to prevent phantom trades.
 
----
-
-### Edge Configuration
-
-```json
-"edge": {
-  "edge_threshold_early": 0.15
-}
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `edge_threshold_early` | float | `0.15` | Minimum edge required to trade (15%) |
-
-#### Edge Calculation
-
-```
-edge = fair_value - cheap_side_price
-
-Example:
-- Market: YES 0.85, NO 0.15
-- Fair value: 0.50
-- Cheap side: NO at 0.15
-- Edge = 0.50 - 0.15 = 0.35 (35%)
-- 35% > 15% threshold → TRADE
-```
+**Minimum order**: Polymarket requires a minimum $1 order; shares are automatically bumped to meet this requirement.
 
 ---
 
@@ -234,15 +201,17 @@ Example:
 
 ```json
 "risk": {
-  "max_fok_retries": 3
+  "max_fok_retries": 3,
+  "fok_backoff_ms": 3000
 }
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `max_fok_retries` | integer | `3` | Maximum retries for Fill-or-Kill orders |
+| `max_fok_retries` | integer | `3` | Maximum FOK order rejections before giving up on market window |
+| `fok_backoff_ms` | integer | `3000` | Milliseconds to wait after FOK rejection before retrying |
 
-The FOK retry mechanism handles temporary liquidity issues when placing orders on the CLOB.
+The FOK retry mechanism handles temporary liquidity issues when placing orders on the CLOB. After a rejection, the bot waits `fok_backoff_ms` before attempting another trade.
 
 ---
 
@@ -278,9 +247,9 @@ The bot validates configuration on startup. Invalid configurations cause immedia
 |-------|------------|---------------|
 | `signal_interval_ms` | > 0 | `polling.signal_interval_ms must be > 0` |
 | `extreme_threshold` | 0 < value < 1 | `strategy.extreme_threshold must be in (0, 1)` |
+| `extreme_threshold` | > fair_value | `strategy.extreme_threshold (X) must be > fair_value (Y)` |
 | `fair_value` | 0 < value < 1 | `strategy.fair_value must be in (0, 1)` |
 | `position_size_usdc` | > 0 | `strategy.position_size_usdc must be > 0` |
-| `edge_threshold_early` | 0 < value < 1 | `edge.edge_threshold_early must be in (0, 1)` |
 | `symbol` | Source-specific format | `price_source.symbol must match...` |
 
 ### Example Validation Errors
@@ -294,6 +263,9 @@ Error: strategy.extreme_threshold must be in (0, 1)
 
 # Zero polling interval
 Error: polling.signal_interval_ms must be > 0
+
+# Extreme threshold <= fair_value
+Error: strategy.extreme_threshold (0.40) must be > fair_value (0.50)
 ```
 
 ---
@@ -328,16 +300,12 @@ ALCHEMY_KEY=...
     "extreme_threshold": 0.85,
     "fair_value": 0.50,
     "position_size_usdc": 1.0
-  },
-  "edge": {
-    "edge_threshold_early": 0.20
   }
 }
 ```
 
 **Characteristics**:
 - Higher extreme threshold (more selective)
-- Higher edge requirement (better value)
 - Same position size
 
 ### Aggressive Trading
@@ -349,16 +317,12 @@ ALCHEMY_KEY=...
     "extreme_threshold": 0.75,
     "fair_value": 0.50,
     "position_size_usdc": 2.0
-  },
-  "edge": {
-    "edge_threshold_early": 0.10
   }
 }
 ```
 
 **Characteristics**:
 - Lower extreme threshold (more trades)
-- Lower edge requirement (more trades)
 - Larger position size
 
 ### Production Live Trading
@@ -379,11 +343,9 @@ ALCHEMY_KEY=...
     "fair_value": 0.50,
     "position_size_usdc": 5.0
   },
-  "edge": {
-    "edge_threshold_early": 0.15
-  },
   "risk": {
-    "max_fok_retries": 3
+    "max_fok_retries": 3,
+    "fok_backoff_ms": 3000
   }
 }
 ```

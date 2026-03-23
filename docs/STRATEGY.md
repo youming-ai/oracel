@@ -52,7 +52,26 @@ if mkt_up < 1 - extreme_threshold (default 0.20): buy UP
 otherwise: no trade (market is balanced)
 ```
 
-The signal is a pre-filter in the main loop. If the market is not extreme, the bot skips the entire decision pipeline for that tick and logs `[IDLE] not_extreme`.
+### Time-Weighted Threshold
+
+The extreme threshold ramps up as settlement time approaches:
+
+- **Early in window** (≥3 min remaining): Uses configured `extreme_threshold`
+- **Mid window** (2-3 min remaining): Threshold linearly interpolates toward 0.90
+- **Late in window** (<2 min remaining): Uses 0.90 minimum (or higher if configured threshold > 0.90)
+
+This prevents trades on weaker signals when there's insufficient time for the market to resolve.
+
+### Spread Check
+
+The bot validates market liquidity by checking the spread.
+
+```text
+if yes_price + no_price < 0.80:
+    skip trade (wide spread indicates unreliable mid prices)
+```
+
+When the spread is too wide (>20%), mid prices are unreliable and the bot skips to avoid adverse fills.
 
 ## 4. Decision Flow
 
@@ -68,10 +87,10 @@ tick()
  ├── 5. Extreme check: skip if market sentiment is not extreme (pre-filter)
  │
  └── decide()
-      ├── 6. One-trade-per-window: skip if this settlement window was already traded
+      ├── 6. Balance check: skip if balance ≤ 0
       ├── 7. Market data: skip if yes or no price is missing or ≤ 0.01
-      ├── 8. Edge threshold: skip if edge < edge_threshold_early (default 15%)
-      ├── 9. Balance check: skip if balance ≤ 0
+      ├── 8. Spread check: skip if yes + no < 0.80 (wide spread)
+      ├── 9. Time-weighted extreme: threshold ramps up near settlement
       │
       └── TRADE: size the position and execute
 ```
