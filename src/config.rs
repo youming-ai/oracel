@@ -107,12 +107,18 @@ pub(crate) struct StrategyConfig {
         with = "rust_decimal::serde::float"
     )]
     pub position_size_usdc: Decimal,
+    /// Minimum edge required to trade (default 0.05 = 5%)
+    #[serde(default = "default_min_edge", with = "rust_decimal::serde::float")]
+    pub min_edge: Decimal,
     /// Enable BTC momentum filter
     #[serde(default)]
     pub momentum_filter: MomentumFilterConfig,
     /// Enable dynamic fair value based on volatility
     #[serde(default)]
     pub dynamic_fair_value: DynamicFairValueConfig,
+    /// Enable dynamic fair value based on BTC history
+    #[serde(default)]
+    pub btc_history: BtcHistoryConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -120,22 +126,40 @@ pub(crate) struct MomentumFilterConfig {
     /// Enable momentum filtering
     #[serde(default)]
     pub enabled: bool,
-    /// Lookback window in seconds for momentum calculation
-    #[serde(default = "default_momentum_window_secs")]
-    pub window_secs: u64,
+    /// Short timeframe for momentum (seconds)
+    #[serde(default = "default_momentum_short_secs")]
+    pub short_secs: u64,
+    /// Medium timeframe for momentum (seconds)
+    #[serde(default = "default_momentum_medium_secs")]
+    pub medium_secs: u64,
+    /// Long timeframe for momentum (seconds)
+    #[serde(default = "default_momentum_long_secs")]
+    pub long_secs: u64,
     /// Minimum momentum alignment (0.0 = disabled, higher = stricter)
     #[serde(
         default = "default_momentum_threshold",
         with = "rust_decimal::serde::float"
     )]
     pub threshold: Decimal,
+    /// Legacy field for backward compatibility
+    #[serde(default = "default_momentum_window_secs")]
+    pub window_secs: u64,
 }
 
+fn default_momentum_short_secs() -> u64 {
+    30
+}
+fn default_momentum_medium_secs() -> u64 {
+    60
+}
+fn default_momentum_long_secs() -> u64 {
+    180
+}
 fn default_momentum_window_secs() -> u64 {
     60
 }
 fn default_momentum_threshold() -> Decimal {
-    dec("0.002") // 0.2% price change
+    dec("0.002")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -155,10 +179,30 @@ pub(crate) struct DynamicFairValueConfig {
 }
 
 fn default_volatility_window_secs() -> u64 {
-    300 // 5 minutes
+    300
 }
 fn default_volatility_weight() -> Decimal {
     dec("0.1")
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct BtcHistoryConfig {
+    /// Enable dynamic fair value based on BTC history
+    #[serde(default)]
+    pub enabled: bool,
+    /// Minimum samples required before using dynamic FV
+    #[serde(default = "default_btc_history_min_samples")]
+    pub min_samples: usize,
+    /// Maximum number of windows to keep
+    #[serde(default = "default_btc_history_max_windows")]
+    pub max_windows: usize,
+}
+
+fn default_btc_history_min_samples() -> usize {
+    20
+}
+fn default_btc_history_max_windows() -> usize {
+    1000
 }
 
 fn default_extreme_threshold() -> Decimal {
@@ -170,6 +214,9 @@ fn default_fair_value() -> Decimal {
 fn default_position_size_usdc() -> Decimal {
     dec("1.0")
 }
+fn default_min_edge() -> Decimal {
+    dec("0.05")
+}
 // ─── Risk ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,9 +225,6 @@ pub(crate) struct RiskConfig {
     pub max_fok_retries: u32,
     #[serde(default = "default_fok_backoff_ms")]
     pub fok_backoff_ms: u64,
-    /// Consecutive loss limit (circuit breaker)
-    #[serde(default = "default_max_consecutive_losses")]
-    pub max_consecutive_losses: u32,
     /// Daily loss limit in USDC (0 = disabled)
     #[serde(
         default = "default_daily_loss_limit",
@@ -189,9 +233,6 @@ pub(crate) struct RiskConfig {
     pub daily_loss_limit_usdc: Decimal,
 }
 
-fn default_max_consecutive_losses() -> u32 {
-    5
-}
 fn default_daily_loss_limit() -> Decimal {
     dec("0") // disabled by default
 }
@@ -333,8 +374,10 @@ impl Default for StrategyConfig {
             extreme_threshold: dec("0.80"),
             fair_value: dec("0.50"),
             position_size_usdc: dec("1.0"),
+            min_edge: dec("0.05"),
             momentum_filter: MomentumFilterConfig::default(),
             dynamic_fair_value: DynamicFairValueConfig::default(),
+            btc_history: BtcHistoryConfig::default(),
         }
     }
 }
@@ -344,7 +387,6 @@ impl Default for RiskConfig {
         Self {
             max_fok_retries: 3,
             fok_backoff_ms: 3_000,
-            max_consecutive_losses: 5,
             daily_loss_limit_usdc: dec("0"),
         }
     }
