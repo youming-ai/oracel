@@ -4,7 +4,6 @@ use crate::pipeline::price_source::PriceTick;
 use crate::pipeline::signal::Direction;
 use rust_decimal::Decimal;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct MomentumSignal {
     pub short: Decimal,
@@ -12,13 +11,6 @@ pub(crate) struct MomentumSignal {
     pub long: Decimal,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MomentumMode {
-    AllAligned,
-}
-
-#[allow(dead_code)]
 pub(crate) fn compute_momentum(prices: &[PriceTick], window_secs: u64) -> Decimal {
     if prices.len() < 2 {
         return Decimal::ZERO;
@@ -42,7 +34,6 @@ pub(crate) fn compute_momentum(prices: &[PriceTick], window_secs: u64) -> Decima
     (end_price - start_price) / start_price
 }
 
-#[allow(dead_code)]
 pub(crate) fn compute_multi_frame_momentum(
     prices: &[PriceTick],
     short_secs: u64,
@@ -56,26 +47,18 @@ pub(crate) fn compute_multi_frame_momentum(
     }
 }
 
-#[allow(dead_code)]
-pub(crate) fn momentum_aligned(
-    signal: &MomentumSignal,
-    direction: Direction,
-    mode: MomentumMode,
-) -> bool {
-    match mode {
-        MomentumMode::AllAligned => {
-            let all_up = signal.short > Decimal::ZERO
-                && signal.medium > Decimal::ZERO
-                && signal.long > Decimal::ZERO;
-            let all_down = signal.short < Decimal::ZERO
-                && signal.medium < Decimal::ZERO
-                && signal.long < Decimal::ZERO;
+/// Returns true when all three momentum frames align with the given direction.
+pub(crate) fn momentum_aligned(signal: &MomentumSignal, direction: Direction) -> bool {
+    let all_up = signal.short > Decimal::ZERO
+        && signal.medium > Decimal::ZERO
+        && signal.long > Decimal::ZERO;
+    let all_down = signal.short < Decimal::ZERO
+        && signal.medium < Decimal::ZERO
+        && signal.long < Decimal::ZERO;
 
-            match direction {
-                Direction::Up => all_up,
-                Direction::Down => all_down,
-            }
-        }
+    match direction {
+        Direction::Up => all_up,
+        Direction::Down => all_down,
     }
 }
 
@@ -158,16 +141,8 @@ mod tests {
             long: d("0.03"),
         };
 
-        assert!(momentum_aligned(
-            &signal,
-            Direction::Up,
-            MomentumMode::AllAligned
-        ));
-        assert!(!momentum_aligned(
-            &signal,
-            Direction::Down,
-            MomentumMode::AllAligned
-        ));
+        assert!(momentum_aligned(&signal, Direction::Up));
+        assert!(!momentum_aligned(&signal, Direction::Down));
     }
 
     #[test]
@@ -178,16 +153,8 @@ mod tests {
             long: d("-0.03"),
         };
 
-        assert!(momentum_aligned(
-            &signal,
-            Direction::Down,
-            MomentumMode::AllAligned
-        ));
-        assert!(!momentum_aligned(
-            &signal,
-            Direction::Up,
-            MomentumMode::AllAligned
-        ));
+        assert!(momentum_aligned(&signal, Direction::Down));
+        assert!(!momentum_aligned(&signal, Direction::Up));
     }
 
     #[test]
@@ -198,16 +165,8 @@ mod tests {
             long: d("0.03"),
         };
 
-        assert!(!momentum_aligned(
-            &signal,
-            Direction::Up,
-            MomentumMode::AllAligned
-        ));
-        assert!(!momentum_aligned(
-            &signal,
-            Direction::Down,
-            MomentumMode::AllAligned
-        ));
+        assert!(!momentum_aligned(&signal, Direction::Up));
+        assert!(!momentum_aligned(&signal, Direction::Down));
     }
 
     #[test]

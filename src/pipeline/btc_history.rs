@@ -4,7 +4,6 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct BtcWindow {
     pub start_time_ms: i64,
@@ -14,7 +13,6 @@ pub(crate) struct BtcWindow {
     pub up_won: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct BtcHistory {
     windows: VecDeque<BtcWindow>,
@@ -22,7 +20,6 @@ pub(crate) struct BtcHistory {
     max_windows: usize,
 }
 
-#[allow(dead_code)]
 fn default_max_windows() -> usize {
     1000
 }
@@ -33,7 +30,6 @@ impl Default for BtcHistory {
     }
 }
 
-#[allow(dead_code)]
 impl BtcHistory {
     pub(crate) fn new(max_windows: usize) -> Self {
         Self {
@@ -77,10 +73,6 @@ impl BtcHistory {
 
     pub(crate) fn len(&self) -> usize {
         self.windows.len()
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.windows.is_empty()
     }
 
     pub(crate) fn to_json(&self) -> Result<String, serde_json::Error> {

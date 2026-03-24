@@ -436,26 +436,7 @@ impl Bot {
     }
 
     fn decider_cfg(&self) -> DeciderConfig {
-        DeciderConfig {
-            position_size_usdc: self.config.strategy.position_size_usdc,
-            extreme_threshold: self.config.strategy.extreme_threshold,
-            fair_value: self.config.strategy.fair_value,
-            min_edge: self.config.strategy.min_edge,
-            momentum_filter_enabled: self.config.strategy.momentum_filter.enabled,
-            momentum_short_secs: self.config.strategy.momentum_filter.short_secs,
-            momentum_medium_secs: self.config.strategy.momentum_filter.medium_secs,
-            momentum_long_secs: self.config.strategy.momentum_filter.long_secs,
-            dynamic_fv_enabled: self.config.strategy.dynamic_fair_value.enabled,
-            volatility_window_secs: self
-                .config
-                .strategy
-                .dynamic_fair_value
-                .volatility_window_secs,
-            volatility_weight: self.config.strategy.dynamic_fair_value.volatility_weight,
-            btc_history_enabled: self.config.strategy.btc_history.enabled,
-            btc_history_min_samples: self.config.strategy.btc_history.min_samples,
-            daily_loss_limit_usdc: self.config.risk.daily_loss_limit_usdc,
-        }
+        DeciderConfig::from(&self.config)
     }
 
     fn start_status_printer(&self) -> tokio::task::JoinHandle<()> {
@@ -851,7 +832,6 @@ impl Bot {
                     }
                 }
                 let settlement_btc_price = price_source.latest().await;
-                let (results, settlement_btc_price) = (results, settlement_btc_price);
 
                 if !results.is_empty() {
                     let mut acc = account.write().await;
@@ -861,11 +841,18 @@ impl Bot {
                         acc.record_settlement(r);
                     }
 
-                    // Record BTC window results for dynamic FV
+                    // Record BTC window results for dynamic FV (only settled positions)
                     if btc_history_cfg.enabled {
-                        let mut history = btc_history.write().await;
-                        for pos in &due {
-                            if let Some(current_btc) = price_source.latest().await {
+                        if let Some(current_btc) = price_source.latest().await {
+                            let mut history = btc_history.write().await;
+                            let mut recorded = 0usize;
+                            for pos in &due {
+                                // Only record windows for positions that were actually settled
+                                let was_settled =
+                                    results.iter().any(|r| r.condition_id == *pos.condition_id);
+                                if !was_settled {
+                                    continue;
+                                }
                                 let window_end_ms = pos.settlement_time_ms;
                                 let window_start_ms = window_end_ms.saturating_sub(300_000);
 
@@ -881,13 +868,14 @@ impl Bot {
                                     window_start_ms,
                                     window_end_ms,
                                 );
+                                recorded += 1;
                             }
+                            tracing::debug!(
+                                "[BTC_HIST] recorded {} windows, total={}",
+                                recorded,
+                                history.len()
+                            );
                         }
-                        tracing::debug!(
-                            "[BTC_HIST] recorded {} windows, total={}",
-                            due.len(),
-                            history.len()
-                        );
                     }
 
                     tracing::info!(

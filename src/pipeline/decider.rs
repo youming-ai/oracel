@@ -11,7 +11,7 @@
 //! - Risk controls: consecutive loss limit, daily loss limit
 
 use crate::pipeline::btc_history::BtcHistory;
-use crate::pipeline::momentum::{compute_multi_frame_momentum, momentum_aligned, MomentumMode};
+use crate::pipeline::momentum::{compute_multi_frame_momentum, momentum_aligned};
 use crate::pipeline::price_source::PriceTick;
 use crate::pipeline::signal::Direction;
 use rust_decimal::Decimal;
@@ -73,6 +73,27 @@ impl Default for DeciderConfig {
 
 fn decimal(value: &str) -> Decimal {
     Decimal::from_str_exact(value).expect("valid decimal literal")
+}
+
+impl From<&crate::config::Config> for DeciderConfig {
+    fn from(cfg: &crate::config::Config) -> Self {
+        Self {
+            position_size_usdc: cfg.strategy.position_size_usdc,
+            extreme_threshold: cfg.strategy.extreme_threshold,
+            fair_value: cfg.strategy.fair_value,
+            min_edge: cfg.strategy.min_edge,
+            momentum_filter_enabled: cfg.strategy.momentum_filter.enabled,
+            momentum_short_secs: cfg.strategy.momentum_filter.short_secs,
+            momentum_medium_secs: cfg.strategy.momentum_filter.medium_secs,
+            momentum_long_secs: cfg.strategy.momentum_filter.long_secs,
+            dynamic_fv_enabled: cfg.strategy.dynamic_fair_value.enabled,
+            volatility_window_secs: cfg.strategy.dynamic_fair_value.volatility_window_secs,
+            volatility_weight: cfg.strategy.dynamic_fair_value.volatility_weight,
+            btc_history_enabled: cfg.strategy.btc_history.enabled,
+            btc_history_min_samples: cfg.strategy.btc_history.min_samples,
+            daily_loss_limit_usdc: cfg.risk.daily_loss_limit_usdc,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -275,7 +296,7 @@ pub(crate) fn decide(
     );
 
     if cfg.momentum_filter_enabled
-        && !momentum_aligned(&momentum_signal, base_direction, MomentumMode::AllAligned)
+        && !momentum_aligned(&momentum_signal, base_direction)
     {
         return Decision::Pass(format!(
             "momentum_not_aligned_{:+.1}%_{:+.1}%_{:+.1}%",
