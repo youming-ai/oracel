@@ -1,3 +1,4 @@
+pub mod btc_history;
 pub mod decider;
 pub mod executor;
 pub mod momentum;

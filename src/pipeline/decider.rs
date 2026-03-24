@@ -548,14 +548,16 @@ mod tests {
     fn test_min_edge_rejects_low_edge() {
         let account = AccountState::new(d("1000"));
         let mut cfg = DeciderConfig {
-            min_edge: d("0.10"),
+            min_edge: d("0.50"), // Very high threshold - even extreme trades will fail
             ..DeciderConfig::default()
         };
         cfg.extreme_threshold = d("0.64");
 
         let mut ctx = default_ctx();
-        ctx.market_yes = Some(d("0.60"));
-        ctx.market_no = Some(d("0.40"));
+        // yes=0.85, no=0.15 (extreme bullish market)
+        // cheap_price = 0.15, edge = 0.50 - 0.15 = 0.35 < 0.50 → rejected
+        ctx.market_yes = Some(d("0.85"));
+        ctx.market_no = Some(d("0.15"));
 
         let decision = decide(&ctx, &account, &cfg, &default_btc_history());
 
