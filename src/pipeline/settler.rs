@@ -18,9 +18,6 @@ pub(crate) struct PendingPosition {
     pub entry_btc_price: Decimal,
     pub condition_id: Arc<str>,
     pub market_slug: Arc<str>,
-    /// BTC price at window start time (for dynamic FV tracking)
-    #[serde(default)]
-    pub window_start_btc_price: Decimal,
 }
 
 #[derive(Debug, Clone)]
@@ -147,7 +144,6 @@ impl Settler {
             entry_btc_price: first.entry_btc_price,
             condition_id: first.condition_id.clone(),
             market_slug: first.market_slug.clone(),
-            window_start_btc_price: first.window_start_btc_price,
         }
     }
 
@@ -194,7 +190,6 @@ mod tests {
             entry_btc_price: d("70000"),
             condition_id: "cid".into(),
             market_slug: "btc-updown-5m-1".into(),
-            window_start_btc_price: d("69800"),
         }
     }
 
@@ -306,7 +301,6 @@ mod tests {
             entry_btc_price: d("70000"),
             condition_id: "cid1".into(),
             market_slug: "slug".into(),
-            window_start_btc_price: d("69800"),
         };
         let pos2 = PendingPosition {
             direction: Direction::Up,
@@ -318,7 +312,6 @@ mod tests {
             entry_btc_price: d("70000"),
             condition_id: "cid2".into(),
             market_slug: "slug".into(),
-            window_start_btc_price: d("69800"),
         };
 
         settler.restore_positions(vec![pos1, pos2]);

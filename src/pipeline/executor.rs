@@ -1,9 +1,5 @@
 //! Stage 4: Order Executor
-//! Places orders (paper or live).
-//!
-//! Features:
-//! - Slippage tolerance: adjust price for better fills
-//! - Split orders: DCA-style execution
+//! Places FAK orders (paper or live) with slippage tolerance.
 
 use crate::config::{ExecutionConfig, TradingMode};
 use crate::data::polymarket::AuthenticatedPolyClient;

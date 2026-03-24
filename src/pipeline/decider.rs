@@ -125,11 +125,7 @@ pub(crate) struct DecideContext {
     pub remaining_ms: i64,
 }
 
-pub(crate) fn decide(
-    ctx: &DecideContext,
-    account: &AccountState,
-    cfg: &DeciderConfig,
-) -> Decision {
+pub(crate) fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderConfig) -> Decision {
     if account.balance <= Decimal::ZERO {
         return Decision::Pass("insufficient_balance".into());
     }

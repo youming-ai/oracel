@@ -88,8 +88,8 @@ impl PriceSource {
         self.buffer.read().await.back().map(|t| t.timestamp_ms)
     }
 
-    pub(crate) async fn history(&self) -> Vec<PriceTick> {
-        self.buffer.read().await.iter().copied().collect()
+    pub(crate) async fn buffer_len(&self) -> usize {
+        self.buffer.read().await.len()
     }
 
     pub(crate) async fn start(self: Arc<Self>) {

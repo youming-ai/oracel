@@ -370,6 +370,9 @@ impl Config {
         if self.strategy.position_size_usdc <= zero {
             anyhow::bail!("strategy.position_size_usdc must be > 0");
         }
+        if self.strategy.min_edge < zero || self.strategy.min_edge >= one {
+            anyhow::bail!("strategy.min_edge must be in [0, 1)");
+        }
         if self.price_source.source.expects_dash_symbol() {
             if !is_valid_coinbase_symbol(&self.price_source.symbol) {
                 anyhow::bail!(

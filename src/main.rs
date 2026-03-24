@@ -40,6 +40,10 @@ struct PersistState {
     total_wins: u32,
     #[serde(default)]
     total_losses: u32,
+    #[serde(default, with = "rust_decimal::serde::float_option")]
+    daily_pnl: Option<Decimal>,
+    #[serde(default)]
+    daily_reset_date: Option<String>,
 }
 
 use data::market_discovery::{
@@ -223,6 +227,12 @@ impl Bot {
         account.consecutive_wins = saved.consecutive_wins;
         account.total_wins = saved.total_wins;
         account.total_losses = saved.total_losses;
+        if let Some(pnl) = saved.daily_pnl {
+            account.daily_pnl = pnl;
+        }
+        if let Some(date) = saved.daily_reset_date {
+            account.daily_reset_date = date;
+        }
 
         Ok(Self {
             config,
@@ -287,6 +297,8 @@ impl Bot {
             consecutive_wins: acc.consecutive_wins,
             total_wins: acc.total_wins,
             total_losses: acc.total_losses,
+            daily_pnl: Some(acc.daily_pnl),
+            daily_reset_date: Some(acc.daily_reset_date.clone()),
         };
         drop(acc);
         let tmp = Path::new(log_dir).join("state.json.tmp");
@@ -476,20 +488,14 @@ impl Bot {
 
         let mkt = self.market_state.read().await.clone();
 
-        let closes: Vec<Decimal> = self
-            .price_source
-            .history()
-            .await
-            .iter()
-            .map(|p| p.price)
-            .collect();
         let btc_price = match self.price_source.latest().await {
             Some(p) => p,
             None => return Ok(()),
         };
 
-        if closes.len() < 60 {
-            let detail = format!("buffer={}/60", closes.len());
+        let buf_len = self.price_source.buffer_len().await;
+        if buf_len < 60 {
+            let detail = format!("buffer={}/60", buf_len);
             self.state
                 .write()
                 .await
@@ -532,7 +538,7 @@ impl Bot {
 
         match (&yes, &no) {
             (Ok(y), Ok(n)) => {
-                tracing::debug!("[PRICE] Yes={:.3} No={:.3} | buffer={}", y, n, closes.len());
+                tracing::debug!("[PRICE] Yes={:.3} No={:.3} | buffer={}", y, n, buf_len);
             }
             (Err(e), _) | (_, Err(e)) => {
                 tracing::warn!("[PRICE] Polymarket fetch failed: {}", e);
@@ -599,6 +605,12 @@ impl Bot {
                 let fok_backoff_ms = self.config.risk.fok_backoff_ms as i64;
                 {
                     let st = self.state.read().await;
+                    // Give up on this window after max retries
+                    if st.fok_market_ms == settlement_ms
+                        && st.fok_rejections >= self.config.risk.max_fok_retries
+                    {
+                        return Ok(());
+                    }
                     if st.last_fok_rejection_ms > 0 {
                         let elapsed =
                             chrono::Utc::now().timestamp_millis() - st.last_fok_rejection_ms;
@@ -674,7 +686,6 @@ impl Bot {
                         entry_btc_price: order.entry_btc_price,
                         condition_id: Arc::clone(&mkt.condition_id),
                         market_slug: Arc::clone(&mkt.market_slug),
-                        window_start_btc_price: btc_price,
                     });
 
                     Self::save_state(&self.log_dir, &self.settler, &self.account).await;
