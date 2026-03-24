@@ -274,15 +274,15 @@ pub(crate) fn decide(
         cfg.momentum_long_secs,
     );
 
-    if cfg.momentum_filter_enabled {
-        if !momentum_aligned(&momentum_signal, base_direction, MomentumMode::AllAligned) {
-            return Decision::Pass(format!(
-                "momentum_not_aligned_{:+.1}%_{:+.1}%_{:+.1}%",
-                (momentum_signal.short * decimal("100")).round_dp(1),
-                (momentum_signal.medium * decimal("100")).round_dp(1),
-                (momentum_signal.long * decimal("100")).round_dp(1)
-            ));
-        }
+    if cfg.momentum_filter_enabled
+        && !momentum_aligned(&momentum_signal, base_direction, MomentumMode::AllAligned)
+    {
+        return Decision::Pass(format!(
+            "momentum_not_aligned_{:+.1}%_{:+.1}%_{:+.1}%",
+            (momentum_signal.short * decimal("100")).round_dp(1),
+            (momentum_signal.medium * decimal("100")).round_dp(1),
+            (momentum_signal.long * decimal("100")).round_dp(1)
+        ));
     }
 
     let effective_fair_value = if cfg.btc_history_enabled {
