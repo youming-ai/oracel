@@ -141,9 +141,6 @@ pub(crate) struct MomentumFilterConfig {
         with = "rust_decimal::serde::float"
     )]
     pub threshold: Decimal,
-    /// Legacy field for backward compatibility
-    #[serde(default = "default_momentum_window_secs")]
-    pub window_secs: u64,
 }
 
 fn default_momentum_short_secs() -> u64 {
@@ -154,9 +151,6 @@ fn default_momentum_medium_secs() -> u64 {
 }
 fn default_momentum_long_secs() -> u64 {
     180
-}
-fn default_momentum_window_secs() -> u64 {
-    60
 }
 fn default_momentum_threshold() -> Decimal {
     dec("0.002")

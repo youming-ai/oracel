@@ -420,7 +420,7 @@ impl Bot {
             extreme_threshold: self.config.strategy.extreme_threshold,
             fair_value: self.config.strategy.fair_value,
             momentum_filter_enabled: self.config.strategy.momentum_filter.enabled,
-            momentum_window_secs: self.config.strategy.momentum_filter.window_secs,
+            momentum_window_secs: self.config.strategy.momentum_filter.short_secs,
             momentum_threshold: self.config.strategy.momentum_filter.threshold,
             dynamic_fv_enabled: self.config.strategy.dynamic_fair_value.enabled,
             volatility_window_secs: self
@@ -429,7 +429,6 @@ impl Bot {
                 .dynamic_fair_value
                 .volatility_window_secs,
             volatility_weight: self.config.strategy.dynamic_fair_value.volatility_weight,
-            max_consecutive_losses: self.config.risk.max_consecutive_losses,
             daily_loss_limit_usdc: self.config.risk.daily_loss_limit_usdc,
         }
     }
