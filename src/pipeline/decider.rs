@@ -10,6 +10,8 @@
 //! - Dynamic fair value: adjust based on BTC volatility
 //! - Risk controls: consecutive loss limit, daily loss limit
 
+use crate::pipeline::btc_history::BtcHistory;
+use crate::pipeline::momentum::{compute_multi_frame_momentum, momentum_aligned, MomentumMode};
 use crate::pipeline::price_source::PriceTick;
 use crate::pipeline::signal::Direction;
 use rust_decimal::Decimal;
@@ -32,22 +34,19 @@ pub(crate) enum Decision {
 
 #[derive(Debug, Clone)]
 pub(crate) struct DeciderConfig {
-    /// Fixed position size per trade (USDC)
     pub position_size_usdc: Decimal,
-    /// Market price threshold to consider "extreme" (e.g. 0.80)
     pub extreme_threshold: Decimal,
-    /// Fair value assumption for binary outcome (e.g. 0.50)
     pub fair_value: Decimal,
-    /// Momentum filter settings
+    pub min_edge: Decimal,
     pub momentum_filter_enabled: bool,
-    pub momentum_window_secs: u64,
-    pub momentum_threshold: Decimal,
-    /// Dynamic fair value settings
+    pub momentum_short_secs: u64,
+    pub momentum_medium_secs: u64,
+    pub momentum_long_secs: u64,
     pub dynamic_fv_enabled: bool,
     pub volatility_window_secs: u64,
     pub volatility_weight: Decimal,
-    /// Risk controls
-    pub max_consecutive_losses: u32,
+    pub btc_history_enabled: bool,
+    pub btc_history_min_samples: usize,
     pub daily_loss_limit_usdc: Decimal,
 }
 
@@ -57,13 +56,16 @@ impl Default for DeciderConfig {
             position_size_usdc: decimal("1.0"),
             extreme_threshold: decimal("0.80"),
             fair_value: decimal("0.50"),
+            min_edge: decimal("0.05"),
             momentum_filter_enabled: false,
-            momentum_window_secs: 60,
-            momentum_threshold: decimal("0.002"),
+            momentum_short_secs: 30,
+            momentum_medium_secs: 60,
+            momentum_long_secs: 180,
             dynamic_fv_enabled: false,
             volatility_window_secs: 300,
             volatility_weight: decimal("0.1"),
-            max_consecutive_losses: 5,
+            btc_history_enabled: false,
+            btc_history_min_samples: 20,
             daily_loss_limit_usdc: decimal("0"),
         }
     }
@@ -131,31 +133,6 @@ impl AccountState {
             self.daily_reset_date = today.to_string();
         }
     }
-}
-
-/// Compute BTC momentum as percentage change over window
-pub(crate) fn compute_momentum(prices: &[PriceTick], window_secs: u64) -> Decimal {
-    if prices.len() < 2 {
-        return Decimal::ZERO;
-    }
-
-    let now_ms = prices.last().map(|p| p.timestamp_ms).unwrap_or(0);
-    let cutoff_ms = now_ms - (window_secs as i64 * 1000);
-
-    // Find earliest price within window
-    let start_price = prices
-        .iter()
-        .find(|p| p.timestamp_ms >= cutoff_ms)
-        .map(|p| p.price)
-        .unwrap_or_else(|| prices.first().map(|p| p.price).unwrap_or(Decimal::ZERO));
-
-    let end_price = prices.last().map(|p| p.price).unwrap_or(Decimal::ZERO);
-
-    if start_price == Decimal::ZERO {
-        return Decimal::ZERO;
-    }
-
-    (end_price - start_price) / start_price
 }
 
 /// Compute BTC volatility as standard deviation of returns over window
@@ -226,21 +203,16 @@ pub(crate) struct DecideContext {
     pub btc_prices: Vec<PriceTick>,
 }
 
-pub(crate) fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderConfig) -> Decision {
-    // 1. Balance check
+pub(crate) fn decide(
+    ctx: &DecideContext,
+    account: &AccountState,
+    cfg: &DeciderConfig,
+    btc_history: &BtcHistory,
+) -> Decision {
     if account.balance <= Decimal::ZERO {
         return Decision::Pass("insufficient_balance".into());
     }
 
-    // 2. Consecutive loss circuit breaker
-    if cfg.max_consecutive_losses > 0 && account.consecutive_losses >= cfg.max_consecutive_losses {
-        return Decision::Pass(format!(
-            "circuit_breaker_{}losses",
-            account.consecutive_losses
-        ));
-    }
-
-    // 3. Daily loss limit check
     if cfg.daily_loss_limit_usdc > Decimal::ZERO && account.daily_pnl < -cfg.daily_loss_limit_usdc {
         return Decision::Pass(format!(
             "daily_loss_limit_{:.0}",
@@ -248,7 +220,6 @@ pub(crate) fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderC
         ));
     }
 
-    // 4. Need market data
     let (yes, no) = match (ctx.market_yes, ctx.market_no) {
         (Some(y), Some(n)) if y > decimal("0.01") && n > decimal("0.01") => (y, n),
         _ => return Decision::Pass("no_market_data".into()),
@@ -259,7 +230,6 @@ pub(crate) fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderC
         return Decision::Pass("no_liquidity".into());
     }
 
-    // Spread check: if yes + no < 0.80, liquidity is too thin
     if total < decimal("0.80") {
         return Decision::Pass(format!(
             "wide_spread_{:.0}%",
@@ -269,11 +239,8 @@ pub(crate) fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderC
 
     let mkt_up = yes / total;
 
-    // 5. Compute BTC momentum and volatility
-    let btc_momentum = compute_momentum(&ctx.btc_prices, cfg.momentum_window_secs);
     let btc_volatility = compute_volatility(&ctx.btc_prices, cfg.volatility_window_secs);
 
-    // 6. Market extreme check — time-weighted threshold
     let late_floor = decimal("0.90");
     let late_threshold = if cfg.extreme_threshold > late_floor {
         cfg.extreme_threshold
@@ -289,7 +256,6 @@ pub(crate) fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderC
         late_threshold
     };
 
-    // 7. Determine direction based on market extreme
     let (base_direction, cheap_price) = if mkt_up > extreme_thr {
         (Direction::Down, no / total)
     } else if mkt_up < (Decimal::ONE - extreme_thr) {
@@ -301,41 +267,51 @@ pub(crate) fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderC
         ));
     };
 
-    // 8. Momentum filter: skip if momentum strongly opposes direction
-    if cfg.momentum_filter_enabled && cfg.momentum_threshold > Decimal::ZERO {
-        let momentum_opposes = (base_direction == Direction::Up
-            && btc_momentum < -cfg.momentum_threshold)
-            || (base_direction == Direction::Down && btc_momentum > cfg.momentum_threshold);
+    let momentum_signal = compute_multi_frame_momentum(
+        &ctx.btc_prices,
+        cfg.momentum_short_secs,
+        cfg.momentum_medium_secs,
+        cfg.momentum_long_secs,
+    );
 
-        if momentum_opposes {
+    if cfg.momentum_filter_enabled {
+        if !momentum_aligned(&momentum_signal, base_direction, MomentumMode::AllAligned) {
             return Decision::Pass(format!(
-                "momentum_opposite_{:+.1}%",
-                (btc_momentum * decimal("100")).round_dp(1)
+                "momentum_not_aligned_{:+.1}%_{:+.1}%_{:+.1}%",
+                (momentum_signal.short * decimal("100")).round_dp(1),
+                (momentum_signal.medium * decimal("100")).round_dp(1),
+                (momentum_signal.long * decimal("100")).round_dp(1)
             ));
         }
     }
 
-    // 9. Dynamic fair value adjustment based on volatility
-    // High volatility = more uncertainty = higher fair_value = more edge required
-    let effective_fair_value = if cfg.dynamic_fv_enabled && btc_volatility > Decimal::ZERO {
+    let effective_fair_value = if cfg.btc_history_enabled {
+        btc_history
+            .dynamic_fair_value(cfg.btc_history_min_samples)
+            .unwrap_or_else(|| {
+                if cfg.dynamic_fv_enabled && btc_volatility > Decimal::ZERO {
+                    let boost = btc_volatility * cfg.volatility_weight;
+                    cfg.fair_value + boost
+                } else {
+                    cfg.fair_value
+                }
+            })
+    } else if cfg.dynamic_fv_enabled && btc_volatility > Decimal::ZERO {
         let boost = btc_volatility * cfg.volatility_weight;
         cfg.fair_value + boost
     } else {
         cfg.fair_value
     };
 
-    // 10. Calculate edge with effective fair value
     let edge = effective_fair_value - cheap_price;
 
-    // Edge must be positive
-    if edge <= Decimal::ZERO {
+    if edge < cfg.min_edge {
         return Decision::Pass(format!(
-            "no_edge_{:.0}%",
-            (edge * decimal("100")).round_dp(0)
+            "edge_too_low_{:.1}%",
+            (edge * decimal("100")).round_dp(1)
         ));
     }
 
-    // 11. Calculate payoff ratio
     let payoff_ratio = if cheap_price > Decimal::ZERO {
         (Decimal::ONE - cheap_price) / cheap_price
     } else {
@@ -347,7 +323,7 @@ pub(crate) fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderC
         size_usdc: cfg.position_size_usdc,
         edge,
         payoff_ratio,
-        btc_momentum,
+        btc_momentum: momentum_signal.medium,
         btc_volatility,
     }
 }
@@ -356,6 +332,10 @@ pub(crate) fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderC
 mod tests {
     use super::*;
     use crate::pipeline::test_helpers::d;
+
+    fn default_btc_history() -> BtcHistory {
+        BtcHistory::new(100)
+    }
 
     fn cfg_for_threshold_test() -> DeciderConfig {
         DeciderConfig {
@@ -393,7 +373,12 @@ mod tests {
         ctx.market_yes = Some(d("0.65"));
         ctx.market_no = Some(d("0.35"));
 
-        let decision = decide(&ctx, &account, &cfg_for_threshold_test());
+        let decision = decide(
+            &ctx,
+            &account,
+            &cfg_for_threshold_test(),
+            &default_btc_history(),
+        );
 
         match decision {
             Decision::Trade { edge, .. } => assert_eq!(edge, d("0.15")),
@@ -426,7 +411,7 @@ mod tests {
         let cfg = DeciderConfig::default();
         let ctx = default_ctx();
 
-        let decision = decide(&ctx, &account, &cfg);
+        let decision = decide(&ctx, &account, &cfg, &default_btc_history());
 
         match decision {
             Decision::Trade {
@@ -444,24 +429,6 @@ mod tests {
     }
 
     #[test]
-    fn test_circuit_breaker_on_consecutive_losses() {
-        let mut account = AccountState::new(d("1000"));
-        account.consecutive_losses = 5;
-        let cfg = DeciderConfig {
-            max_consecutive_losses: 5,
-            ..DeciderConfig::default()
-        };
-        let ctx = default_ctx();
-
-        let decision = decide(&ctx, &account, &cfg);
-
-        match decision {
-            Decision::Pass(reason) => assert!(reason.starts_with("circuit_breaker")),
-            Decision::Trade { .. } => panic!("expected pass but got trade"),
-        }
-    }
-
-    #[test]
     fn test_daily_loss_limit() {
         let mut account = AccountState::new(d("1000"));
         account.daily_pnl = d("-15.0");
@@ -471,7 +438,7 @@ mod tests {
         };
         let ctx = default_ctx();
 
-        let decision = decide(&ctx, &account, &cfg);
+        let decision = decide(&ctx, &account, &cfg, &default_btc_history());
 
         match decision {
             Decision::Pass(reason) => assert!(reason.starts_with("daily_loss_limit")),
@@ -484,11 +451,9 @@ mod tests {
         let account = AccountState::new(d("1000"));
         let cfg = DeciderConfig {
             momentum_filter_enabled: true,
-            momentum_threshold: d("0.001"),
             ..DeciderConfig::default()
         };
 
-        // Strong upward momentum should reject DOWN trade
         let mut ctx = default_ctx();
         ctx.btc_prices = vec![
             PriceTick {
@@ -498,36 +463,15 @@ mod tests {
             PriceTick {
                 price: d("70500"),
                 timestamp_ms: 61000,
-            }, // +0.7% in 60s
+            },
         ];
 
-        let decision = decide(&ctx, &account, &cfg);
+        let decision = decide(&ctx, &account, &cfg, &default_btc_history());
 
         match decision {
-            Decision::Pass(reason) => assert!(reason.starts_with("momentum_opposite")),
+            Decision::Pass(reason) => assert!(reason.starts_with("momentum_not_aligned")),
             Decision::Trade { .. } => panic!("expected pass due to momentum filter"),
         }
-    }
-
-    #[test]
-    fn test_compute_momentum() {
-        let prices = vec![
-            PriceTick {
-                price: d("100"),
-                timestamp_ms: 0,
-            },
-            PriceTick {
-                price: d("101"),
-                timestamp_ms: 30000,
-            },
-            PriceTick {
-                price: d("102"),
-                timestamp_ms: 60000,
-            },
-        ];
-
-        let momentum = compute_momentum(&prices, 60);
-        assert_eq!(momentum, d("0.02")); // 2% gain
     }
 
     #[test]
@@ -563,7 +507,7 @@ mod tests {
         ctx.market_yes = Some(d("0.55"));
         ctx.market_no = Some(d("0.45"));
 
-        let decision = decide(&ctx, &account, &cfg);
+        let decision = decide(&ctx, &account, &cfg, &default_btc_history());
 
         match decision {
             Decision::Pass(reason) => assert!(reason.starts_with("not_extreme_")),
@@ -578,7 +522,7 @@ mod tests {
         let mut ctx = default_ctx();
         ctx.market_yes = None;
 
-        let decision = decide(&ctx, &account, &cfg);
+        let decision = decide(&ctx, &account, &cfg, &default_btc_history());
 
         match decision {
             Decision::Pass(reason) => assert_eq!(reason, "no_market_data"),
@@ -592,11 +536,129 @@ mod tests {
         let cfg = DeciderConfig::default();
         let ctx = default_ctx();
 
-        let decision = decide(&ctx, &account, &cfg);
+        let decision = decide(&ctx, &account, &cfg, &default_btc_history());
 
         match decision {
             Decision::Pass(reason) => assert_eq!(reason, "insufficient_balance"),
             Decision::Trade { .. } => panic!("expected pass due to zero balance but got trade"),
+        }
+    }
+
+    #[test]
+    fn test_min_edge_rejects_low_edge() {
+        let account = AccountState::new(d("1000"));
+        let mut cfg = DeciderConfig {
+            min_edge: d("0.10"),
+            ..DeciderConfig::default()
+        };
+        cfg.extreme_threshold = d("0.64");
+
+        let mut ctx = default_ctx();
+        ctx.market_yes = Some(d("0.60"));
+        ctx.market_no = Some(d("0.40"));
+
+        let decision = decide(&ctx, &account, &cfg, &default_btc_history());
+
+        match decision {
+            Decision::Pass(reason) => assert!(reason.starts_with("edge_too_low")),
+            Decision::Trade { .. } => panic!("expected pass due to low edge"),
+        }
+    }
+
+    #[test]
+    fn test_min_edge_allows_high_edge() {
+        let account = AccountState::new(d("1000"));
+        let mut cfg = DeciderConfig {
+            min_edge: d("0.05"),
+            ..DeciderConfig::default()
+        };
+        cfg.extreme_threshold = d("0.64");
+
+        let mut ctx = default_ctx();
+        ctx.market_yes = Some(d("0.70"));
+        ctx.market_no = Some(d("0.30"));
+
+        let decision = decide(&ctx, &account, &cfg, &default_btc_history());
+
+        match decision {
+            Decision::Trade { .. } => {}
+            Decision::Pass(reason) => panic!("expected trade but got pass: {}", reason),
+        }
+    }
+
+    #[test]
+    fn test_multi_frame_momentum_filter() {
+        let account = AccountState::new(d("1000"));
+        let cfg = DeciderConfig {
+            momentum_filter_enabled: true,
+            momentum_short_secs: 30,
+            momentum_medium_secs: 60,
+            momentum_long_secs: 180,
+            ..DeciderConfig::default()
+        };
+
+        let mut ctx = default_ctx();
+        ctx.btc_prices = vec![
+            PriceTick {
+                price: d("70000"),
+                timestamp_ms: 0,
+            },
+            PriceTick {
+                price: d("70200"),
+                timestamp_ms: 30000,
+            },
+            PriceTick {
+                price: d("70400"),
+                timestamp_ms: 60000,
+            },
+            PriceTick {
+                price: d("70600"),
+                timestamp_ms: 90000,
+            },
+            PriceTick {
+                price: d("70800"),
+                timestamp_ms: 120000,
+            },
+            PriceTick {
+                price: d("71000"),
+                timestamp_ms: 150000,
+            },
+            PriceTick {
+                price: d("71200"),
+                timestamp_ms: 180000,
+            },
+        ];
+
+        let decision = decide(&ctx, &account, &cfg, &default_btc_history());
+
+        match decision {
+            Decision::Pass(reason) => assert!(reason.starts_with("momentum_not_aligned")),
+            Decision::Trade { .. } => panic!("expected pass due to momentum filter"),
+        }
+    }
+
+    #[test]
+    fn test_dynamic_fv_uses_history_when_available() {
+        let account = AccountState::new(d("1000"));
+        let cfg = DeciderConfig {
+            btc_history_enabled: true,
+            btc_history_min_samples: 3,
+            ..DeciderConfig::default()
+        };
+
+        let mut history = BtcHistory::new(100);
+        history.record_window(d("100"), d("101"), 0, 300000);
+        history.record_window(d("101"), d("102"), 300000, 600000);
+        history.record_window(d("102"), d("101"), 600000, 900000);
+
+        let ctx = default_ctx();
+        let decision = decide(&ctx, &account, &cfg, &history);
+
+        match decision {
+            Decision::Trade { edge, .. } => {
+                assert!(edge > d("0.5"));
+            }
+            Decision::Pass(reason) => panic!("expected trade but got pass: {}", reason),
         }
     }
 }
