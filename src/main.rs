@@ -58,7 +58,6 @@ use pipeline::settler::{PendingPosition, Settler};
 use pipeline::signal::Direction;
 
 struct BotState {
-    no_trade_count: u64,
     last_no_trade_reason: String,
     last_idle_reason: String,
     fok_rejections: u32,
@@ -69,7 +68,6 @@ struct BotState {
 impl BotState {
     fn new() -> Self {
         Self {
-            no_trade_count: 0,
             last_no_trade_reason: String::new(),
             last_idle_reason: String::new(),
             fok_rejections: 0,
@@ -366,7 +364,8 @@ impl Bot {
                     }
                 }
                 signal = &mut shutdown_signal => {
-                    tracing::info!("[BOT] Received {}, cleaning up...", signal);
+                    tracing::info!("[BOT] Received {}, saving state...", signal);
+                    Self::save_state(&self.log_dir, &self.settler, &self.account).await;
                     break;
                 }
                 result = &mut settlement_handle => {
@@ -533,24 +532,28 @@ impl Bot {
             }
         }
 
-        let yes = self.polymarket.fetch_mid_price(&mkt.token_yes).await;
-        let no = self.polymarket.fetch_mid_price(&mkt.token_no).await;
-
-        match (&yes, &no) {
+        let (poly_yes_dec, poly_no_dec) = match (
+            self.polymarket.fetch_mid_price(&mkt.token_yes).await,
+            self.polymarket.fetch_mid_price(&mkt.token_no).await,
+        ) {
             (Ok(y), Ok(n)) => {
                 tracing::debug!("[PRICE] Yes={:.3} No={:.3} | buffer={}", y, n, buf_len);
+                (Some(y), Some(n))
             }
-            (Err(e), _) | (_, Err(e)) => {
+            (Ok(y), Err(e)) => {
+                tracing::warn!("[PRICE] Polymarket NO fetch failed: {}", e);
+                (Some(y), None)
+            }
+            (Err(e), Ok(n)) => {
+                tracing::warn!("[PRICE] Polymarket YES fetch failed: {}", e);
+                (None, Some(n))
+            }
+            (Err(e), _) => {
                 tracing::warn!("[PRICE] Polymarket fetch failed: {}", e);
+                (None, None)
             }
-        }
-
-        let poly_yes = yes.ok();
-        let poly_no = no.ok();
+        };
         let settlement_ms = mkt.settlement_ms;
-
-        let poly_yes_dec = poly_yes.and_then(|v| Decimal::try_from(v).ok());
-        let poly_no_dec = poly_no.and_then(|v| Decimal::try_from(v).ok());
 
         let today = Utc::now().format("%Y-%m-%d").to_string();
         // Reset daily PnL before decision so stale yesterday data doesn't block trades
@@ -573,7 +576,6 @@ impl Bot {
         match &decision {
             decider::Decision::Pass(reason) => {
                 let mut st = self.state.write().await;
-                st.no_trade_count += 1;
                 let category =
                     reason.trim_end_matches(|c: char| c.is_ascii_digit() || c == '%' || c == '_');
                 let prev_cat = st
@@ -1004,7 +1006,7 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    let file_appender = tracing_appender::rolling::never(&log_dir, "bot.log");
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "bot.log");
     let (file_writer, _guard) = tracing_appender::non_blocking(file_appender);
 
     tracing_subscriber::fmt()

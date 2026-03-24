@@ -58,7 +58,7 @@ impl PolymarketClient {
         })
     }
 
-    pub(crate) async fn fetch_mid_price(&self, token_id: &str) -> Result<f64> {
+    pub(crate) async fn fetch_mid_price(&self, token_id: &str) -> Result<rust_decimal::Decimal> {
         let tid = U256::from_str(token_id).context("Invalid token_id")?;
         let req = PriceRequest::builder()
             .token_id(tid)
@@ -68,11 +68,7 @@ impl PolymarketClient {
             .await
             .map_err(|_| anyhow::anyhow!("CLOB price request timed out after 10s"))?
             .context("CLOB price request failed")?;
-        let price: f64 = result
-            .price
-            .try_into()
-            .context("Failed to convert Decimal price to f64")?;
-        Ok(price)
+        Ok(result.price)
     }
 }
 

@@ -42,9 +42,9 @@ impl From<crate::data::coinbase::TickerUpdate> for TickerUpdate {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct PriceTick {
-    pub price: Decimal,
-    pub timestamp_ms: i64,
+struct PriceTick {
+    price: Decimal,
+    timestamp_ms: i64,
 }
 
 pub(crate) enum PriceClient {
