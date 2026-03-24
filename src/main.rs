@@ -798,6 +798,7 @@ impl Bot {
         let redeemer = self.redeemer.clone();
         let log_dir = self.log_dir.clone();
         let btc_history = self.btc_history.clone();
+        let btc_history_cfg = self.config.strategy.btc_history.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(15));
@@ -858,6 +859,35 @@ impl Bot {
                     acc.reset_daily_if_needed(&today);
                     for r in &results {
                         acc.record_settlement(r);
+                    }
+
+                    // Record BTC window results for dynamic FV
+                    if btc_history_cfg.enabled {
+                        let mut history = btc_history.write().await;
+                        for pos in &due {
+                            if let Some(current_btc) = price_source.latest().await {
+                                let window_end_ms = pos.settlement_time_ms;
+                                let window_start_ms = window_end_ms.saturating_sub(300_000);
+
+                                let start_price = if pos.window_start_btc_price > Decimal::ZERO {
+                                    pos.window_start_btc_price
+                                } else {
+                                    pos.entry_btc_price
+                                };
+
+                                history.record_window(
+                                    start_price,
+                                    current_btc,
+                                    window_start_ms,
+                                    window_end_ms,
+                                );
+                            }
+                        }
+                        tracing::debug!(
+                            "[BTC_HIST] recorded {} windows, total={}",
+                            due.len(),
+                            history.len()
+                        );
                     }
 
                     tracing::info!(
