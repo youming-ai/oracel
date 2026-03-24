@@ -784,6 +784,9 @@ impl Bot {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(15));
             let mut redeem_queue: Vec<(String, String, u32)> = Vec::new();
+            // Track how many times each position has been polled without resolution
+            let mut pending_retries: std::collections::HashMap<String, u32> =
+                std::collections::HashMap::new();
 
             loop {
                 interval.tick().await;
@@ -799,14 +802,20 @@ impl Bot {
                 let fetch_results = join_all(fetch_futures).await;
 
                 for (pos, market_result) in fetch_results {
+                    let slug = pos.market_slug.to_string();
                     let market = match market_result {
                         Ok(m) => m,
                         Err(e) => {
-                            tracing::warn!(
-                                "[SETTLE] Gamma fetch failed for {}: {}",
-                                pos.market_slug,
-                                e
-                            );
+                            let retries = pending_retries.entry(slug).or_insert(0);
+                            *retries += 1;
+                            if *retries == 1 || (*retries).is_multiple_of(20) {
+                                tracing::warn!(
+                                    "[SETTLE] Gamma fetch failed for {} (attempt {}): {}",
+                                    pos.market_slug,
+                                    retries,
+                                    e
+                                );
+                            }
                             continue;
                         }
                     };
@@ -824,10 +833,30 @@ impl Bot {
                             {
                                 results.push(result);
                             }
+                            pending_retries.remove(&slug);
                         }
-                        Some(ResolutionState::Pending) => {}
+                        Some(ResolutionState::Pending) => {
+                            let retries = pending_retries.entry(slug).or_insert(0);
+                            *retries += 1;
+                            // Log on 1st attempt, then every 5 min (20 x 15s)
+                            if *retries == 1 || (*retries).is_multiple_of(20) {
+                                tracing::warn!(
+                                    "[SETTLE] {} still pending after {}s",
+                                    pos.market_slug,
+                                    *retries * 15,
+                                );
+                            }
+                        }
                         None => {
-                            tracing::warn!("[SETTLE] resolution unclear for {}", pos.market_slug);
+                            let retries = pending_retries.entry(slug).or_insert(0);
+                            *retries += 1;
+                            if *retries == 1 || (*retries).is_multiple_of(20) {
+                                tracing::warn!(
+                                    "[SETTLE] resolution unclear for {} (attempt {})",
+                                    pos.market_slug,
+                                    retries,
+                                );
+                            }
                         }
                     }
                 }
@@ -870,8 +899,8 @@ impl Bot {
                                 );
                                 recorded += 1;
                             }
-                            tracing::debug!(
-                                "[BTC_HIST] recorded {} windows, total={}",
+                            tracing::info!(
+                                "[BTC_HIST] recorded {} window(s), total={}",
                                 recorded,
                                 history.len()
                             );
