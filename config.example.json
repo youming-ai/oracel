@@ -17,21 +17,28 @@
     "extreme_threshold": 0.88,
     "fair_value": 0.5,
     "position_size_usdc": 1.0,
+    "min_edge": 0.05,
     "momentum_filter": {
       "enabled": true,
-      "window_secs": 60,
+      "short_secs": 30,
+      "medium_secs": 60,
+      "long_secs": 180,
       "threshold": 0.003
     },
     "dynamic_fair_value": {
       "enabled": true,
       "volatility_window_secs": 300,
       "volatility_weight": 0.15
+    },
+    "btc_history": {
+      "enabled": true,
+      "min_samples": 20,
+      "max_windows": 1000
     }
   },
   "risk": {
     "max_fok_retries": 3,
     "fok_backoff_ms": 3000,
-    "max_consecutive_losses": 5,
     "daily_loss_limit_usdc": 50.0
   },
   "polling": {
