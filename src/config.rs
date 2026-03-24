@@ -110,93 +110,6 @@ pub(crate) struct StrategyConfig {
     /// Minimum edge required to trade (default 0.05 = 5%)
     #[serde(default = "default_min_edge", with = "rust_decimal::serde::float")]
     pub min_edge: Decimal,
-    /// Enable BTC momentum filter
-    #[serde(default)]
-    pub momentum_filter: MomentumFilterConfig,
-    /// Enable dynamic fair value based on volatility
-    #[serde(default)]
-    pub dynamic_fair_value: DynamicFairValueConfig,
-    /// Enable dynamic fair value based on BTC history
-    #[serde(default)]
-    pub btc_history: BtcHistoryConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub(crate) struct MomentumFilterConfig {
-    /// Enable momentum filtering
-    #[serde(default)]
-    pub enabled: bool,
-    /// Short timeframe for momentum (seconds)
-    #[serde(default = "default_momentum_short_secs")]
-    pub short_secs: u64,
-    /// Medium timeframe for momentum (seconds)
-    #[serde(default = "default_momentum_medium_secs")]
-    pub medium_secs: u64,
-    /// Long timeframe for momentum (seconds)
-    #[serde(default = "default_momentum_long_secs")]
-    pub long_secs: u64,
-    /// Minimum momentum alignment (0.0 = disabled, higher = stricter)
-    #[serde(
-        default = "default_momentum_threshold",
-        with = "rust_decimal::serde::float"
-    )]
-    pub threshold: Decimal,
-}
-
-fn default_momentum_short_secs() -> u64 {
-    30
-}
-fn default_momentum_medium_secs() -> u64 {
-    60
-}
-fn default_momentum_long_secs() -> u64 {
-    180
-}
-fn default_momentum_threshold() -> Decimal {
-    dec("0.002")
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub(crate) struct DynamicFairValueConfig {
-    /// Enable dynamic fair value adjustment
-    #[serde(default)]
-    pub enabled: bool,
-    /// Volatility lookback window in seconds
-    #[serde(default = "default_volatility_window_secs")]
-    pub volatility_window_secs: u64,
-    /// How much volatility affects fair value (0.0 = no effect, 1.0 = full effect)
-    #[serde(
-        default = "default_volatility_weight",
-        with = "rust_decimal::serde::float"
-    )]
-    pub volatility_weight: Decimal,
-}
-
-fn default_volatility_window_secs() -> u64 {
-    300
-}
-fn default_volatility_weight() -> Decimal {
-    dec("0.1")
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub(crate) struct BtcHistoryConfig {
-    /// Enable dynamic fair value based on BTC history
-    #[serde(default)]
-    pub enabled: bool,
-    /// Minimum samples required before using dynamic FV
-    #[serde(default = "default_btc_history_min_samples")]
-    pub min_samples: usize,
-    /// Maximum number of windows to keep
-    #[serde(default = "default_btc_history_max_windows")]
-    pub max_windows: usize,
-}
-
-fn default_btc_history_min_samples() -> usize {
-    20
-}
-fn default_btc_history_max_windows() -> usize {
-    1000
 }
 
 fn default_extreme_threshold() -> Decimal {
@@ -369,9 +282,6 @@ impl Default for StrategyConfig {
             fair_value: dec("0.50"),
             position_size_usdc: dec("1.0"),
             min_edge: dec("0.05"),
-            momentum_filter: MomentumFilterConfig::default(),
-            dynamic_fair_value: DynamicFairValueConfig::default(),
-            btc_history: BtcHistoryConfig::default(),
         }
     }
 }

@@ -61,8 +61,6 @@ impl Executor {
                 size_usdc,
                 edge: _,
                 payoff_ratio: _,
-                btc_momentum: _,
-                btc_volatility: _,
             } => {
                 let (token_id, mid_price) = match direction {
                     Direction::Up => (ctx.token_yes, ctx.poly_yes?),
@@ -206,8 +204,6 @@ mod tests {
             size_usdc: d("5.00"),
             edge: d("0.20"),
             payoff_ratio: d("3.98"),
-            btc_momentum: d("0.01"),
-            btc_volatility: d("0.02"),
         };
 
         let result = executor
@@ -238,8 +234,6 @@ mod tests {
             size_usdc: d("5.00"),
             edge: d("0.20"),
             payoff_ratio: d("3.98"),
-            btc_momentum: d("0.01"),
-            btc_volatility: d("0.02"),
         };
 
         let result = executor

@@ -1,7 +1,5 @@
-pub mod btc_history;
 pub mod decider;
 pub mod executor;
-pub mod momentum;
 pub mod price_source;
 pub mod settler;
 pub mod signal;

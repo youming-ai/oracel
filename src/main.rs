@@ -40,8 +40,6 @@ struct PersistState {
     total_wins: u32,
     #[serde(default)]
     total_losses: u32,
-    #[serde(default)]
-    btc_history_json: Option<String>,
 }
 
 use data::market_discovery::{
@@ -49,7 +47,6 @@ use data::market_discovery::{
 };
 use data::polymarket::{AuthenticatedPolyClient, BalanceChecker, CtfRedeemer, PolymarketClient};
 
-use pipeline::btc_history::BtcHistory;
 use pipeline::decider::{self, AccountState, DeciderConfig};
 use pipeline::executor::{ExecuteContext, Executor};
 use pipeline::price_source::PriceSource;
@@ -113,7 +110,6 @@ struct Bot {
     redeemer: Option<Arc<CtfRedeemer>>,
     balance_checker: Option<BalanceChecker>,
     market_state: Arc<RwLock<MarketState>>,
-    btc_history: Arc<RwLock<BtcHistory>>,
 }
 
 impl Bot {
@@ -228,19 +224,6 @@ impl Bot {
         account.total_wins = saved.total_wins;
         account.total_losses = saved.total_losses;
 
-        let btc_history = Arc::new(RwLock::new(BtcHistory::new(
-            config.strategy.btc_history.max_windows,
-        )));
-        if let Some(ref json) = saved.btc_history_json {
-            if let Ok(history) = BtcHistory::from_json(json) {
-                *btc_history.write().await = history;
-                tracing::info!(
-                    "[INIT] Restored {} BTC window(s) from state.json",
-                    btc_history.read().await.len()
-                );
-            }
-        }
-
         Ok(Self {
             config,
             log_dir,
@@ -254,7 +237,6 @@ impl Bot {
             redeemer,
             balance_checker,
             market_state: Arc::new(RwLock::new(MarketState::default())),
-            btc_history,
         })
     }
 
@@ -296,18 +278,15 @@ impl Bot {
         log_dir: &str,
         settler: &Arc<RwLock<Settler>>,
         account: &Arc<RwLock<AccountState>>,
-        btc_history: &Arc<RwLock<BtcHistory>>,
     ) {
         let positions = settler.read().await.pending_positions();
         let acc = account.read().await;
-        let btc_history_json = btc_history.read().await.to_json().ok();
         let state = PersistState {
             pending_positions: positions,
             consecutive_losses: acc.consecutive_losses,
             consecutive_wins: acc.consecutive_wins,
             total_wins: acc.total_wins,
             total_losses: acc.total_losses,
-            btc_history_json,
         };
         drop(acc);
         let tmp = Path::new(log_dir).join("state.json.tmp");
@@ -497,8 +476,13 @@ impl Bot {
 
         let mkt = self.market_state.read().await.clone();
 
-        let prices = self.price_source.history().await;
-        let closes: Vec<Decimal> = prices.iter().map(|p| p.price).collect();
+        let closes: Vec<Decimal> = self
+            .price_source
+            .history()
+            .await
+            .iter()
+            .map(|p| p.price)
+            .collect();
         let btc_price = match self.price_source.latest().await {
             Some(p) => p,
             None => return Ok(()),
@@ -576,11 +560,9 @@ impl Bot {
             market_yes: poly_yes_dec,
             market_no: poly_no_dec,
             remaining_ms,
-            btc_prices: prices.clone(),
         };
 
-        let btc_history_read = self.btc_history.read().await.clone();
-        let decision = decider::decide(&decide_ctx, &account_read, &decider_cfg, &btc_history_read);
+        let decision = decider::decide(&decide_ctx, &account_read, &decider_cfg);
 
         match &decision {
             decider::Decision::Pass(reason) => {
@@ -608,8 +590,6 @@ impl Bot {
                 size_usdc: _,
                 edge,
                 payoff_ratio,
-                btc_momentum,
-                btc_volatility,
             } => {
                 // One trade per market window
                 if self.settler.read().await.pending_count() > 0 {
@@ -638,13 +618,11 @@ impl Bot {
                 };
 
                 tracing::info!(
-                    "[TRADE] {} @ {:.3} edge={:.0}% payoff={:.1}x momentum={:+.1}% vol={:.1}% BTC=${:.0}",
+                    "[TRADE] {} @ {:.3} edge={:.0}% payoff={:.1}x BTC=${:.0}",
                     direction.as_str(),
                     cheap_price,
                     (*edge * decimal("100")).round_dp(0),
                     payoff_ratio,
-                    (*btc_momentum * decimal("100")).round_dp(1),
-                    (*btc_volatility * decimal("100")).round_dp(1),
                     btc_price.to_f64().unwrap_or(0.0),
                 );
 
@@ -699,13 +677,7 @@ impl Bot {
                         window_start_btc_price: btc_price,
                     });
 
-                    Self::save_state(
-                        &self.log_dir,
-                        &self.settler,
-                        &self.account,
-                        &self.btc_history,
-                    )
-                    .await;
+                    Self::save_state(&self.log_dir, &self.settler, &self.account).await;
 
                     let bal = self.account.read().await.balance;
                     Self::write_balance(&self.log_dir, bal).await;
@@ -778,8 +750,6 @@ impl Bot {
         let discovery = self.discovery.clone();
         let redeemer = self.redeemer.clone();
         let log_dir = self.log_dir.clone();
-        let btc_history = self.btc_history.clone();
-        let btc_history_cfg = self.config.strategy.btc_history.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(15));
@@ -870,43 +840,6 @@ impl Bot {
                         acc.record_settlement(r);
                     }
 
-                    // Record BTC window results for dynamic FV (only settled positions)
-                    if btc_history_cfg.enabled {
-                        if let Some(current_btc) = price_source.latest().await {
-                            let mut history = btc_history.write().await;
-                            let mut recorded = 0usize;
-                            for pos in &due {
-                                // Only record windows for positions that were actually settled
-                                let was_settled =
-                                    results.iter().any(|r| r.condition_id == *pos.condition_id);
-                                if !was_settled {
-                                    continue;
-                                }
-                                let window_end_ms = pos.settlement_time_ms;
-                                let window_start_ms = window_end_ms.saturating_sub(300_000);
-
-                                let start_price = if pos.window_start_btc_price > Decimal::ZERO {
-                                    pos.window_start_btc_price
-                                } else {
-                                    pos.entry_btc_price
-                                };
-
-                                history.record_window(
-                                    start_price,
-                                    current_btc,
-                                    window_start_ms,
-                                    window_end_ms,
-                                );
-                                recorded += 1;
-                            }
-                            tracing::info!(
-                                "[BTC_HIST] recorded {} window(s), total={}",
-                                recorded,
-                                history.len()
-                            );
-                        }
-                    }
-
                     tracing::info!(
                         "[BAL] ${:.2} | {}W/{}L | settled={}",
                         acc.balance,
@@ -918,7 +851,7 @@ impl Bot {
                     let bal = acc.balance;
                     drop(acc);
 
-                    Self::save_state(&log_dir, &settler, &account, &btc_history).await;
+                    Self::save_state(&log_dir, &settler, &account).await;
 
                     if let Some(btc_price) = settlement_btc_price {
                         let mut log_lines = String::new();
