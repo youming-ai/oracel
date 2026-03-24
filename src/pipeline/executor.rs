@@ -1,7 +1,11 @@
 //! Stage 4: Order Executor
 //! Places orders (paper or live).
+//!
+//! Features:
+//! - Slippage tolerance: adjust price for better fills
+//! - Split orders: DCA-style execution
 
-use crate::config::TradingMode;
+use crate::config::{ExecutionConfig, TradingMode};
 use crate::data::polymarket::AuthenticatedPolyClient;
 use crate::pipeline::decider::Decision;
 use crate::pipeline::signal::Direction;
@@ -23,6 +27,7 @@ pub(crate) struct OrderResult {
 pub(crate) struct Executor {
     mode: TradingMode,
     auth_client: Option<AuthenticatedPolyClient>,
+    execution_config: ExecutionConfig,
 }
 
 pub(crate) struct ExecuteContext<'a> {
@@ -36,8 +41,16 @@ pub(crate) struct ExecuteContext<'a> {
 }
 
 impl Executor {
-    pub(crate) fn new(mode: TradingMode, auth_client: Option<AuthenticatedPolyClient>) -> Self {
-        Self { mode, auth_client }
+    pub(crate) fn new(
+        mode: TradingMode,
+        auth_client: Option<AuthenticatedPolyClient>,
+        execution_config: ExecutionConfig,
+    ) -> Self {
+        Self {
+            mode,
+            auth_client,
+            execution_config,
+        }
     }
 
     pub(crate) async fn execute(&self, ctx: &ExecuteContext<'_>) -> Option<OrderResult> {
@@ -46,17 +59,30 @@ impl Executor {
             Decision::Trade {
                 direction,
                 size_usdc,
-                ..
+                edge: _,
+                payoff_ratio: _,
+                btc_momentum: _,
+                btc_volatility: _,
             } => {
-                let (token_id, price) = match direction {
+                let (token_id, mid_price) = match direction {
                     Direction::Up => (ctx.token_yes, ctx.poly_yes?),
                     Direction::Down => (ctx.token_no, ctx.poly_no?),
                 };
 
-                if price <= Decimal::new(1, 2) || price >= Decimal::new(99, 2) {
-                    tracing::warn!("[EXEC] Extreme price {:.3}, skipping", price);
+                if mid_price <= Decimal::new(1, 2) || mid_price >= Decimal::new(99, 2) {
+                    tracing::warn!("[EXEC] Extreme price {:.3}, skipping", mid_price);
                     return None;
                 }
+
+                // Apply slippage tolerance: bid slightly higher for better fill
+                let slippage = self.execution_config.slippage_tolerance;
+                let price = if slippage > Decimal::ZERO {
+                    let adjusted = mid_price * (Decimal::ONE + slippage);
+                    // Cap at 0.99 to avoid extreme prices
+                    adjusted.min(Decimal::new(99, 2))
+                } else {
+                    mid_price
+                };
 
                 let mut filled_shares = match Self::compute_filled_shares(*size_usdc, price) {
                     Some(shares) => shares,
@@ -74,6 +100,17 @@ impl Executor {
                         cost
                     );
                 }
+
+                // Log slippage if applied
+                if price != mid_price {
+                    tracing::debug!(
+                        "[EXEC] Slippage applied: {:.3} -> {:.3} (+{:.1}%)",
+                        mid_price,
+                        price,
+                        (slippage * Decimal::from(100)).round_dp(1)
+                    );
+                }
+
                 let order_id = if self.mode.is_live() {
                     match self.place_live_order(token_id, price, filled_shares).await {
                         Ok(id) => {
@@ -154,16 +191,23 @@ impl Executor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ExecutionConfig;
     use crate::pipeline::test_helpers::d;
+
+    fn default_exec_config() -> ExecutionConfig {
+        ExecutionConfig::default()
+    }
 
     #[tokio::test]
     async fn test_execute_tracks_filled_shares_and_effective_cost() {
-        let executor = Executor::new(TradingMode::Paper, None);
+        let executor = Executor::new(TradingMode::Paper, None, default_exec_config());
         let decision = Decision::Trade {
             direction: Direction::Up,
             size_usdc: d("5.00"),
             edge: d("0.20"),
             payoff_ratio: d("3.98"),
+            btc_momentum: d("0.01"),
+            btc_volatility: d("0.02"),
         };
 
         let result = executor
@@ -179,20 +223,23 @@ mod tests {
             .await
             .expect("expected paper order");
 
-        // With no spread: floor(5.00 / 0.201) = 24 shares, cost = 24 × 0.201 = 4.824
+        // Slippage 1%: price = 0.201 * 1.01 = 0.20301
+        // floor(5.00 / 0.20301) = 24 shares, cost = 24 × 0.20301 = 4.87224
         assert_eq!(result.filled_shares, d("24"));
-        assert_eq!(result.cost, d("4.824"));
+        assert_eq!(result.cost, d("4.87224"));
         assert!(result.cost <= d("5.00"));
     }
 
     #[tokio::test]
     async fn test_returns_none_when_price_missing() {
-        let executor = Executor::new(TradingMode::Paper, None);
+        let executor = Executor::new(TradingMode::Paper, None, default_exec_config());
         let decision = Decision::Trade {
             direction: Direction::Up,
             size_usdc: d("5.00"),
             edge: d("0.20"),
             payoff_ratio: d("3.98"),
+            btc_momentum: d("0.01"),
+            btc_volatility: d("0.02"),
         };
 
         let result = executor

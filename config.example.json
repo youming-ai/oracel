@@ -16,13 +16,29 @@
   "strategy": {
     "extreme_threshold": 0.95,
     "fair_value": 0.5,
-    "position_size_usdc": 1.0
+    "position_size_usdc": 1.0,
+    "momentum_filter": {
+      "enabled": false,
+      "window_secs": 60,
+      "threshold": 0.002
+    },
+    "dynamic_fair_value": {
+      "enabled": false,
+      "volatility_window_secs": 300,
+      "volatility_weight": 0.1
+    }
   },
   "risk": {
-    "max_fok_retries": 3
+    "max_fok_retries": 3,
+    "fok_backoff_ms": 3000,
+    "max_consecutive_losses": 5,
+    "daily_loss_limit_usdc": 0.0
   },
   "polling": {
     "signal_interval_ms": 1000,
     "status_interval_ms": 10000
+  },
+  "execution": {
+    "slippage_tolerance": 0.01
   }
 }

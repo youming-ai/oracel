@@ -142,7 +142,7 @@ impl Bot {
             None
         };
 
-        let executor = Executor::new(config.trading.mode, auth_client);
+        let executor = Executor::new(config.trading.mode, auth_client, config.execution.clone());
 
         let redeemer = if config.trading.mode.is_live()
             && !config.trading.private_key.expose_secret().is_empty()
@@ -419,6 +419,18 @@ impl Bot {
             position_size_usdc: self.config.strategy.position_size_usdc,
             extreme_threshold: self.config.strategy.extreme_threshold,
             fair_value: self.config.strategy.fair_value,
+            momentum_filter_enabled: self.config.strategy.momentum_filter.enabled,
+            momentum_window_secs: self.config.strategy.momentum_filter.window_secs,
+            momentum_threshold: self.config.strategy.momentum_filter.threshold,
+            dynamic_fv_enabled: self.config.strategy.dynamic_fair_value.enabled,
+            volatility_window_secs: self
+                .config
+                .strategy
+                .dynamic_fair_value
+                .volatility_window_secs,
+            volatility_weight: self.config.strategy.dynamic_fair_value.volatility_weight,
+            max_consecutive_losses: self.config.risk.max_consecutive_losses,
+            daily_loss_limit_usdc: self.config.risk.daily_loss_limit_usdc,
         }
     }
 
@@ -545,18 +557,24 @@ impl Bot {
         let poly_yes_dec = poly_yes.and_then(|v| Decimal::try_from(v).ok());
         let poly_no_dec = poly_no.and_then(|v| Decimal::try_from(v).ok());
 
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        // Reset daily PnL before decision so stale yesterday data doesn't block trades
+        {
+            let mut acc = self.account.write().await;
+            acc.reset_daily_if_needed(&today);
+        }
         let account_read = self.account.read().await.clone();
         let decider_cfg = self.decider_cfg();
         let remaining_ms = settlement_ms - Utc::now().timestamp_millis();
 
-        let decision = decider::decide(
-            poly_yes_dec,
-            poly_no_dec,
-            settlement_ms,
+        let decide_ctx = decider::DecideContext {
+            market_yes: poly_yes_dec,
+            market_no: poly_no_dec,
             remaining_ms,
-            &account_read,
-            &decider_cfg,
-        );
+            btc_prices: prices.clone(),
+        };
+
+        let decision = decider::decide(&decide_ctx, &account_read, &decider_cfg);
 
         match &decision {
             decider::Decision::Pass(reason) => {
@@ -584,6 +602,8 @@ impl Bot {
                 size_usdc: _,
                 edge,
                 payoff_ratio,
+                btc_momentum,
+                btc_volatility,
             } => {
                 // One trade per market window
                 if self.settler.read().await.pending_count() > 0 {
@@ -612,11 +632,13 @@ impl Bot {
                 };
 
                 tracing::info!(
-                    "[TRADE] {} @ {:.3} edge={:.0}% payoff={:.1}x BTC=${:.0}",
+                    "[TRADE] {} @ {:.3} edge={:.0}% payoff={:.1}x momentum={:+.1}% vol={:.1}% BTC=${:.0}",
                     direction.as_str(),
                     cheap_price,
                     (*edge * decimal("100")).round_dp(0),
                     payoff_ratio,
+                    (*btc_momentum * decimal("100")).round_dp(1),
+                    (*btc_volatility * decimal("100")).round_dp(1),
                     btc_price.to_f64().unwrap_or(0.0),
                 );
 
@@ -653,6 +675,8 @@ impl Bot {
                 if let Some(order) = order {
                     {
                         let mut acc = self.account.write().await;
+                        let today = Utc::now().format("%Y-%m-%d").to_string();
+                        acc.reset_daily_if_needed(&today);
                         acc.record_trade(order.cost);
                     }
 
@@ -797,6 +821,8 @@ impl Bot {
 
                 if !results.is_empty() {
                     let mut acc = account.write().await;
+                    let today = Utc::now().format("%Y-%m-%d").to_string();
+                    acc.reset_daily_if_needed(&today);
                     for r in &results {
                         acc.record_settlement(r);
                     }

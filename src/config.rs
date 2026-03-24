@@ -21,6 +21,8 @@ pub(crate) struct Config {
     pub polling: PollingConfig,
     #[serde(default)]
     pub price_source: PriceSourceConfig,
+    #[serde(default)]
+    pub execution: ExecutionConfig,
 }
 
 // ─── Trading ───
@@ -105,6 +107,58 @@ pub(crate) struct StrategyConfig {
         with = "rust_decimal::serde::float"
     )]
     pub position_size_usdc: Decimal,
+    /// Enable BTC momentum filter
+    #[serde(default)]
+    pub momentum_filter: MomentumFilterConfig,
+    /// Enable dynamic fair value based on volatility
+    #[serde(default)]
+    pub dynamic_fair_value: DynamicFairValueConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct MomentumFilterConfig {
+    /// Enable momentum filtering
+    #[serde(default)]
+    pub enabled: bool,
+    /// Lookback window in seconds for momentum calculation
+    #[serde(default = "default_momentum_window_secs")]
+    pub window_secs: u64,
+    /// Minimum momentum alignment (0.0 = disabled, higher = stricter)
+    #[serde(
+        default = "default_momentum_threshold",
+        with = "rust_decimal::serde::float"
+    )]
+    pub threshold: Decimal,
+}
+
+fn default_momentum_window_secs() -> u64 {
+    60
+}
+fn default_momentum_threshold() -> Decimal {
+    dec("0.002") // 0.2% price change
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct DynamicFairValueConfig {
+    /// Enable dynamic fair value adjustment
+    #[serde(default)]
+    pub enabled: bool,
+    /// Volatility lookback window in seconds
+    #[serde(default = "default_volatility_window_secs")]
+    pub volatility_window_secs: u64,
+    /// How much volatility affects fair value (0.0 = no effect, 1.0 = full effect)
+    #[serde(
+        default = "default_volatility_weight",
+        with = "rust_decimal::serde::float"
+    )]
+    pub volatility_weight: Decimal,
+}
+
+fn default_volatility_window_secs() -> u64 {
+    300 // 5 minutes
+}
+fn default_volatility_weight() -> Decimal {
+    dec("0.1")
 }
 
 fn default_extreme_threshold() -> Decimal {
@@ -124,6 +178,22 @@ pub(crate) struct RiskConfig {
     pub max_fok_retries: u32,
     #[serde(default = "default_fok_backoff_ms")]
     pub fok_backoff_ms: u64,
+    /// Consecutive loss limit (circuit breaker)
+    #[serde(default = "default_max_consecutive_losses")]
+    pub max_consecutive_losses: u32,
+    /// Daily loss limit in USDC (0 = disabled)
+    #[serde(
+        default = "default_daily_loss_limit",
+        with = "rust_decimal::serde::float"
+    )]
+    pub daily_loss_limit_usdc: Decimal,
+}
+
+fn default_max_consecutive_losses() -> u32 {
+    5
+}
+fn default_daily_loss_limit() -> Decimal {
+    dec("0") // disabled by default
 }
 
 fn default_max_fok_retries() -> u32 {
@@ -145,6 +215,22 @@ pub(crate) struct PollingConfig {
 
 fn default_status_interval_ms() -> u64 {
     10_000
+}
+
+// ─── Execution ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ExecutionConfig {
+    /// Price slippage tolerance (e.g., 0.01 = 1%)
+    #[serde(
+        default = "default_slippage_tolerance",
+        with = "rust_decimal::serde::float"
+    )]
+    pub slippage_tolerance: Decimal,
+}
+
+fn default_slippage_tolerance() -> Decimal {
+    dec("0.01") // 1%
 }
 
 // ─── Price Source ───
@@ -247,6 +333,8 @@ impl Default for StrategyConfig {
             extreme_threshold: dec("0.80"),
             fair_value: dec("0.50"),
             position_size_usdc: dec("1.0"),
+            momentum_filter: MomentumFilterConfig::default(),
+            dynamic_fair_value: DynamicFairValueConfig::default(),
         }
     }
 }
@@ -256,6 +344,16 @@ impl Default for RiskConfig {
         Self {
             max_fok_retries: 3,
             fok_backoff_ms: 3_000,
+            max_consecutive_losses: 5,
+            daily_loss_limit_usdc: dec("0"),
+        }
+    }
+}
+
+impl Default for ExecutionConfig {
+    fn default() -> Self {
+        Self {
+            slippage_tolerance: dec("0.01"),
         }
     }
 }
