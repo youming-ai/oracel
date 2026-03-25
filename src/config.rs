@@ -110,6 +110,12 @@ pub(crate) struct StrategyConfig {
     /// Minimum edge required to trade (default 0.05 = 5%)
     #[serde(default = "default_min_edge", with = "rust_decimal::serde::float")]
     pub min_edge: Decimal,
+    /// Minimum entry price to trade (avoid illiquid extreme prices)
+    #[serde(
+        default = "default_min_entry_price",
+        with = "rust_decimal::serde::float"
+    )]
+    pub min_entry_price: Decimal,
 }
 
 fn default_extreme_threshold() -> Decimal {
@@ -122,6 +128,9 @@ fn default_position_size_usdc() -> Decimal {
     dec("1.0")
 }
 fn default_min_edge() -> Decimal {
+    dec("0.05")
+}
+fn default_min_entry_price() -> Decimal {
     dec("0.05")
 }
 // ─── Risk ───
@@ -282,6 +291,7 @@ impl Default for StrategyConfig {
             fair_value: dec("0.50"),
             position_size_usdc: dec("1.0"),
             min_edge: dec("0.05"),
+            min_entry_price: dec("0.05"),
         }
     }
 }

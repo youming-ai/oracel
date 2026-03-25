@@ -17,7 +17,8 @@
     "extreme_threshold": 0.88,
     "fair_value": 0.5,
     "position_size_usdc": 1.0,
-    "min_edge": 0.05
+    "min_edge": 0.05,
+    "min_entry_price": 0.05
   },
   "risk": {
     "max_fak_retries": 3,

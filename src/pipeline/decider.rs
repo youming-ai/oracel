@@ -27,6 +27,7 @@ pub(crate) struct DeciderConfig {
     pub extreme_threshold: Decimal,
     pub fair_value: Decimal,
     pub min_edge: Decimal,
+    pub min_entry_price: Decimal,
     pub daily_loss_limit_usdc: Decimal,
 }
 
@@ -37,6 +38,7 @@ impl Default for DeciderConfig {
             extreme_threshold: decimal("0.80"),
             fair_value: decimal("0.50"),
             min_edge: decimal("0.05"),
+            min_entry_price: decimal("0.05"),
             daily_loss_limit_usdc: decimal("0"),
         }
     }
@@ -53,6 +55,7 @@ impl From<&crate::config::Config> for DeciderConfig {
             extreme_threshold: cfg.strategy.extreme_threshold,
             fair_value: cfg.strategy.fair_value,
             min_edge: cfg.strategy.min_edge,
+            min_entry_price: cfg.strategy.min_entry_price,
             daily_loss_limit_usdc: cfg.risk.daily_loss_limit_usdc,
         }
     }
@@ -189,6 +192,10 @@ pub(crate) fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderC
             "edge_too_low_{:.1}%",
             (edge * decimal("100")).round_dp(1)
         ));
+    }
+
+    if cheap_price < cfg.min_entry_price {
+        return Decision::Pass(format!("price_too_low_{:.3}", cheap_price));
     }
 
     let payoff_ratio = if cheap_price > Decimal::ZERO {
