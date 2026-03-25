@@ -60,9 +60,9 @@ use pipeline::signal::Direction;
 struct BotState {
     last_no_trade_reason: String,
     last_idle_reason: String,
-    fok_rejections: u32,
-    fok_market_ms: i64,
-    last_fok_rejection_ms: i64,
+    fak_rejections: u32,
+    fak_market_ms: i64,
+    last_fak_rejection_ms: i64,
 }
 
 impl BotState {
@@ -70,9 +70,9 @@ impl BotState {
         Self {
             last_no_trade_reason: String::new(),
             last_idle_reason: String::new(),
-            fok_rejections: 0,
-            fok_market_ms: 0,
-            last_fok_rejection_ms: 0,
+            fak_rejections: 0,
+            fak_market_ms: 0,
+            last_fak_rejection_ms: 0,
         }
     }
 
@@ -604,22 +604,22 @@ impl Bot {
                     return Ok(());
                 }
 
-                let fok_backoff_ms = self.config.risk.fok_backoff_ms as i64;
+                let fak_backoff_ms = self.config.risk.fak_backoff_ms as i64;
                 {
                     let st = self.state.read().await;
                     // Give up on this window after max retries
-                    if st.fok_market_ms == settlement_ms
-                        && st.fok_rejections >= self.config.risk.max_fok_retries
+                    if st.fak_market_ms == settlement_ms
+                        && st.fak_rejections >= self.config.risk.max_fak_retries
                     {
                         return Ok(());
                     }
-                    if st.last_fok_rejection_ms > 0 {
+                    if st.last_fak_rejection_ms > 0 {
                         let elapsed =
-                            chrono::Utc::now().timestamp_millis() - st.last_fok_rejection_ms;
-                        if elapsed < fok_backoff_ms {
+                            chrono::Utc::now().timestamp_millis() - st.last_fak_rejection_ms;
+                        if elapsed < fak_backoff_ms {
                             tracing::debug!(
-                                "[FOK] backoff {}ms remaining",
-                                fok_backoff_ms - elapsed
+                                "[FAK] backoff {}ms remaining",
+                                fak_backoff_ms - elapsed
                             );
                             return Ok(());
                         }
@@ -655,17 +655,17 @@ impl Bot {
 
                 if order.is_none() && self.config.trading.mode.is_live() {
                     let mut st = self.state.write().await;
-                    st.last_fok_rejection_ms = chrono::Utc::now().timestamp_millis();
-                    if st.fok_market_ms != settlement_ms {
-                        st.fok_rejections = 0;
-                        st.fok_market_ms = settlement_ms;
+                    st.last_fak_rejection_ms = chrono::Utc::now().timestamp_millis();
+                    if st.fak_market_ms != settlement_ms {
+                        st.fak_rejections = 0;
+                        st.fak_market_ms = settlement_ms;
                     }
-                    st.fok_rejections += 1;
-                    let max = self.config.risk.max_fok_retries;
-                    if st.fok_rejections >= max {
+                    st.fak_rejections += 1;
+                    let max = self.config.risk.max_fak_retries;
+                    if st.fak_rejections >= max {
                         tracing::warn!(
-                            "[EXEC] {} FOK rejections, giving up on this market window",
-                            st.fok_rejections
+                            "[EXEC] {} FAK rejections, giving up on this market window",
+                            st.fak_rejections
                         );
                     }
                 }

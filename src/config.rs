@@ -128,10 +128,10 @@ fn default_min_edge() -> Decimal {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RiskConfig {
-    #[serde(default = "default_max_fok_retries")]
-    pub max_fok_retries: u32,
-    #[serde(default = "default_fok_backoff_ms")]
-    pub fok_backoff_ms: u64,
+    #[serde(default = "default_max_fak_retries")]
+    pub max_fak_retries: u32,
+    #[serde(default = "default_fak_backoff_ms")]
+    pub fak_backoff_ms: u64,
     /// Daily loss limit in USDC (0 = disabled)
     #[serde(
         default = "default_daily_loss_limit",
@@ -144,11 +144,11 @@ fn default_daily_loss_limit() -> Decimal {
     dec("0") // disabled by default
 }
 
-fn default_max_fok_retries() -> u32 {
+fn default_max_fak_retries() -> u32 {
     3
 }
 
-fn default_fok_backoff_ms() -> u64 {
+fn default_fak_backoff_ms() -> u64 {
     3_000
 }
 
@@ -289,8 +289,8 @@ impl Default for StrategyConfig {
 impl Default for RiskConfig {
     fn default() -> Self {
         Self {
-            max_fok_retries: 3,
-            fok_backoff_ms: 3_000,
+            max_fak_retries: 3,
+            fak_backoff_ms: 3_000,
             daily_loss_limit_usdc: dec("0"),
         }
     }
@@ -401,7 +401,7 @@ impl Config {
             && self.strategy.extreme_threshold == defaults.strategy.extreme_threshold
             && self.strategy.fair_value == defaults.strategy.fair_value
             && self.strategy.position_size_usdc == defaults.strategy.position_size_usdc
-            && self.risk.max_fok_retries == defaults.risk.max_fok_retries
+            && self.risk.max_fak_retries == defaults.risk.max_fak_retries
             && self.polling.signal_interval_ms == defaults.polling.signal_interval_ms
             && self.polling.status_interval_ms == defaults.polling.status_interval_ms
     }

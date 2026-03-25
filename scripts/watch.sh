@@ -4,9 +4,13 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MODE="${1:-paper}"
-LOG="${ROOT}/logs/${MODE}/bot.log"
-STATE="${ROOT}/logs/${MODE}/state.json"
 SEC="${2:-3}"
+
+LOG_DIR="${ROOT}/logs/${MODE}"
+STATE="${LOG_DIR}/state.json"
+
+LOG=$(ls -t "${LOG_DIR}"/bot.log* 2>/dev/null | head -1)
+[ -z "${LOG:-}" ] && LOG="${LOG_DIR}/bot.log"
 
 G=$'\033[32m'; R=$'\033[31m'; Y=$'\033[33m'; C=$'\033[36m'
 B=$'\033[1m'; D=$'\033[2m'; N=$'\033[0m'
