@@ -47,6 +47,12 @@ struct PriceTick {
     timestamp_ms: i64,
 }
 
+pub(crate) struct SpotMomentumSnapshot {
+    pub latest: Decimal,
+    pub price_30s_ago: Option<Decimal>,
+    pub price_60s_ago: Option<Decimal>,
+}
+
 pub(crate) enum PriceClient {
     Binance(Arc<BinanceClient>),
     Coinbase(Arc<CoinbaseClient>),
@@ -86,6 +92,32 @@ impl PriceSource {
     #[inline]
     pub(crate) async fn last_tick_ms(&self) -> Option<i64> {
         self.buffer.read().await.back().map(|t| t.timestamp_ms)
+    }
+
+    #[inline]
+    pub(crate) async fn momentum_snapshot(&self) -> Option<SpotMomentumSnapshot> {
+        let buffer = self.buffer.read().await;
+        let latest_tick = *buffer.back()?;
+
+        let cutoff_30s = latest_tick.timestamp_ms - 30_000;
+        let cutoff_60s = latest_tick.timestamp_ms - 60_000;
+
+        let price_30s_ago = buffer
+            .iter()
+            .rev()
+            .find(|tick| tick.timestamp_ms <= cutoff_30s)
+            .map(|tick| tick.price);
+        let price_60s_ago = buffer
+            .iter()
+            .rev()
+            .find(|tick| tick.timestamp_ms <= cutoff_60s)
+            .map(|tick| tick.price);
+
+        Some(SpotMomentumSnapshot {
+            latest: latest_tick.price,
+            price_30s_ago,
+            price_60s_ago,
+        })
     }
 
     pub(crate) async fn buffer_len(&self) -> usize {
@@ -167,5 +199,97 @@ impl PriceSource {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rust_decimal::Decimal;
+
+    use super::{PriceSource, PriceSourceType, PriceTick};
+
+    fn d(value: &str) -> Decimal {
+        Decimal::from_str_exact(value).expect("valid decimal")
+    }
+
+    fn test_source(max: usize) -> PriceSource {
+        PriceSource::new(PriceSourceType::Binance, "BTCUSDT", max)
+    }
+
+    async fn push_tick(source: &PriceSource, price: Decimal, timestamp_ms: i64) {
+        source.buffer.write().await.push_back(PriceTick {
+            price,
+            timestamp_ms,
+        });
+    }
+
+    #[tokio::test]
+    async fn test_momentum_snapshot_returns_latest_and_lookbacks() {
+        let source = test_source(16);
+        push_tick(&source, d("100.0"), 1_000).await;
+        push_tick(&source, d("101.0"), 31_000).await;
+        push_tick(&source, d("102.0"), 61_000).await;
+
+        let snapshot = source
+            .momentum_snapshot()
+            .await
+            .expect("snapshot should exist");
+
+        assert_eq!(snapshot.latest, d("102.0"));
+        assert_eq!(snapshot.price_30s_ago, Some(d("101.0")));
+        assert_eq!(snapshot.price_60s_ago, Some(d("100.0")));
+    }
+
+    #[tokio::test]
+    async fn test_momentum_snapshot_returns_none_for_missing_60s_history() {
+        let source = test_source(16);
+        push_tick(&source, d("200.0"), 15_000).await;
+        push_tick(&source, d("201.0"), 45_000).await;
+
+        let snapshot = source
+            .momentum_snapshot()
+            .await
+            .expect("snapshot should exist");
+
+        assert_eq!(snapshot.latest, d("201.0"));
+        assert_eq!(snapshot.price_30s_ago, Some(d("200.0")));
+        assert_eq!(snapshot.price_60s_ago, None);
+    }
+
+    #[tokio::test]
+    async fn test_momentum_snapshot_uses_nearest_older_tick() {
+        let source = test_source(16);
+        push_tick(&source, d("300.0"), 10_000).await;
+        push_tick(&source, d("301.0"), 29_500).await;
+        push_tick(&source, d("302.0"), 40_000).await;
+        push_tick(&source, d("303.0"), 69_000).await;
+
+        let snapshot = source
+            .momentum_snapshot()
+            .await
+            .expect("snapshot should exist");
+
+        assert_eq!(snapshot.latest, d("303.0"));
+        assert_eq!(snapshot.price_30s_ago, Some(d("301.0")));
+        assert_eq!(snapshot.price_60s_ago, None);
+    }
+
+    #[tokio::test]
+    async fn test_momentum_snapshot_handles_irregular_tick_spacing() {
+        let source = test_source(16);
+        push_tick(&source, d("400.0"), 1_000).await;
+        push_tick(&source, d("401.0"), 1_500).await;
+        push_tick(&source, d("402.0"), 20_000).await;
+        push_tick(&source, d("403.0"), 45_000).await;
+        push_tick(&source, d("404.0"), 120_000).await;
+
+        let snapshot = source
+            .momentum_snapshot()
+            .await
+            .expect("snapshot should exist");
+
+        assert_eq!(snapshot.latest, d("404.0"));
+        assert_eq!(snapshot.price_30s_ago, Some(d("403.0")));
+        assert_eq!(snapshot.price_60s_ago, Some(d("403.0")));
     }
 }

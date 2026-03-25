@@ -320,15 +320,15 @@ impl Default for PolymarketConfig {
 impl Default for StrategyConfig {
     fn default() -> Self {
         Self {
-            extreme_threshold: dec("0.80"),
-            fair_value: dec("0.50"),
-            position_size_usdc: dec("1.0"),
-            min_edge: dec("0.05"),
-            min_entry_price: dec("0.08"),
-            max_entry_price: dec("0.12"),
-            min_ttl_for_entry_ms: 120_000,
-            spot_momentum_30s_threshold: dec("40"),
-            spot_momentum_60s_threshold: dec("70"),
+            extreme_threshold: default_extreme_threshold(),
+            fair_value: default_fair_value(),
+            position_size_usdc: default_position_size_usdc(),
+            min_edge: default_min_edge(),
+            min_entry_price: default_min_entry_price(),
+            max_entry_price: default_max_entry_price(),
+            min_ttl_for_entry_ms: default_min_ttl_for_entry_ms(),
+            spot_momentum_30s_threshold: default_spot_momentum_30s_threshold(),
+            spot_momentum_60s_threshold: default_spot_momentum_60s_threshold(),
         }
     }
 }
@@ -579,11 +579,38 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_rejects_non_positive_spot_momentum_thresholds() {
+    fn test_validate_rejects_non_positive_spot_momentum_30s_threshold() {
         let mut cfg = Config::default();
         cfg.strategy.spot_momentum_30s_threshold = Decimal::ZERO;
 
         let err = cfg.validate().expect_err("expected validation failure");
         assert!(err.to_string().contains("spot_momentum_30s_threshold"));
+    }
+
+    #[test]
+    fn test_validate_rejects_non_positive_spot_momentum_60s_threshold() {
+        let mut cfg = Config::default();
+        cfg.strategy.spot_momentum_60s_threshold = Decimal::ZERO;
+
+        let err = cfg.validate().expect_err("expected validation failure");
+        assert!(err.to_string().contains("spot_momentum_60s_threshold"));
+    }
+
+    #[test]
+    fn test_validate_rejects_non_positive_min_entry_price() {
+        let mut cfg = Config::default();
+        cfg.strategy.min_entry_price = Decimal::ZERO;
+
+        let err = cfg.validate().expect_err("expected validation failure");
+        assert!(err.to_string().contains("min_entry_price"));
+    }
+
+    #[test]
+    fn test_validate_rejects_max_entry_price_at_or_above_one() {
+        let mut cfg = Config::default();
+        cfg.strategy.max_entry_price = Decimal::ONE;
+
+        let err = cfg.validate().expect_err("expected validation failure");
+        assert!(err.to_string().contains("max_entry_price"));
     }
 }
