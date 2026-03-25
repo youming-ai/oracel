@@ -116,6 +116,27 @@ pub(crate) struct StrategyConfig {
         with = "rust_decimal::serde::float"
     )]
     pub min_entry_price: Decimal,
+    /// Maximum entry price to trade (avoid illiquid extreme prices)
+    #[serde(
+        default = "default_max_entry_price",
+        with = "rust_decimal::serde::float"
+    )]
+    pub max_entry_price: Decimal,
+    /// Minimum time-to-live for market to enter a trade (ms)
+    #[serde(default = "default_min_ttl_for_entry_ms")]
+    pub min_ttl_for_entry_ms: u64,
+    /// Spot price momentum threshold over 30s (in USD)
+    #[serde(
+        default = "default_spot_momentum_30s_threshold",
+        with = "rust_decimal::serde::float"
+    )]
+    pub spot_momentum_30s_threshold: Decimal,
+    /// Spot price momentum threshold over 60s (in USD)
+    #[serde(
+        default = "default_spot_momentum_60s_threshold",
+        with = "rust_decimal::serde::float"
+    )]
+    pub spot_momentum_60s_threshold: Decimal,
 }
 
 fn default_extreme_threshold() -> Decimal {
@@ -131,7 +152,19 @@ fn default_min_edge() -> Decimal {
     dec("0.05")
 }
 fn default_min_entry_price() -> Decimal {
-    dec("0.05")
+    dec("0.08")
+}
+fn default_max_entry_price() -> Decimal {
+    dec("0.12")
+}
+fn default_min_ttl_for_entry_ms() -> u64 {
+    120_000
+}
+fn default_spot_momentum_30s_threshold() -> Decimal {
+    dec("40")
+}
+fn default_spot_momentum_60s_threshold() -> Decimal {
+    dec("70")
 }
 // ─── Risk ───
 
@@ -287,11 +320,15 @@ impl Default for PolymarketConfig {
 impl Default for StrategyConfig {
     fn default() -> Self {
         Self {
-            extreme_threshold: dec("0.80"),
-            fair_value: dec("0.50"),
-            position_size_usdc: dec("1.0"),
-            min_edge: dec("0.05"),
-            min_entry_price: dec("0.05"),
+            extreme_threshold: default_extreme_threshold(),
+            fair_value: default_fair_value(),
+            position_size_usdc: default_position_size_usdc(),
+            min_edge: default_min_edge(),
+            min_entry_price: default_min_entry_price(),
+            max_entry_price: default_max_entry_price(),
+            min_ttl_for_entry_ms: default_min_ttl_for_entry_ms(),
+            spot_momentum_30s_threshold: default_spot_momentum_30s_threshold(),
+            spot_momentum_60s_threshold: default_spot_momentum_60s_threshold(),
         }
     }
 }
@@ -383,6 +420,23 @@ impl Config {
         if self.strategy.min_edge < zero || self.strategy.min_edge >= one {
             anyhow::bail!("strategy.min_edge must be in [0, 1)");
         }
+        if !(zero < self.strategy.min_entry_price
+            && self.strategy.min_entry_price < self.strategy.max_entry_price
+            && self.strategy.max_entry_price < one)
+        {
+            anyhow::bail!(
+                "strategy.min_entry_price and max_entry_price must satisfy: 0 < min_entry_price < max_entry_price < 1"
+            );
+        }
+        if self.strategy.min_ttl_for_entry_ms == 0 {
+            anyhow::bail!("strategy.min_ttl_for_entry_ms must be > 0");
+        }
+        if self.strategy.spot_momentum_30s_threshold <= zero {
+            anyhow::bail!("strategy.spot_momentum_30s_threshold must be > 0");
+        }
+        if self.strategy.spot_momentum_60s_threshold <= zero {
+            anyhow::bail!("strategy.spot_momentum_60s_threshold must be > 0");
+        }
         if self.price_source.source.expects_dash_symbol() {
             if !is_valid_coinbase_symbol(&self.price_source.symbol) {
                 anyhow::bail!(
@@ -411,6 +465,14 @@ impl Config {
             && self.strategy.extreme_threshold == defaults.strategy.extreme_threshold
             && self.strategy.fair_value == defaults.strategy.fair_value
             && self.strategy.position_size_usdc == defaults.strategy.position_size_usdc
+            && self.strategy.min_edge == defaults.strategy.min_edge
+            && self.strategy.min_entry_price == defaults.strategy.min_entry_price
+            && self.strategy.max_entry_price == defaults.strategy.max_entry_price
+            && self.strategy.min_ttl_for_entry_ms == defaults.strategy.min_ttl_for_entry_ms
+            && self.strategy.spot_momentum_30s_threshold
+                == defaults.strategy.spot_momentum_30s_threshold
+            && self.strategy.spot_momentum_60s_threshold
+                == defaults.strategy.spot_momentum_60s_threshold
             && self.risk.max_fak_retries == defaults.risk.max_fak_retries
             && self.polling.signal_interval_ms == defaults.polling.signal_interval_ms
             && self.polling.status_interval_ms == defaults.polling.status_interval_ms
@@ -495,5 +557,60 @@ mod tests {
         let mut cfg = Config::default();
         cfg.strategy.position_size_usdc = Decimal::ZERO;
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_max_entry_price_not_above_min() {
+        let mut cfg = Config::default();
+        cfg.strategy.min_entry_price = dec("0.08");
+        cfg.strategy.max_entry_price = dec("0.08");
+
+        let err = cfg.validate().expect_err("expected validation failure");
+        assert!(err.to_string().contains("min_entry_price"));
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_min_ttl_for_entry_ms() {
+        let mut cfg = Config::default();
+        cfg.strategy.min_ttl_for_entry_ms = 0;
+
+        let err = cfg.validate().expect_err("expected validation failure");
+        assert!(err.to_string().contains("min_ttl_for_entry_ms"));
+    }
+
+    #[test]
+    fn test_validate_rejects_non_positive_spot_momentum_30s_threshold() {
+        let mut cfg = Config::default();
+        cfg.strategy.spot_momentum_30s_threshold = Decimal::ZERO;
+
+        let err = cfg.validate().expect_err("expected validation failure");
+        assert!(err.to_string().contains("spot_momentum_30s_threshold"));
+    }
+
+    #[test]
+    fn test_validate_rejects_non_positive_spot_momentum_60s_threshold() {
+        let mut cfg = Config::default();
+        cfg.strategy.spot_momentum_60s_threshold = Decimal::ZERO;
+
+        let err = cfg.validate().expect_err("expected validation failure");
+        assert!(err.to_string().contains("spot_momentum_60s_threshold"));
+    }
+
+    #[test]
+    fn test_validate_rejects_non_positive_min_entry_price() {
+        let mut cfg = Config::default();
+        cfg.strategy.min_entry_price = Decimal::ZERO;
+
+        let err = cfg.validate().expect_err("expected validation failure");
+        assert!(err.to_string().contains("min_entry_price"));
+    }
+
+    #[test]
+    fn test_validate_rejects_max_entry_price_at_or_above_one() {
+        let mut cfg = Config::default();
+        cfg.strategy.max_entry_price = Decimal::ONE;
+
+        let err = cfg.validate().expect_err("expected validation failure");
+        assert!(err.to_string().contains("max_entry_price"));
     }
 }

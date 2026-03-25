@@ -564,11 +564,24 @@ impl Bot {
         let account_read = self.account.read().await.clone();
         let decider_cfg = self.decider_cfg();
         let remaining_ms = settlement_ms - Utc::now().timestamp_millis();
+        let spot_confirmation = self
+            .price_source
+            .momentum_snapshot()
+            .await
+            .map(|snapshot| decider::SpotConfirmationContext {
+                momentum_30s: snapshot.price_30s_ago.map(|price| snapshot.latest - price),
+                momentum_60s: snapshot.price_60s_ago.map(|price| snapshot.latest - price),
+            })
+            .unwrap_or(decider::SpotConfirmationContext {
+                momentum_30s: None,
+                momentum_60s: None,
+            });
 
         let decide_ctx = decider::DecideContext {
             market_yes: poly_yes_dec,
             market_no: poly_no_dec,
             remaining_ms,
+            spot_confirmation,
         };
 
         let decision = decider::decide(&decide_ctx, &account_read, &decider_cfg);

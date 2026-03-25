@@ -15,10 +15,10 @@ The edge comes from buying the cheap side of the market when the crowd overreact
 ```text
 edge = fair_value - cheap_side_price
 
-Example: market prices YES at 0.85, NO at 0.15
-  → cheap side (NO/DOWN) = 0.15
-  → edge = 0.50 - 0.15 = 0.35 (35%)
-  → buy DOWN at 0.15, payout $1 per share if correct
+Example: market prices YES at 0.88, NO at 0.12
+  → cheap side (NO/DOWN) = 0.12
+  → edge = 0.50 - 0.12 = 0.38 (38%)
+  → buy DOWN at 0.12, payout $1 per share if correct
 ```
 
 ## 2. Price Sources
@@ -47,10 +47,12 @@ The bot reads yes/no prices from the Polymarket CLOB and computes market bias:
 ```text
 mkt_up = yes_price / (yes_price + no_price)
 
-if mkt_up > extreme_threshold (default 0.80): buy DOWN
-if mkt_up < 1 - extreme_threshold (default 0.20): buy UP
+if mkt_up > extreme_threshold (default 0.80): create DOWN candidate
+if mkt_up < 1 - extreme_threshold (default 0.20): create UP candidate
 otherwise: no trade (market is balanced)
 ```
+
+An extreme quote is only the first gate. It creates a candidate trade that must pass additional entry filters before execution.
 
 ### Time-Weighted Threshold
 
@@ -84,36 +86,60 @@ tick()
  ├── 2. Staleness check: reject if latest price tick is older than 30 seconds
  ├── 3. Market readiness: skip if market token IDs have not been discovered yet
  ├── 4. Time-to-live: skip if < 30 seconds remain before settlement
- ├── 5. Extreme check: skip if market sentiment is not extreme (pre-filter)
  │
  └── decide()
-      ├── 6. Balance check: skip if balance ≤ 0
-      ├── 7. Market data: skip if yes or no price is missing or ≤ 0.01
-      ├── 8. Spread check: skip if yes + no < 0.80 (wide spread)
-      ├── 9. Time-weighted extreme: threshold ramps up near settlement
+      ├── 5. Balance check: skip if balance ≤ 0
+      ├── 6. Market data: skip if yes or no price is missing or ≤ 0.01
+      ├── 7. Spread check: skip if yes + no < 0.80 (wide spread)
+      ├── 8. Time-weighted extreme: evaluate extreme threshold inside decide()
+      ├── 9. Candidate creation: extreme quote creates directional candidate
+      ├── 10. Min-edge gate: require fair_value - candidate_entry_price >= min_edge
+      ├── 11. Entry price range: candidate quote must be within strategy min/max
+      ├── 12. Strategy TTL floor: candidate must satisfy min_ttl_for_entry_ms
+      ├── 13. Spot momentum confirmation: candidate must pass 30s and 60s checks
       │
-      └── TRADE: size the position and execute
+      └── TRADE: size the position and execute only after all candidate filters pass
 ```
+
+There is no separate pre-decide extreme gate in `tick()`: the extreme filter runs inside `decide()`, where a qualifying quote becomes a trade candidate and then passes the remaining entry filters.
 
 The bot trades at most once per 5-minute settlement window.
 
-## 5. Position Sizing
+### Spot Momentum Confirmation
 
-Position sizing uses a fixed amount per trade:
+Entry confirmation uses directional spot momentum over two windows:
 
 ```text
-size_usdc = position_size_usdc (default $1.0)
-shares = floor(size_usdc / entry_price)
+momentum_30s = latest_spot_price - spot_price_30s_ago
+momentum_60s = latest_spot_price - spot_price_60s_ago
+```
+
+Units are spot price points (USD price delta on BTC spot), not percentages.
+
+- For `DOWN` candidates, reject when momentum is accelerating up (positive 30s/60s deltas above configured thresholds)
+- For `UP` candidates, reject when momentum is accelerating down (negative 30s/60s deltas beyond configured thresholds in absolute direction)
+
+## 5. Position Sizing
+
+Position sizing starts from the configured target amount per trade:
+
+```text
+shares = floor(position_size_usdc / entry_price)
+cost = shares * entry_price
+
+if cost < 1.0:
+    shares = ceil(1.0 / entry_price)
+    cost = shares * entry_price
 ```
 
 Example at different entry prices:
 
-| Entry Price | Size (USDC) | Shares | Win payout | Loss |
-| --- | --- | --- | --- | --- |
-| 0.07 | $1.0 | 14 | $14 | -$1 |
-| 0.15 | $1.0 | 6 | $6 | -$1 |
+| Entry Price | Configured Size | Initial floor shares | Final shares | Final cost | Win payout | Loss |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0.08 | $1.0 | floor(1.0 / 0.08) = 12 | 13 (bumped) | $1.04 | $13 | -$1.04 |
+| 0.12 | $0.75 | floor(0.75 / 0.12) = 6 | 9 (bumped) | $1.08 | $9 | -$1.08 |
 
-Shares are floored to whole numbers so that the CLOB order amount stays within its 2-decimal-place precision limit. **Orders resulting in 0 shares are rejected** to prevent phantom trades.
+Shares are floored to whole numbers so that the CLOB order amount stays within its 2-decimal-place precision limit. If the resulting cost is below $1, shares are bumped to `ceil(1 / entry_price)`, so final cost can exceed configured `position_size_usdc`. **Orders resulting in 0 shares at the initial floor step are rejected** to prevent phantom trades.
 
 ## 6. Risk Controls
 
@@ -123,7 +149,8 @@ The bot implements basic risk controls:
 | --- | --- | --- |
 | One trade per window | At most one trade per 5-minute settlement window | Hard limit |
 | Zero balance guard | Reject trades when balance ≤ 0 | Hard block |
-| FOK retries | Retry failed FOK orders up to `max_fok_retries` times | Automatic retry |
+| Daily loss limit gate | If `daily_loss_limit_usdc > 0` and `daily_pnl < -daily_loss_limit_usdc`, skip new trades | Hard block (`0` disables) |
+| FAK retries | Retry failed FAK orders up to `max_fak_retries` times with `fak_backoff_ms` delay | Automatic retry |
 
 **Note**: The bot focuses on capturing opportunities in the brief 5-minute window. Balance is the primary protection mechanism.
 
@@ -133,16 +160,17 @@ The bot implements basic risk controls:
 
 - Does not send real orders to Polymarket
 - Generates a local UUID as the order ID
+- Applies the same slippage-adjusted buy price as live mode for simulated fills/costs
 - Tracks the same `filled_shares` and `cost` fields as live mode
 
 ### Live Mode
 
 - Uses an authenticated Polymarket CLOB client (SDK-based)
-- Places a Fill-or-Kill (FOK) limit buy at the current mid price
+- Places a Fill-and-Kill (FAK) limit buy at the same slippage-adjusted price used in paper mode: `buy_price = mid_price * (1 + slippage_tolerance)` (capped at `0.99`)
 - Computes `filled_shares = floor(size_usdc / price)` and sends that as the order size
 - **Zero-share guard**: If computed shares == 0, the order is rejected
-- Actual cost is `filled_shares × price`, which may be slightly less than the requested `size_usdc` due to floor truncation
-- If the FOK order is rejected (no liquidity at the requested price), the trade is skipped gracefully
+- Actual cost is `filled_shares × price`, which may be slightly less than `effective_size_usdc` due to floor truncation, or higher than configured `position_size_usdc` when the order is bumped to the $1 minimum
+- If the FAK order is rejected (no liquidity at the requested price), the trade is skipped gracefully
 - The on-chain USDC balance is re-queried every tick to keep local accounting in sync with the wallet
 
 ### Extreme Price Guard

@@ -28,6 +28,10 @@ pub(crate) struct DeciderConfig {
     pub fair_value: Decimal,
     pub min_edge: Decimal,
     pub min_entry_price: Decimal,
+    pub max_entry_price: Decimal,
+    pub min_ttl_for_entry_ms: u64,
+    pub spot_momentum_30s_threshold: Decimal,
+    pub spot_momentum_60s_threshold: Decimal,
     pub daily_loss_limit_usdc: Decimal,
 }
 
@@ -38,7 +42,11 @@ impl Default for DeciderConfig {
             extreme_threshold: decimal("0.80"),
             fair_value: decimal("0.50"),
             min_edge: decimal("0.05"),
-            min_entry_price: decimal("0.05"),
+            min_entry_price: decimal("0.08"),
+            max_entry_price: decimal("0.12"),
+            min_ttl_for_entry_ms: 120_000,
+            spot_momentum_30s_threshold: decimal("40"),
+            spot_momentum_60s_threshold: decimal("70"),
             daily_loss_limit_usdc: decimal("0"),
         }
     }
@@ -46,6 +54,10 @@ impl Default for DeciderConfig {
 
 fn decimal(value: &str) -> Decimal {
     Decimal::from_str_exact(value).expect("valid decimal literal")
+}
+
+fn integer_suffix(value: Decimal) -> String {
+    value.abs().trunc().to_string()
 }
 
 impl From<&crate::config::Config> for DeciderConfig {
@@ -56,6 +68,10 @@ impl From<&crate::config::Config> for DeciderConfig {
             fair_value: cfg.strategy.fair_value,
             min_edge: cfg.strategy.min_edge,
             min_entry_price: cfg.strategy.min_entry_price,
+            max_entry_price: cfg.strategy.max_entry_price,
+            min_ttl_for_entry_ms: cfg.strategy.min_ttl_for_entry_ms,
+            spot_momentum_30s_threshold: cfg.strategy.spot_momentum_30s_threshold,
+            spot_momentum_60s_threshold: cfg.strategy.spot_momentum_60s_threshold,
             daily_loss_limit_usdc: cfg.risk.daily_loss_limit_usdc,
         }
     }
@@ -122,10 +138,17 @@ impl AccountState {
 }
 
 /// Input context for the decide function
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SpotConfirmationContext {
+    pub momentum_30s: Option<Decimal>,
+    pub momentum_60s: Option<Decimal>,
+}
+
 pub(crate) struct DecideContext {
     pub market_yes: Option<Decimal>,
     pub market_no: Option<Decimal>,
     pub remaining_ms: i64,
+    pub spot_confirmation: SpotConfirmationContext,
 }
 
 pub(crate) fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderConfig) -> Decision {
@@ -135,8 +158,8 @@ pub(crate) fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderC
 
     if cfg.daily_loss_limit_usdc > Decimal::ZERO && account.daily_pnl < -cfg.daily_loss_limit_usdc {
         return Decision::Pass(format!(
-            "daily_loss_limit_{:.0}",
-            account.daily_pnl.round_dp(0)
+            "daily_loss_limit_{}",
+            integer_suffix(account.daily_pnl)
         ));
     }
 
@@ -189,13 +212,60 @@ pub(crate) fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderC
 
     if edge < cfg.min_edge {
         return Decision::Pass(format!(
-            "edge_too_low_{:.1}%",
-            (edge * decimal("100")).round_dp(1)
+            "edge_too_low_{}",
+            integer_suffix(edge * decimal("100"))
         ));
     }
 
-    if cheap_price < cfg.min_entry_price {
-        return Decision::Pass(format!("price_too_low_{:.3}", cheap_price));
+    if cheap_price < cfg.min_entry_price || cheap_price > cfg.max_entry_price {
+        let cents = integer_suffix(cheap_price * decimal("100"));
+        return Decision::Pass(format!("price_out_of_range_{cents}"));
+    }
+
+    let min_ttl_for_entry_ms = i64::try_from(cfg.min_ttl_for_entry_ms).unwrap_or(i64::MAX);
+    if ctx.remaining_ms < min_ttl_for_entry_ms {
+        let seconds = ctx.remaining_ms.unsigned_abs() / 1000;
+        return Decision::Pass(format!("ttl_below_entry_floor_{seconds}"));
+    }
+
+    let spot_30s = match ctx.spot_confirmation.momentum_30s {
+        Some(momentum) => momentum,
+        None => return Decision::Pass("spot_confirmation_unavailable".into()),
+    };
+    let spot_60s = match ctx.spot_confirmation.momentum_60s {
+        Some(momentum) => momentum,
+        None => return Decision::Pass("spot_confirmation_unavailable".into()),
+    };
+
+    match base_direction {
+        Direction::Down => {
+            if spot_30s > cfg.spot_momentum_30s_threshold {
+                return Decision::Pass(format!(
+                    "spot_up_accelerating_30s_{}",
+                    integer_suffix(spot_30s)
+                ));
+            }
+            if spot_60s > cfg.spot_momentum_60s_threshold {
+                return Decision::Pass(format!(
+                    "spot_up_accelerating_60s_{}",
+                    integer_suffix(spot_60s)
+                ));
+            }
+        }
+        Direction::Up => {
+            if spot_30s < -cfg.spot_momentum_30s_threshold {
+                return Decision::Pass(format!(
+                    "spot_down_accelerating_30s_{}",
+                    integer_suffix(spot_30s)
+                ));
+            }
+            if spot_60s < -cfg.spot_momentum_60s_threshold {
+                return Decision::Pass(format!(
+                    "spot_down_accelerating_60s_{}",
+                    integer_suffix(spot_60s)
+                ));
+            }
+        }
     }
 
     let payoff_ratio = if cheap_price > Decimal::ZERO {
@@ -220,6 +290,18 @@ mod tests {
     fn cfg_for_threshold_test() -> DeciderConfig {
         DeciderConfig {
             extreme_threshold: d("0.64"),
+            max_entry_price: d("0.50"),
+            ..DeciderConfig::default()
+        }
+    }
+
+    fn cfg_for_entry_filter_test() -> DeciderConfig {
+        DeciderConfig {
+            min_entry_price: d("0.08"),
+            max_entry_price: d("0.12"),
+            min_ttl_for_entry_ms: 120_000,
+            spot_momentum_30s_threshold: d("40"),
+            spot_momentum_60s_threshold: d("70"),
             ..DeciderConfig::default()
         }
     }
@@ -229,6 +311,10 @@ mod tests {
             market_yes: Some(d("0.85")),
             market_no: Some(d("0.15")),
             remaining_ms: 240_000,
+            spot_confirmation: SpotConfirmationContext {
+                momentum_30s: Some(Decimal::ZERO),
+                momentum_60s: Some(Decimal::ZERO),
+            },
         }
     }
 
@@ -269,7 +355,10 @@ mod tests {
     #[test]
     fn test_trade_when_extreme_bullish() {
         let account = AccountState::new(d("1000"));
-        let cfg = DeciderConfig::default();
+        let cfg = DeciderConfig {
+            max_entry_price: d("0.50"),
+            ..DeciderConfig::default()
+        };
         let ctx = default_ctx();
 
         let decision = decide(&ctx, &account, &cfg);
@@ -302,7 +391,7 @@ mod tests {
         let decision = decide(&ctx, &account, &cfg);
 
         match decision {
-            Decision::Pass(reason) => assert!(reason.starts_with("daily_loss_limit")),
+            Decision::Pass(reason) => assert_eq!(reason, "daily_loss_limit_15"),
             Decision::Trade { .. } => panic!("expected pass but got trade"),
         }
     }
@@ -368,7 +457,7 @@ mod tests {
         let decision = decide(&ctx, &account, &cfg);
 
         match decision {
-            Decision::Pass(reason) => assert!(reason.starts_with("edge_too_low")),
+            Decision::Pass(reason) => assert_eq!(reason, "edge_too_low_35"),
             Decision::Trade { .. } => panic!("expected pass due to low edge"),
         }
     }
@@ -378,6 +467,7 @@ mod tests {
         let account = AccountState::new(d("1000"));
         let mut cfg = DeciderConfig {
             min_edge: d("0.05"),
+            max_entry_price: d("0.50"),
             ..DeciderConfig::default()
         };
         cfg.extreme_threshold = d("0.64");
@@ -391,6 +481,176 @@ mod tests {
         match decision {
             Decision::Trade { .. } => {}
             Decision::Pass(reason) => panic!("expected trade but got pass: {}", reason),
+        }
+    }
+
+    #[test]
+    fn test_pass_when_entry_price_below_range_price_out_of_range() {
+        let account = AccountState::new(d("1000"));
+        let cfg = cfg_for_entry_filter_test();
+        let mut ctx = default_ctx();
+        ctx.market_yes = Some(d("0.93"));
+        ctx.market_no = Some(d("0.07"));
+
+        let decision = decide(&ctx, &account, &cfg);
+
+        match decision {
+            Decision::Pass(reason) => assert_eq!(reason, "price_out_of_range_7"),
+            Decision::Trade { .. } => panic!("expected pass due to entry price below range"),
+        }
+    }
+
+    #[test]
+    fn test_pass_when_entry_price_above_range_price_out_of_range() {
+        let account = AccountState::new(d("1000"));
+        let cfg = cfg_for_entry_filter_test();
+        let mut ctx = default_ctx();
+        ctx.market_yes = Some(d("0.87"));
+        ctx.market_no = Some(d("0.13"));
+
+        let decision = decide(&ctx, &account, &cfg);
+
+        match decision {
+            Decision::Pass(reason) => assert_eq!(reason, "price_out_of_range_13"),
+            Decision::Trade { .. } => panic!("expected pass due to entry price above range"),
+        }
+    }
+
+    #[test]
+    fn test_pass_when_remaining_ms_below_entry_floor_ttl_below_entry_floor() {
+        let account = AccountState::new(d("1000"));
+        let cfg = cfg_for_entry_filter_test();
+        let mut ctx = default_ctx();
+        ctx.market_yes = Some(d("0.91"));
+        ctx.market_no = Some(d("0.09"));
+        ctx.remaining_ms = 119_000;
+
+        let decision = decide(&ctx, &account, &cfg);
+
+        match decision {
+            Decision::Pass(reason) => assert_eq!(reason, "ttl_below_entry_floor_119"),
+            Decision::Trade { .. } => panic!("expected pass due to ttl floor"),
+        }
+    }
+
+    #[test]
+    fn test_pass_when_remaining_ms_negative_ttl_suffix_is_unsigned() {
+        let account = AccountState::new(d("1000"));
+        let cfg = cfg_for_entry_filter_test();
+        let mut ctx = default_ctx();
+        ctx.market_yes = Some(d("0.91"));
+        ctx.market_no = Some(d("0.09"));
+        ctx.remaining_ms = -1_000;
+
+        let decision = decide(&ctx, &account, &cfg);
+
+        match decision {
+            Decision::Pass(reason) => assert_eq!(reason, "ttl_below_entry_floor_1"),
+            Decision::Trade { .. } => panic!("expected pass due to ttl floor"),
+        }
+    }
+
+    #[test]
+    fn test_pass_when_down_trade_spot_still_accelerates_up_spot_up_accelerating() {
+        let account = AccountState::new(d("1000"));
+        let cfg = cfg_for_entry_filter_test();
+        let mut ctx = default_ctx();
+        ctx.market_yes = Some(d("0.90"));
+        ctx.market_no = Some(d("0.10"));
+        ctx.spot_confirmation = SpotConfirmationContext {
+            momentum_30s: Some(d("45")),
+            momentum_60s: Some(Decimal::ZERO),
+        };
+
+        let decision = decide(&ctx, &account, &cfg);
+
+        match decision {
+            Decision::Pass(reason) => assert_eq!(reason, "spot_up_accelerating_30s_45"),
+            Decision::Trade { .. } => panic!("expected pass due to up acceleration"),
+        }
+    }
+
+    #[test]
+    fn test_pass_when_up_trade_spot_still_accelerates_down_spot_down_accelerating() {
+        let account = AccountState::new(d("1000"));
+        let cfg = cfg_for_entry_filter_test();
+        let mut ctx = default_ctx();
+        ctx.market_yes = Some(d("0.10"));
+        ctx.market_no = Some(d("0.90"));
+        ctx.spot_confirmation = SpotConfirmationContext {
+            momentum_30s: Some(d("-45")),
+            momentum_60s: Some(Decimal::ZERO),
+        };
+
+        let decision = decide(&ctx, &account, &cfg);
+
+        match decision {
+            Decision::Pass(reason) => assert_eq!(reason, "spot_down_accelerating_30s_45"),
+            Decision::Trade { .. } => panic!("expected pass due to down acceleration"),
+        }
+    }
+
+    #[test]
+    fn test_pass_when_spot_confirmation_missing_spot_confirmation_unavailable() {
+        let account = AccountState::new(d("1000"));
+        let cfg = cfg_for_entry_filter_test();
+        let mut ctx = default_ctx();
+        ctx.market_yes = Some(d("0.90"));
+        ctx.market_no = Some(d("0.10"));
+        ctx.spot_confirmation = SpotConfirmationContext {
+            momentum_30s: None,
+            momentum_60s: Some(Decimal::ZERO),
+        };
+
+        let decision = decide(&ctx, &account, &cfg);
+
+        match decision {
+            Decision::Pass(reason) => assert_eq!(reason, "spot_confirmation_unavailable"),
+            Decision::Trade { .. } => panic!("expected pass due to missing spot confirmation"),
+        }
+    }
+
+    #[test]
+    fn test_trade_when_spot_is_flat_or_countertrend() {
+        let account = AccountState::new(d("1000"));
+        let cfg = cfg_for_entry_filter_test();
+
+        let mut down_ctx = default_ctx();
+        down_ctx.market_yes = Some(d("0.90"));
+        down_ctx.market_no = Some(d("0.10"));
+        down_ctx.spot_confirmation = SpotConfirmationContext {
+            momentum_30s: Some(d("-5")),
+            momentum_60s: Some(d("0")),
+        };
+
+        let mut up_ctx = default_ctx();
+        up_ctx.market_yes = Some(d("0.10"));
+        up_ctx.market_no = Some(d("0.90"));
+        up_ctx.spot_confirmation = SpotConfirmationContext {
+            momentum_30s: Some(d("5")),
+            momentum_60s: Some(d("0")),
+        };
+
+        match decide(&down_ctx, &account, &cfg) {
+            Decision::Trade {
+                direction: Direction::Down,
+                ..
+            } => {}
+            Decision::Trade { direction, .. } => {
+                panic!("expected down trade, got {:?}", direction)
+            }
+            Decision::Pass(reason) => {
+                panic!("expected trade for down case but got pass: {}", reason)
+            }
+        }
+
+        match decide(&up_ctx, &account, &cfg) {
+            Decision::Trade {
+                direction: Direction::Up,
+                ..
+            } => {}
+            Decision::Trade { direction, .. } => panic!("expected up trade, got {:?}", direction),
+            Decision::Pass(reason) => panic!("expected trade for up case but got pass: {}", reason),
         }
     }
 }

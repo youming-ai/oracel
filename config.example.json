@@ -18,7 +18,11 @@
     "fair_value": 0.5,
     "position_size_usdc": 1.0,
     "min_edge": 0.05,
-    "min_entry_price": 0.05
+    "min_entry_price": 0.08,
+    "max_entry_price": 0.12,
+    "min_ttl_for_entry_ms": 120000,
+    "spot_momentum_30s_threshold": 40,
+    "spot_momentum_60s_threshold": 70
   },
   "risk": {
     "max_fak_retries": 3,

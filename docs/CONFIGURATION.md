@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Polymarket 5m Bot uses a JSON configuration file (`config.json`) for all runtime settings. Configuration is loaded at startup and validated before the bot begins trading.
+The Polymarket 5m Bot uses a JSON configuration file (`config.json`) for all runtime settings. On startup, it attempts to load this file; if loading/parsing fails, it logs the error and falls back to defaults, then validates the resulting config before trading.
 
 ## Configuration File Location
 
@@ -40,15 +40,25 @@ Then edit `config.json` with your settings.
   "strategy": {
     "extreme_threshold": 0.8,
     "fair_value": 0.5,
-    "position_size_usdc": 1.0
+    "position_size_usdc": 1.0,
+    "min_edge": 0.05,
+    "min_entry_price": 0.08,
+    "max_entry_price": 0.12,
+    "min_ttl_for_entry_ms": 120000,
+    "spot_momentum_30s_threshold": 40,
+    "spot_momentum_60s_threshold": 70
   },
   "risk": {
-    "max_fok_retries": 3,
-    "fok_backoff_ms": 3000
+    "max_fak_retries": 3,
+    "fak_backoff_ms": 3000,
+    "daily_loss_limit_usdc": 0.0
   },
   "polling": {
     "signal_interval_ms": 1000,
     "status_interval_ms": 10000
+  },
+  "execution": {
+    "slippage_tolerance": 0.01
   }
 }
 ```
@@ -162,7 +172,13 @@ The stale threshold ensures you don't trade on old price data. The minimum TTL p
 "strategy": {
   "extreme_threshold": 0.8,
   "fair_value": 0.5,
-  "position_size_usdc": 1.0
+  "position_size_usdc": 1.0,
+  "min_edge": 0.05,
+  "min_entry_price": 0.08,
+  "max_entry_price": 0.12,
+  "min_ttl_for_entry_ms": 120000,
+  "spot_momentum_30s_threshold": 40,
+  "spot_momentum_60s_threshold": 70
 }
 ```
 
@@ -170,7 +186,13 @@ The stale threshold ensures you don't trade on old price data. The minimum TTL p
 |-------|------|---------|-------------|
 | `extreme_threshold` | float | `0.80` | Market bias threshold to consider sentiment extreme (0.0-1.0) |
 | `fair_value` | float | `0.50` | Fair-value assumption for binary outcome (0.0-1.0) |
-| `position_size_usdc` | float | `1.0` | Fixed position size per trade in USDC |
+| `position_size_usdc` | float | `1.0` | Configured target size per trade in USDC; runtime enforces a $1 minimum order |
+| `min_edge` | float | `0.05` | Minimum required edge to trade, where `edge = fair_value - candidate_entry_price` |
+| `min_entry_price` | float | `0.08` | Lower bound for candidate entry quote; candidates below this price are rejected |
+| `max_entry_price` | float | `0.12` | Upper bound for candidate entry quote; candidates above this price are rejected |
+| `min_ttl_for_entry_ms` | integer | `120000` | Strategy-level TTL floor; candidate must have at least this much time remaining to enter |
+| `spot_momentum_30s_threshold` | float | `40` | 30-second spot momentum threshold (spot price points) used by entry confirmation |
+| `spot_momentum_60s_threshold` | float | `70` | 60-second spot momentum threshold (spot price points) used by entry confirmation |
 
 #### Extreme Threshold
 
@@ -187,13 +209,38 @@ otherwise → No trade
 - `0.75`: More aggressive, trade at >75% or <25%
 - `0.85`: More conservative, trade at >85% or <15%
 
+#### Spot Momentum Thresholds
+
+Entry confirmation computes momentum as spot price delta:
+
+```text
+momentum_30s = latest_spot_price - spot_price_30s_ago
+momentum_60s = latest_spot_price - spot_price_60s_ago
+```
+
+Both thresholds are in spot price points (USD delta), not percentages.
+
+- `DOWN` candidates are rejected when momentum shows accelerating upward movement
+- `UP` candidates are rejected when momentum shows accelerating downward movement
+
 #### Position Size
 
-The bot uses a fixed position size per trade:
+The bot targets `position_size_usdc` per trade, but enforces Polymarket's minimum order:
+
+```text
+shares = floor(position_size_usdc / entry_price)
+actual_cost = shares * entry_price
+
+if actual_cost < 1.0:
+    shares = ceil(1.0 / entry_price)
+    actual_cost = shares * entry_price
+```
+
+Because shares are floored to whole numbers, `actual_cost` can be below configured
+`position_size_usdc`; when the $1 minimum bump triggers, it can also exceed configured
+`position_size_usdc`.
 
 **Zero-share guard**: Orders resulting in 0 shares are rejected to prevent phantom trades.
-
-**Minimum order**: Polymarket requires a minimum $1 order; shares are automatically bumped to meet this requirement.
 
 ---
 
@@ -201,17 +248,35 @@ The bot uses a fixed position size per trade:
 
 ```json
 "risk": {
-  "max_fok_retries": 3,
-  "fok_backoff_ms": 3000
+  "max_fak_retries": 3,
+  "fak_backoff_ms": 3000,
+  "daily_loss_limit_usdc": 0.0
 }
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `max_fok_retries` | integer | `3` | Maximum FOK order rejections before giving up on market window |
-| `fok_backoff_ms` | integer | `3000` | Milliseconds to wait after FOK rejection before retrying |
+| `max_fak_retries` | integer | `3` | Maximum FAK order rejections before giving up on market window |
+| `fak_backoff_ms` | integer | `3000` | Milliseconds to wait after FAK rejection before retrying |
+| `daily_loss_limit_usdc` | float | `0.0` | Daily loss cap in USDC; when daily PnL drops below `-daily_loss_limit_usdc`, new trades are blocked for the day (`0` disables the gate) |
 
-The FOK retry mechanism handles temporary liquidity issues when placing orders on the CLOB. After a rejection, the bot waits `fok_backoff_ms` before attempting another trade.
+The FAK retry mechanism handles temporary liquidity issues when placing orders on the CLOB. After a rejection, the bot waits `fak_backoff_ms` before attempting another trade. The daily loss gate checks current `daily_pnl` before candidate evaluation.
+
+---
+
+### Execution Configuration
+
+```json
+"execution": {
+  "slippage_tolerance": 0.01
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `slippage_tolerance` | float | `0.01` | Buy-price adjustment applied in both paper and live execution: `buy_price = mid_price * (1 + slippage_tolerance)` (capped at `0.99`) |
+
+Both execution paths use the same slippage-adjusted price; in paper mode it affects simulated fills/cost, and in live mode it affects submitted FAK limit orders. Setting `0` disables this adjustment.
 
 ---
 
@@ -239,7 +304,7 @@ This controls how often the bot checks for trading opportunities. Default 1000ms
 
 ## Configuration Validation
 
-The bot validates configuration on startup. Invalid configurations cause immediate termination with descriptive error messages.
+The bot validates the effective configuration on startup. Validation failures terminate startup with descriptive errors; config file load/parse failures first fall back to defaults, and those defaults are then validated.
 
 ### Validation Rules
 
@@ -250,6 +315,11 @@ The bot validates configuration on startup. Invalid configurations cause immedia
 | `extreme_threshold` | > fair_value | `strategy.extreme_threshold (X) must be > fair_value (Y)` |
 | `fair_value` | 0 < value < 1 | `strategy.fair_value must be in (0, 1)` |
 | `position_size_usdc` | > 0 | `strategy.position_size_usdc must be > 0` |
+| `min_edge` | `0 <= min_edge < 1` | `strategy.min_edge must be in [0, 1)` |
+| `min_entry_price`, `max_entry_price` | `0 < min_entry_price < max_entry_price < 1` | `strategy min/max entry price must satisfy 0 < min < max < 1` |
+| `min_ttl_for_entry_ms` | > 0 | `strategy.min_ttl_for_entry_ms must be > 0` |
+| `spot_momentum_30s_threshold` | > 0 | `strategy.spot_momentum_30s_threshold must be > 0` |
+| `spot_momentum_60s_threshold` | > 0 | `strategy.spot_momentum_60s_threshold must be > 0` |
 | `symbol` | Source-specific format | `price_source.symbol must match...` |
 
 ### Example Validation Errors
@@ -344,8 +414,8 @@ ALCHEMY_KEY=...
     "position_size_usdc": 5.0
   },
   "risk": {
-    "max_fok_retries": 3,
-    "fok_backoff_ms": 3000
+    "max_fak_retries": 3,
+    "fak_backoff_ms": 3000
   }
 }
 ```
