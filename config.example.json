@@ -14,7 +14,7 @@
     "symbol": "BTCUSDT"
   },
   "strategy": {
-    "extreme_threshold": 0.88,
+    "extreme_threshold": 0.95,
     "fair_value": 0.5,
     "position_size_usdc": 1.0,
     "min_edge": 0.05,
