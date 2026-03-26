@@ -11,8 +11,8 @@ Polymarket 5-minute BTC up/down binary options trading bot written in Rust. It i
 ```bash
 cargo build --release              # Build optimized binary
 cargo run --release                # Run the bot (mode from config.json)
-cargo run --release -- --derive-keys   # Derive Polymarket CLOB API credentials
-cargo run --release -- --redeem-all    # Redeem winning positions (last 24h)
+cargo run --release --bin polybot-tools -- --derive-keys   # Derive Polymarket CLOB API credentials
+cargo run --release --bin polybot-tools -- --redeem-all    # Redeem winning positions (last 24h)
 cargo test --locked                # Run all tests
 cargo clippy --workspace --all-targets --all-features -- -D warnings  # Lint (CI-strict)
 cargo fmt --all -- --check         # Format check
@@ -41,13 +41,12 @@ PriceSource → Signal → Decider → Executor → Settler
 ### Data layer (`src/data/`)
 
 - `binance.rs` / `coinbase.rs`: Exchange WebSocket clients with auto-reconnect
-- `polymarket.rs`: CLOB client for price queries, order placement, and CTF balance/redemption
+- `polymarket.rs`: CLOB client for price queries, order placement, CTF balance/redemption, and RPC URL selection
 - `market_discovery.rs`: Gamma API market discovery by slug pattern
-- `chainlink.rs`: Polygon RPC URL selection (Alchemy or public fallback)
 
 ### Main event loop (`src/main.rs`)
 
-Four concurrent `tokio::select!` tasks: signal tick (1s), settlement check (15s), market refresh (60s), status print (10s). Bot state is persisted atomically (tmp + rename) to `logs/{mode}/state.json` and `logs/{mode}/balance`.
+Four concurrent `tokio::select!` tasks: signal tick (1s), settlement check (15s), market refresh (60s), status print (10s). Balance is persisted atomically (tmp + rename) to `logs/{mode}/balance`. CLI tools (`--derive-keys`, `--redeem-all`, `--redeem`) live in a separate `polybot-tools` binary (`src/cli.rs`).
 
 ## Key Conventions
 
@@ -70,4 +69,4 @@ scripts/watch.sh              # Paper mode real-time dashboard
 scripts/watch.sh live         # Live mode dashboard
 ```
 
-Log files are in `logs/{paper,live}/` — `bot.log`, `trades.csv`, `balance`, `state.json`.
+Log files are in `logs/{paper,live}/` — `bot.log`, `trades.csv`, `balance`.
