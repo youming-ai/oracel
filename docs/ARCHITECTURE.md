@@ -30,9 +30,9 @@ The Polymarket 5m Bot follows a pipeline architecture with clear separation of c
        ┌──────────────┼──────────────┐
        │              │              │
 ┌──────▼──────┐ ┌────▼─────┐ ┌─────▼──────┐
-│  Paper Mode │ │ Live Mode│ │ State Mgmt │
-│  (Simulated)│ │(Real CLOB)│ │            │
-└─────────────┘ └──────────┘ └────────────┘
+│  Paper Mode │ │ Live Mode│
+│  (Simulated)│ │(Real CLOB)│
+└─────────────┘ └──────────┘
 ```
 
 ## Pipeline Stages
@@ -156,15 +156,16 @@ decide()
 
 ```
 src/
-├── main.rs                  # Application entry point, main loop
-├── config.rs                # Configuration definitions and validation
+├── main.rs                  # Bot entry point, main event loop
+├── cli.rs                   # CLI tools binary (polybot-tools)
+├── lib.rs                   # Shared library (re-exports config, data, pipeline)
+├── config.rs                # Configuration definitions, validation, defaults
 │
 ├── data/                    # External data source clients
 │   ├── binance.rs          # Binance WebSocket client
 │   ├── coinbase.rs         # Coinbase WebSocket client
-│   ├── chainlink.rs        # Polygon RPC configuration
 │   ├── market_discovery.rs # Gamma API integration
-│   └── polymarket.rs       # Polymarket CLOB client
+│   └── polymarket.rs       # Polymarket CLOB client + RPC URL selection
 │
 └── pipeline/               # Trading pipeline stages
     ├── mod.rs              # Pipeline module exports
@@ -230,8 +231,7 @@ struct Bot {
 ### Hot Path Optimizations
 1. **Lock-free reads**: Latest price accessed via read lock (no contention)
 2. **Zero-allocation**: Price updates use pre-allocated buffer
-3. **Batch operations**: State persistence batched to reduce I/O
-4. **Enum dispatch**: Avoid trait object overhead for price clients
+3. **Enum dispatch**: Avoid trait object overhead for price clients
 
 ### Memory Management
 - Fixed-size price buffer (circular queue, 1000 ticks default)

@@ -47,7 +47,7 @@ cd oracel
 # Build optimized release binary
 cargo build --release
 
-# Binary location: ./target/release/polybot
+# Binaries: ./target/release/polybot (bot) and ./target/release/polybot-tools (CLI)
 ```
 
 ### 3. Create Configuration
@@ -219,6 +219,7 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 COPY --from=builder /app/target/release/polybot /app/polybot
+COPY --from=builder /app/target/release/polybot-tools /app/polybot-tools
 COPY config.json /app/config.json
 
 # Create non-root user
@@ -270,13 +271,11 @@ logs/
 ├── paper/
 │   ├── bot.log          # Runtime logs
 │   ├── trades.csv       # Trade history
-│   ├── balance          # Current balance
-│   └── state.json       # Persistent state
+│   └── balance          # Current balance
 └── live/
     ├── bot.log
     ├── trades.csv
-    ├── balance
-    └── state.json
+    └── balance
 ```
 
 ### Log Rotation
@@ -302,23 +301,12 @@ EOF
 
 ## Backup and Recovery
 
-### State Backup
+### Recovery
 
-The bot automatically persists state to `logs/<mode>/state.json`. Back up this file:
-
-```bash
-# Backup script
-#!/bin/bash
-DATE=$(date +%Y%m%d_%H%M%S)
-cp logs/paper/state.json backups/state_${DATE}.json
-```
-
-### Database-less Recovery
-
-If state is lost, the bot starts fresh:
-- Paper mode: Starts with $1,000
+The bot uses in-memory state only. On restart:
+- Paper mode: Resumes with balance from `logs/paper/balance` (default $100)
 - Live mode: Syncs balance from chain
-- Positions: Must be tracked externally or re-entered manually
+- Pending positions: 5-minute markets settle before any realistic restart, so no persistence needed
 
 ### Critical Files to Backup
 
@@ -327,7 +315,6 @@ If state is lost, the bot starts fresh:
 tar czf polybot_backup_$(date +%Y%m%d).tar.gz \
   config.json \
   .env \
-  logs/*/state.json \
   logs/*/balance
 ```
 
@@ -409,7 +396,7 @@ sudo ufw status
 1. Verify `PRIVATE_KEY` in `.env`
 2. Check key format (should start with `0x`)
 3. Ensure account has USDC balance
-4. Try deriving keys: `cargo run --release -- --derive-keys`
+4. Try deriving keys: `cargo run --release --bin polybot-tools -- --derive-keys`
 
 ### High Memory Usage
 
@@ -463,7 +450,7 @@ export PRIVATE_KEY=0x...
 
 ```bash
 # Generate new keys periodically
-cargo run --release -- --derive-keys
+cargo run --release --bin polybot-tools -- --derive-keys
 
 # Update .env with new keys
 # Transfer funds to new address
