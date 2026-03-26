@@ -47,22 +47,12 @@ The bot reads yes/no prices from the Polymarket CLOB and computes market bias:
 ```text
 mkt_up = yes_price / (yes_price + no_price)
 
-if mkt_up > extreme_threshold (default 0.80): create DOWN candidate
-if mkt_up < 1 - extreme_threshold (default 0.20): create UP candidate
+if mkt_up > extreme_threshold (default 0.95): create DOWN candidate
+if mkt_up < 1 - extreme_threshold (default 0.05): create UP candidate
 otherwise: no trade (market is balanced)
 ```
 
 An extreme quote is only the first gate. It creates a candidate trade that must pass additional entry filters before execution.
-
-### Time-Weighted Threshold
-
-The extreme threshold ramps up as settlement time approaches:
-
-- **Early in window** (≥3 min remaining): Uses configured `extreme_threshold`
-- **Mid window** (2-3 min remaining): Threshold linearly interpolates toward 0.90
-- **Late in window** (<2 min remaining): Uses 0.90 minimum (or higher if configured threshold > 0.90)
-
-This prevents trades on weaker signals when there's insufficient time for the market to resolve.
 
 ### Spread Check
 
@@ -91,7 +81,7 @@ tick()
       ├── 5. Balance check: skip if balance ≤ 0
       ├── 6. Market data: skip if yes or no price is missing or ≤ 0.01
       ├── 7. Spread check: skip if yes + no < 0.80 (wide spread)
-      ├── 8. Time-weighted extreme: evaluate extreme threshold inside decide()
+      ├── 8. Extreme check: evaluate extreme threshold inside decide()
       ├── 9. Candidate creation: extreme quote creates directional candidate
       ├── 10. Min-edge gate: require fair_value - candidate_entry_price >= min_edge
       ├── 11. Entry price range: candidate quote must be within strategy min/max
@@ -230,7 +220,7 @@ The bot uses in-memory state only. Balance is persisted to `logs/<mode>/balance`
 ## 11. Key Assumptions
 
 1. A 5-minute BTC window is approximately a coin flip (`fair_value = 0.50`), since short-term BTC price movements are dominated by noise rather than directional signal
-2. Extreme market sentiment (>80% on one side) creates exploitable mispricing because the crowd overestimates the probability of a directional move
+2. Extreme market sentiment (≥95% on one side) creates exploitable mispricing because the crowd overestimates the probability of a directional move
 3. Settlement is based on Polymarket's official resolution via Gamma API, ensuring accurate accounting in both paper and live modes
 4. Fixed position sizing keeps the strategy simple and predictable
 5. **Balance is the primary protection**: The bot rejects trades when balance is zero or negative

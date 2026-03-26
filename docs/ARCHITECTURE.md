@@ -62,8 +62,8 @@ The Polymarket 5m Bot follows a pipeline architecture with clear separation of c
 
 **Decision Logic**:
 ```rust
-if market_bias > extreme_threshold (0.80) → Signal::Down
-if market_bias < 1 - extreme_threshold (0.20) → Signal::Up
+if market_bias > extreme_threshold (0.95) → Signal::Down
+if market_bias < 1 - extreme_threshold (0.05) → Signal::Up
 else → Signal::None
 ```
 

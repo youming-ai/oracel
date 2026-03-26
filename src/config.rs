@@ -20,7 +20,7 @@ mod defaults {
         30_000
     }
     pub fn extreme_threshold() -> Decimal {
-        dec("0.80")
+        dec("0.95")
     }
     pub fn fair_value() -> Decimal {
         dec("0.50")
@@ -32,10 +32,10 @@ mod defaults {
         dec("0.05")
     }
     pub fn min_entry_price() -> Decimal {
-        dec("0.08")
+        dec("0.02")
     }
     pub fn max_entry_price() -> Decimal {
-        dec("0.12")
+        dec("0.06")
     }
     pub fn min_ttl_for_entry_ms() -> u64 {
         120_000
@@ -404,10 +404,9 @@ impl Config {
                 self.strategy.fair_value
             );
         }
-        // Warn if threshold is very high (may result in few trades)
-        if self.strategy.extreme_threshold > dec("0.95") {
+        if self.strategy.extreme_threshold < dec("0.90") {
             tracing::warn!(
-                "extreme_threshold > 0.95 (current: {}) may result in very few trades",
+                "extreme_threshold < 0.90 (current: {}) — this bot targets extreme markets, consider >= 0.95",
                 self.strategy.extreme_threshold
             );
         }

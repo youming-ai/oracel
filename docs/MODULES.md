@@ -535,7 +535,7 @@ Before signal computation:
 
 ```rust
 let computer = SignalComputer::new(
-    decimal("0.80"),  // extreme_threshold
+    decimal("0.95"),  // extreme_threshold
     decimal("0.50"),  // fair_value
 );
 
@@ -578,7 +578,7 @@ pub struct DeciderConfig {
     pub edge_threshold: Decimal,
     /// Fixed position size per trade in USDC (default: 1.0)
     pub position_size_usdc: Decimal,
-    /// Market price threshold to consider "extreme" (default: 0.80)
+    /// Market price threshold to consider "extreme" (default: 0.95)
     pub extreme_threshold: Decimal,
     /// Fair value assumption for binary outcome (default: 0.50)
     pub fair_value: Decimal,

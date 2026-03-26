@@ -4,8 +4,8 @@ An automated trading bot for Polymarket BTC 5-minute up/down markets. It monitor
 
 ## Strategy Overview
 
-- Buy `DOWN` when the market becomes extremely bullish (>80%)
-- Buy `UP` when the market becomes extremely bearish (<20%)
+- Buy `DOWN` when the market becomes extremely bullish (≥95%)
+- Buy `UP` when the market becomes extremely bearish (≤5%)
 - Fair value assumption: `0.50` for a 5-minute binary outcome
 - Only trade when edge and momentum filter pass
 - Position size: 1% of balance per trade, $1 minimum
@@ -172,7 +172,7 @@ Trading mode and all strategy parameters are configured in `config.json`. See `c
 | `polyclob.gamma_api_url` | `https://gamma-api.polymarket.com` | Gamma API base URL |
 | `price_source.source` | `"binance"` | Price feed: `"binance"`, `"binance_ws"`, `"coinbase"`, `"coinbase_ws"` |
 | `price_source.symbol` | `"BTCUSDT"` | Trading pair symbol (e.g., "BTCUSDT" for Binance, "BTC-USD" for Coinbase) |
-| `strategy.extreme_threshold` | `0.80` | Market bias threshold to consider sentiment extreme |
+| `strategy.extreme_threshold` | `0.95` | Market bias threshold to consider sentiment extreme |
 | `strategy.fair_value` | `0.50` | Fair-value assumption for a binary 5-minute outcome |
 | `strategy.position_size_usdc` | `1.0` | Fixed position size per trade in USDC |
 | `edge.edge_threshold_early` | `0.15` | Minimum edge required to place a trade (15%) |

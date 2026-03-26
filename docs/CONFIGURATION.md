@@ -38,12 +38,12 @@ Then edit `config.json` with your settings.
     "symbol": "BTCUSDT"
   },
   "strategy": {
-    "extreme_threshold": 0.8,
+    "extreme_threshold": 0.95,
     "fair_value": 0.5,
     "position_size_usdc": 1.0,
     "min_edge": 0.05,
-    "min_entry_price": 0.08,
-    "max_entry_price": 0.12,
+    "min_entry_price": 0.02,
+    "max_entry_price": 0.06,
     "min_ttl_for_entry_ms": 120000,
     "spot_momentum_30s_threshold": 40,
     "spot_momentum_60s_threshold": 70
@@ -170,12 +170,12 @@ The stale threshold ensures you don't trade on old price data. The minimum TTL p
 
 ```json
 "strategy": {
-  "extreme_threshold": 0.8,
+  "extreme_threshold": 0.95,
   "fair_value": 0.5,
   "position_size_usdc": 1.0,
   "min_edge": 0.05,
-  "min_entry_price": 0.08,
-  "max_entry_price": 0.12,
+  "min_entry_price": 0.02,
+  "max_entry_price": 0.06,
   "min_ttl_for_entry_ms": 120000,
   "spot_momentum_30s_threshold": 40,
   "spot_momentum_60s_threshold": 70
@@ -184,12 +184,12 @@ The stale threshold ensures you don't trade on old price data. The minimum TTL p
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `extreme_threshold` | float | `0.80` | Market bias threshold to consider sentiment extreme (0.0-1.0) |
+| `extreme_threshold` | float | `0.95` | Market bias threshold to consider sentiment extreme (0.0-1.0) |
 | `fair_value` | float | `0.50` | Fair-value assumption for binary outcome (0.0-1.0) |
 | `position_size_usdc` | float | `1.0` | Configured target size per trade in USDC; runtime enforces a $1 minimum order |
 | `min_edge` | float | `0.05` | Minimum required edge to trade, where `edge = fair_value - candidate_entry_price` |
-| `min_entry_price` | float | `0.08` | Lower bound for candidate entry quote; candidates below this price are rejected |
-| `max_entry_price` | float | `0.12` | Upper bound for candidate entry quote; candidates above this price are rejected |
+| `min_entry_price` | float | `0.02` | Lower bound for candidate entry quote; candidates below this price are rejected |
+| `max_entry_price` | float | `0.06` | Upper bound for candidate entry quote; candidates above this price are rejected |
 | `min_ttl_for_entry_ms` | integer | `120000` | Strategy-level TTL floor; candidate must have at least this much time remaining to enter |
 | `spot_momentum_30s_threshold` | float | `40` | 30-second spot momentum threshold (spot price points) used by entry confirmation |
 | `spot_momentum_60s_threshold` | float | `70` | 60-second spot momentum threshold (spot price points) used by entry confirmation |
@@ -199,15 +199,15 @@ The stale threshold ensures you don't trade on old price data. The minimum TTL p
 Determines when market sentiment is considered extreme:
 
 ```
-if market_bias > 0.80 → Extremely bullish → Buy DOWN
-if market_bias < 0.20 → Extremely bearish → Buy UP
+if market_bias > 0.95 → Extremely bullish → Buy DOWN
+if market_bias < 0.05 → Extremely bearish → Buy UP
 otherwise → No trade
 ```
 
 **Examples**:
-- `0.80` (default): Trade when market is >80% or <20%
-- `0.75`: More aggressive, trade at >75% or <25%
-- `0.85`: More conservative, trade at >85% or <15%
+- `0.95` (default): Trade when market is ≥95% or ≤5%
+- `0.90`: More aggressive, trade at >90% or <10%
+- `0.97`: More conservative, trade at >97% or <3%
 
 #### Spot Momentum Thresholds
 
@@ -367,7 +367,7 @@ ALCHEMY_KEY=...
 {
   "trading": { "mode": "paper" },
   "strategy": {
-    "extreme_threshold": 0.85,
+    "extreme_threshold": 0.97,
     "fair_value": 0.50,
     "position_size_usdc": 1.0
   }
@@ -384,7 +384,7 @@ ALCHEMY_KEY=...
 {
   "trading": { "mode": "paper" },
   "strategy": {
-    "extreme_threshold": 0.75,
+    "extreme_threshold": 0.90,
     "fair_value": 0.50,
     "position_size_usdc": 2.0
   }
@@ -409,7 +409,7 @@ ALCHEMY_KEY=...
     "symbol": "BTCUSDT"
   },
   "strategy": {
-    "extreme_threshold": 0.80,
+    "extreme_threshold": 0.95,
     "fair_value": 0.50,
     "position_size_usdc": 5.0
   },

@@ -1,7 +1,7 @@
 //! Stage 3: Trade Decider
 //! Market sentiment arbitrage decider.
 //!
-//! Core logic: When market is extremely overconfident (>80%), bet against it.
+//! Core logic: When market is extremely overconfident (≥95%), bet against it.
 //! Edge = fair_value - cheap_side_price (our fair value minus market's extreme price).
 //! Direction is determined by market price extremes.
 //! Risk controls: daily loss limit.
@@ -39,11 +39,11 @@ impl Default for DeciderConfig {
     fn default() -> Self {
         Self {
             position_size_usdc: decimal("1.0"),
-            extreme_threshold: decimal("0.80"),
+            extreme_threshold: decimal("0.95"),
             fair_value: decimal("0.50"),
             min_edge: decimal("0.05"),
-            min_entry_price: decimal("0.08"),
-            max_entry_price: decimal("0.12"),
+            min_entry_price: decimal("0.02"),
+            max_entry_price: decimal("0.06"),
             min_ttl_for_entry_ms: 120_000,
             spot_momentum_30s_threshold: decimal("40"),
             spot_momentum_60s_threshold: decimal("70"),
@@ -179,24 +179,9 @@ pub fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderConfig) 
 
     let mkt_up = yes / total;
 
-    let late_floor = decimal("0.90");
-    let late_threshold = if cfg.extreme_threshold > late_floor {
-        cfg.extreme_threshold
-    } else {
-        late_floor
-    };
-    let extreme_thr = if ctx.remaining_ms > 180_000 {
-        cfg.extreme_threshold
-    } else if ctx.remaining_ms > 120_000 {
-        let frac = Decimal::from(180_000 - ctx.remaining_ms) / Decimal::from(60_000_i64);
-        cfg.extreme_threshold + (late_threshold - cfg.extreme_threshold) * frac
-    } else {
-        late_threshold
-    };
-
-    let (base_direction, cheap_price) = if mkt_up > extreme_thr {
+    let (base_direction, cheap_price) = if mkt_up > cfg.extreme_threshold {
         (Direction::Down, no / total)
-    } else if mkt_up < (Decimal::ONE - extreme_thr) {
+    } else if mkt_up < (Decimal::ONE - cfg.extreme_threshold) {
         (Direction::Up, yes / total)
     } else {
         return Decision::Pass(format!(
@@ -286,27 +271,20 @@ mod tests {
 
     fn cfg_for_threshold_test() -> DeciderConfig {
         DeciderConfig {
-            extreme_threshold: d("0.64"),
+            extreme_threshold: d("0.95"),
             max_entry_price: d("0.50"),
             ..DeciderConfig::default()
         }
     }
 
     fn cfg_for_entry_filter_test() -> DeciderConfig {
-        DeciderConfig {
-            min_entry_price: d("0.08"),
-            max_entry_price: d("0.12"),
-            min_ttl_for_entry_ms: 120_000,
-            spot_momentum_30s_threshold: d("40"),
-            spot_momentum_60s_threshold: d("70"),
-            ..DeciderConfig::default()
-        }
+        DeciderConfig::default()
     }
 
     fn default_ctx() -> DecideContext {
         DecideContext {
-            market_yes: Some(d("0.85")),
-            market_no: Some(d("0.15")),
+            market_yes: Some(d("0.97")),
+            market_no: Some(d("0.03")),
             remaining_ms: 240_000,
             spot_confirmation: SpotConfirmationContext {
                 momentum_30s: Some(Decimal::ZERO),
@@ -316,16 +294,21 @@ mod tests {
     }
 
     #[test]
-    fn test_edge_equal_to_threshold_allows_trade() {
+    fn test_extreme_bullish_allows_trade() {
         let account = AccountState::new(d("1000"));
         let mut ctx = default_ctx();
-        ctx.market_yes = Some(d("0.65"));
-        ctx.market_no = Some(d("0.35"));
+        ctx.market_yes = Some(d("0.97"));
+        ctx.market_no = Some(d("0.03"));
 
         let decision = decide(&ctx, &account, &cfg_for_threshold_test());
 
         match decision {
-            Decision::Trade { edge, .. } => assert_eq!(edge, d("0.15")),
+            Decision::Trade {
+                edge, direction, ..
+            } => {
+                assert_eq!(direction, Direction::Down);
+                assert!(edge > d("0.40"));
+            }
             Decision::Pass(reason) => panic!("expected trade but got pass: {}", reason),
         }
     }
@@ -352,11 +335,8 @@ mod tests {
     #[test]
     fn test_trade_when_extreme_bullish() {
         let account = AccountState::new(d("1000"));
-        let cfg = DeciderConfig {
-            max_entry_price: d("0.50"),
-            ..DeciderConfig::default()
-        };
-        let ctx = default_ctx();
+        let cfg = DeciderConfig::default();
+        let ctx = default_ctx(); // yes=0.97, no=0.03
 
         let decision = decide(&ctx, &account, &cfg);
 
@@ -368,8 +348,10 @@ mod tests {
                 ..
             } => {
                 assert_eq!(direction, Direction::Down);
-                assert_eq!(edge, d("0.35"));
-                assert!(payoff_ratio > d("5.66") && payoff_ratio < d("5.67"));
+                // cheap_price = 0.03/1.00 = 0.03, edge = 0.50 - 0.03 = 0.47
+                assert_eq!(edge, d("0.47"));
+                // payoff = (1 - 0.03) / 0.03 ≈ 32.33
+                assert!(payoff_ratio > d("32"));
             }
             Decision::Pass(reason) => panic!("expected trade but got pass: {}", reason),
         }
@@ -441,20 +423,21 @@ mod tests {
     #[test]
     fn test_min_edge_rejects_low_edge() {
         let account = AccountState::new(d("1000"));
-        let mut cfg = DeciderConfig {
-            min_edge: d("0.50"),
+        // Set min_edge absurdly high to trigger rejection
+        let cfg = DeciderConfig {
+            min_edge: d("0.49"),
             ..DeciderConfig::default()
         };
-        cfg.extreme_threshold = d("0.64");
 
         let mut ctx = default_ctx();
-        ctx.market_yes = Some(d("0.85"));
-        ctx.market_no = Some(d("0.15"));
+        // mkt_up = 0.97/1.00 = 0.97 > 0.95, cheap = 0.03, edge = 0.50 - 0.03 = 0.47 < 0.49
+        ctx.market_yes = Some(d("0.97"));
+        ctx.market_no = Some(d("0.03"));
 
         let decision = decide(&ctx, &account, &cfg);
 
         match decision {
-            Decision::Pass(reason) => assert_eq!(reason, "edge_too_low_35"),
+            Decision::Pass(reason) => assert_eq!(reason, "edge_too_low_47"),
             Decision::Trade { .. } => panic!("expected pass due to low edge"),
         }
     }
@@ -462,16 +445,12 @@ mod tests {
     #[test]
     fn test_min_edge_allows_high_edge() {
         let account = AccountState::new(d("1000"));
-        let mut cfg = DeciderConfig {
-            min_edge: d("0.05"),
-            max_entry_price: d("0.50"),
-            ..DeciderConfig::default()
-        };
-        cfg.extreme_threshold = d("0.64");
+        let cfg = DeciderConfig::default(); // min_edge = 0.05
 
         let mut ctx = default_ctx();
-        ctx.market_yes = Some(d("0.70"));
-        ctx.market_no = Some(d("0.30"));
+        // mkt_up = 0.98/1.00 = 0.98 > 0.95, cheap = 0.02, edge = 0.50 - 0.02 = 0.48
+        ctx.market_yes = Some(d("0.98"));
+        ctx.market_no = Some(d("0.02"));
 
         let decision = decide(&ctx, &account, &cfg);
 
@@ -486,13 +465,14 @@ mod tests {
         let account = AccountState::new(d("1000"));
         let cfg = cfg_for_entry_filter_test();
         let mut ctx = default_ctx();
-        ctx.market_yes = Some(d("0.93"));
-        ctx.market_no = Some(d("0.07"));
+        // cheap = 0.015/0.995 ≈ 0.015 < min_entry_price(0.02)
+        ctx.market_yes = Some(d("0.98"));
+        ctx.market_no = Some(d("0.015"));
 
         let decision = decide(&ctx, &account, &cfg);
 
         match decision {
-            Decision::Pass(reason) => assert_eq!(reason, "price_out_of_range_7"),
+            Decision::Pass(reason) => assert_eq!(reason, "price_out_of_range_1"),
             Decision::Trade { .. } => panic!("expected pass due to entry price below range"),
         }
     }
@@ -500,15 +480,20 @@ mod tests {
     #[test]
     fn test_pass_when_entry_price_above_range_price_out_of_range() {
         let account = AccountState::new(d("1000"));
-        let cfg = cfg_for_entry_filter_test();
+        // Use a lower threshold to get cheap_price above max_entry_price
+        let cfg = DeciderConfig {
+            extreme_threshold: d("0.90"),
+            ..DeciderConfig::default()
+        };
         let mut ctx = default_ctx();
-        ctx.market_yes = Some(d("0.87"));
-        ctx.market_no = Some(d("0.13"));
+        // mkt_up = 0.92/1.00 = 0.92 > 0.90, cheap = 0.08/1.00 = 0.08 > max_entry(0.06)
+        ctx.market_yes = Some(d("0.92"));
+        ctx.market_no = Some(d("0.08"));
 
         let decision = decide(&ctx, &account, &cfg);
 
         match decision {
-            Decision::Pass(reason) => assert_eq!(reason, "price_out_of_range_13"),
+            Decision::Pass(reason) => assert_eq!(reason, "price_out_of_range_8"),
             Decision::Trade { .. } => panic!("expected pass due to entry price above range"),
         }
     }
@@ -518,8 +503,8 @@ mod tests {
         let account = AccountState::new(d("1000"));
         let cfg = cfg_for_entry_filter_test();
         let mut ctx = default_ctx();
-        ctx.market_yes = Some(d("0.91"));
-        ctx.market_no = Some(d("0.09"));
+        ctx.market_yes = Some(d("0.97"));
+        ctx.market_no = Some(d("0.03"));
         ctx.remaining_ms = 119_000;
 
         let decision = decide(&ctx, &account, &cfg);
@@ -535,8 +520,8 @@ mod tests {
         let account = AccountState::new(d("1000"));
         let cfg = cfg_for_entry_filter_test();
         let mut ctx = default_ctx();
-        ctx.market_yes = Some(d("0.91"));
-        ctx.market_no = Some(d("0.09"));
+        ctx.market_yes = Some(d("0.97"));
+        ctx.market_no = Some(d("0.03"));
         ctx.remaining_ms = -1_000;
 
         let decision = decide(&ctx, &account, &cfg);
@@ -552,8 +537,8 @@ mod tests {
         let account = AccountState::new(d("1000"));
         let cfg = cfg_for_entry_filter_test();
         let mut ctx = default_ctx();
-        ctx.market_yes = Some(d("0.90"));
-        ctx.market_no = Some(d("0.10"));
+        ctx.market_yes = Some(d("0.97"));
+        ctx.market_no = Some(d("0.03"));
         ctx.spot_confirmation = SpotConfirmationContext {
             momentum_30s: Some(d("45")),
             momentum_60s: Some(Decimal::ZERO),
@@ -572,8 +557,8 @@ mod tests {
         let account = AccountState::new(d("1000"));
         let cfg = cfg_for_entry_filter_test();
         let mut ctx = default_ctx();
-        ctx.market_yes = Some(d("0.10"));
-        ctx.market_no = Some(d("0.90"));
+        ctx.market_yes = Some(d("0.03"));
+        ctx.market_no = Some(d("0.97"));
         ctx.spot_confirmation = SpotConfirmationContext {
             momentum_30s: Some(d("-45")),
             momentum_60s: Some(Decimal::ZERO),
@@ -592,8 +577,8 @@ mod tests {
         let account = AccountState::new(d("1000"));
         let cfg = cfg_for_entry_filter_test();
         let mut ctx = default_ctx();
-        ctx.market_yes = Some(d("0.90"));
-        ctx.market_no = Some(d("0.10"));
+        ctx.market_yes = Some(d("0.97"));
+        ctx.market_no = Some(d("0.03"));
         ctx.spot_confirmation = SpotConfirmationContext {
             momentum_30s: None,
             momentum_60s: Some(Decimal::ZERO),
@@ -613,16 +598,16 @@ mod tests {
         let cfg = cfg_for_entry_filter_test();
 
         let mut down_ctx = default_ctx();
-        down_ctx.market_yes = Some(d("0.90"));
-        down_ctx.market_no = Some(d("0.10"));
+        down_ctx.market_yes = Some(d("0.97"));
+        down_ctx.market_no = Some(d("0.03"));
         down_ctx.spot_confirmation = SpotConfirmationContext {
             momentum_30s: Some(d("-5")),
             momentum_60s: Some(d("0")),
         };
 
         let mut up_ctx = default_ctx();
-        up_ctx.market_yes = Some(d("0.10"));
-        up_ctx.market_no = Some(d("0.90"));
+        up_ctx.market_yes = Some(d("0.03"));
+        up_ctx.market_no = Some(d("0.97"));
         up_ctx.spot_confirmation = SpotConfirmationContext {
             momentum_30s: Some(d("5")),
             momentum_60s: Some(d("0")),
