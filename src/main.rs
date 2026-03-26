@@ -25,23 +25,6 @@ fn decimal(value: &str) -> Decimal {
     Decimal::from_str_exact(value).expect("valid decimal literal")
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Default)]
-struct PersistState {
-    pending_positions: Vec<PendingPosition>,
-    #[serde(default)]
-    consecutive_losses: u32,
-    #[serde(default)]
-    consecutive_wins: u32,
-    #[serde(default)]
-    total_wins: u32,
-    #[serde(default)]
-    total_losses: u32,
-    #[serde(default, with = "rust_decimal::serde::float_option")]
-    daily_pnl: Option<Decimal>,
-    #[serde(default)]
-    daily_reset_date: Option<String>,
-}
-
 use data::market_discovery::{
     infer_resolution_state, DiscoveryConfig, MarketDiscovery, ResolutionState,
 };
@@ -206,27 +189,8 @@ impl Bot {
             None
         };
 
-        let mut settler = Settler::new();
-        let mut account = AccountState::new(initial_balance);
-
-        let saved = Self::load_state(&log_dir).await;
-        if !saved.pending_positions.is_empty() {
-            tracing::info!(
-                "[INIT] Restored {} pending position(s) from state.json",
-                saved.pending_positions.len()
-            );
-            settler.restore_positions(saved.pending_positions);
-        }
-        account.consecutive_losses = saved.consecutive_losses;
-        account.consecutive_wins = saved.consecutive_wins;
-        account.total_wins = saved.total_wins;
-        account.total_losses = saved.total_losses;
-        if let Some(pnl) = saved.daily_pnl {
-            account.daily_pnl = pnl;
-        }
-        if let Some(date) = saved.daily_reset_date {
-            account.daily_reset_date = date;
-        }
+        let settler = Settler::new();
+        let account = AccountState::new(initial_balance);
 
         Ok(Self {
             config,
@@ -261,53 +225,6 @@ impl Bot {
         }
         if let Err(e) = tokio::fs::rename(&tmp, &dst).await {
             tracing::warn!("[STATE] Failed to rename balance file: {}", e);
-        }
-    }
-
-    async fn load_state(log_dir: &str) -> PersistState {
-        let path = Path::new(log_dir).join("state.json");
-        match tokio::fs::read_to_string(&path).await {
-            Ok(content) => match serde_json::from_str(&content) {
-                Ok(state) => state,
-                Err(e) => {
-                    tracing::warn!("[STATE] Failed to parse state.json: {}, using defaults", e);
-                    PersistState::default()
-                }
-            },
-            Err(_) => PersistState::default(),
-        }
-    }
-
-    async fn save_state(
-        log_dir: &str,
-        settler: &Arc<RwLock<Settler>>,
-        account: &Arc<RwLock<AccountState>>,
-    ) {
-        let positions = settler.read().await.pending_positions();
-        let acc = account.read().await;
-        let state = PersistState {
-            pending_positions: positions,
-            consecutive_losses: acc.consecutive_losses,
-            consecutive_wins: acc.consecutive_wins,
-            total_wins: acc.total_wins,
-            total_losses: acc.total_losses,
-            daily_pnl: Some(acc.daily_pnl),
-            daily_reset_date: Some(acc.daily_reset_date.clone()),
-        };
-        drop(acc);
-        let tmp = Path::new(log_dir).join("state.json.tmp");
-        let dst = Path::new(log_dir).join("state.json");
-        match serde_json::to_string(&state) {
-            Ok(json) => {
-                if let Err(e) = tokio::fs::write(&tmp, &json).await {
-                    tracing::warn!("[STATE] Failed to write state.json: {}", e);
-                    return;
-                }
-                if let Err(e) = tokio::fs::rename(&tmp, &dst).await {
-                    tracing::warn!("[STATE] Failed to rename state.json: {}", e);
-                }
-            }
-            Err(e) => tracing::warn!("[STATE] Failed to serialize state: {}", e),
         }
     }
 
@@ -360,8 +277,7 @@ impl Bot {
                     }
                 }
                 signal = &mut shutdown_signal => {
-                    tracing::info!("[BOT] Received {}, saving state...", signal);
-                    Self::save_state(&self.log_dir, &self.settler, &self.account).await;
+                    tracing::info!("[BOT] Received {}, shutting down...", signal);
                     break;
                 }
                 result = &mut settlement_handle => {
@@ -699,8 +615,6 @@ impl Bot {
                         market_slug: Arc::clone(&mkt.market_slug),
                     });
 
-                    Self::save_state(&self.log_dir, &self.settler, &self.account).await;
-
                     let bal = self.account.read().await.balance;
                     Self::write_balance(&self.log_dir, bal).await;
 
@@ -872,8 +786,6 @@ impl Bot {
 
                     let bal = acc.balance;
                     drop(acc);
-
-                    Self::save_state(&log_dir, &settler, &account).await;
 
                     if let Some(btc_price) = settlement_btc_price {
                         let mut log_lines = String::new();
