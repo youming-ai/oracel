@@ -4,6 +4,7 @@ version = "0.3.0"
 edition = "2021"
 description = "Automated trading bot for Polymarket BTC 5m markets - Chainlink oracle strategy"
 license = "MIT"
+default-run = "polybot"
 
 [[bin]]
 name = "polybot"
