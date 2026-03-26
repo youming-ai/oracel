@@ -21,7 +21,22 @@ use alloy::providers::ProviderBuilder;
 use alloy::signers::local::PrivateKeySigner;
 use secrecy::{ExposeSecret, SecretString};
 
+use crate::config::TradingMode;
+
 const CLOB_HOST: &str = "https://clob.polymarket.com";
+const PUBLIC_RPC: &str = "https://polygon-bor-rpc.publicnode.com";
+const ALCHEMY_RPC: &str = "https://polygon-mainnet.g.alchemy.com/v2";
+
+/// Pick RPC based on mode: live uses Alchemy (ALCHEMY_KEY env), paper uses public.
+pub(crate) fn rpc_url(mode: TradingMode) -> String {
+    if mode.is_live() {
+        if let Ok(key) = std::env::var("ALCHEMY_KEY") {
+            return format!("{}/{}", ALCHEMY_RPC, key);
+        }
+        tracing::warn!("[RPC] ALCHEMY_KEY not set, falling back to public RPC");
+    }
+    PUBLIC_RPC.to_string()
+}
 
 /// CTF (Conditional Tokens) contract on Polygon mainnet
 const CTF_CONTRACT: Address = address!("0x4D97DCd97eC945f40cF65F87097ACe5EA0476045");

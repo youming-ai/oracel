@@ -149,7 +149,7 @@ impl Bot {
         let redeemer = if config.trading.mode.is_live()
             && !config.trading.private_key.expose_secret().is_empty()
         {
-            let rpc = data::chainlink::rpc_url(config.trading.mode);
+            let rpc = data::polymarket::rpc_url(config.trading.mode);
             tracing::info!("[INIT] CTF redeemer enabled for on-chain redemption");
             Some(Arc::new(CtfRedeemer::new(
                 config.trading.private_key.expose_secret().to_owned(),
@@ -164,7 +164,7 @@ impl Bot {
                 .await
                 .unwrap_or_else(|| decimal("100"))
         } else {
-            let rpc = data::chainlink::rpc_url(config.trading.mode);
+            let rpc = data::polymarket::rpc_url(config.trading.mode);
             if let Some(ref r) = redeemer {
                 let wallet = r
                     .wallet_address()
@@ -186,7 +186,7 @@ impl Bot {
             if let Some(ref r) = redeemer {
                 match r.wallet_address() {
                     Ok(wallet) => {
-                        let rpc = data::chainlink::rpc_url(config.trading.mode);
+                        let rpc = data::polymarket::rpc_url(config.trading.mode);
                         match BalanceChecker::new(wallet, rpc).await {
                             Ok(checker) => {
                                 tracing::info!("[INIT] BalanceChecker connected");
@@ -1068,7 +1068,7 @@ async fn redeem_all() -> Result<()> {
     } else {
         config.trading.mode
     };
-    let rpc = data::chainlink::rpc_url(mode);
+    let rpc = data::polymarket::rpc_url(mode);
     let redeemer = data::polymarket::CtfRedeemer::new(private_key, rpc);
 
     let gamma_url = &config.polyclob.gamma_api_url;
@@ -1162,7 +1162,7 @@ async fn redeem_one(slug: &str) -> Result<()> {
     } else {
         config.trading.mode
     };
-    let rpc = data::chainlink::rpc_url(mode);
+    let rpc = data::polymarket::rpc_url(mode);
     let redeemer = data::polymarket::CtfRedeemer::new(private_key, rpc);
 
     let gamma_url = &config.polyclob.gamma_api_url;
