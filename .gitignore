@@ -6,3 +6,4 @@ config.json
 *.tmp
 .worktrees/
 .sisyphus/
+.DS_Store
