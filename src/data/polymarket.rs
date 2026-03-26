@@ -28,7 +28,7 @@ const PUBLIC_RPC: &str = "https://polygon-bor-rpc.publicnode.com";
 const ALCHEMY_RPC: &str = "https://polygon-mainnet.g.alchemy.com/v2";
 
 /// Pick RPC based on mode: live uses Alchemy (ALCHEMY_KEY env), paper uses public.
-pub(crate) fn rpc_url(mode: TradingMode) -> String {
+pub fn rpc_url(mode: TradingMode) -> String {
     if mode.is_live() {
         if let Ok(key) = std::env::var("ALCHEMY_KEY") {
             return format!("{}/{}", ALCHEMY_RPC, key);
@@ -60,12 +60,12 @@ alloy::sol! {
 }
 
 /// Unauthenticated client for price queries.
-pub(crate) struct PolymarketClient {
+pub struct PolymarketClient {
     unauth: clob::Client,
 }
 
 impl PolymarketClient {
-    pub(crate) fn new() -> Result<Self> {
+    pub fn new() -> Result<Self> {
         let config = clob::Config::builder().use_server_time(true).build();
         Ok(Self {
             unauth: clob::Client::new(CLOB_HOST, config)
@@ -73,7 +73,7 @@ impl PolymarketClient {
         })
     }
 
-    pub(crate) async fn fetch_mid_price(&self, token_id: &str) -> Result<rust_decimal::Decimal> {
+    pub async fn fetch_mid_price(&self, token_id: &str) -> Result<rust_decimal::Decimal> {
         let tid = U256::from_str(token_id).context("Invalid token_id")?;
         let req = PriceRequest::builder()
             .token_id(tid)
@@ -88,13 +88,13 @@ impl PolymarketClient {
 }
 
 /// Authenticated client for order placement.
-pub(crate) struct AuthenticatedPolyClient {
+pub struct AuthenticatedPolyClient {
     client: clob::Client<Authenticated<Normal>>,
     signer: PrivateKeySigner,
 }
 
 impl AuthenticatedPolyClient {
-    pub(crate) async fn new(private_key: &str) -> Result<Self> {
+    pub async fn new(private_key: &str) -> Result<Self> {
         let key_hex = private_key.strip_prefix("0x").unwrap_or(private_key);
         let signer: PrivateKeySigner = LocalSigner::from_str(key_hex)
             .context("Invalid private key")?
@@ -113,7 +113,7 @@ impl AuthenticatedPolyClient {
         Ok(Self { client, signer })
     }
 
-    pub(crate) async fn place_order(
+    pub async fn place_order(
         &self,
         token_id: &str,
         side: &str,
@@ -158,20 +158,20 @@ const POLYGON_USDC: alloy::primitives::Address =
 
 /// On-chain CTF redeemer for winning outcome tokens.
 /// Creates ephemeral provider per redeem (wins are infrequent).
-pub(crate) struct CtfRedeemer {
+pub struct CtfRedeemer {
     private_key: SecretString,
     rpc_url: String,
 }
 
 impl CtfRedeemer {
-    pub(crate) fn new(private_key: String, rpc_url: String) -> Self {
+    pub fn new(private_key: String, rpc_url: String) -> Self {
         Self {
             private_key: SecretString::new(private_key.into()),
             rpc_url,
         }
     }
 
-    pub(crate) fn wallet_address(&self) -> Result<Address> {
+    pub fn wallet_address(&self) -> Result<Address> {
         let key_hex = self
             .private_key
             .expose_secret()
@@ -182,7 +182,7 @@ impl CtfRedeemer {
         Ok(signer.address())
     }
 
-    pub(crate) async fn has_redeemable_position(&self, condition_id_hex: &str) -> Result<bool> {
+    pub async fn has_redeemable_position(&self, condition_id_hex: &str) -> Result<bool> {
         let wallet_addr = self.wallet_address()?;
         let provider = tokio::time::timeout(
             Duration::from_secs(30),
@@ -195,7 +195,7 @@ impl CtfRedeemer {
         Self::check_single(&provider, wallet_addr, condition_id_hex).await
     }
 
-    pub(crate) async fn find_redeemable(
+    pub async fn find_redeemable(
         &self,
         condition_ids: &[(String, String)],
         concurrency: usize,
@@ -293,7 +293,7 @@ impl CtfRedeemer {
         Ok(false)
     }
 
-    pub(crate) async fn redeem(&self, condition_id_hex: &str) -> Result<String> {
+    pub async fn redeem(&self, condition_id_hex: &str) -> Result<String> {
         let key_hex = self
             .private_key
             .expose_secret()
@@ -335,14 +335,14 @@ impl CtfRedeemer {
 
 /// Reusable on-chain USDC balance checker.
 /// Connects once during construction and reuses the provider for all balance queries.
-pub(crate) struct BalanceChecker {
+pub struct BalanceChecker {
     wallet: Address,
     provider: alloy::providers::RootProvider<alloy::network::Ethereum>,
 }
 
 impl BalanceChecker {
     /// Connects to the RPC once. Returns Err if connection fails.
-    pub(crate) async fn new(wallet: Address, rpc_url: String) -> anyhow::Result<Self> {
+    pub async fn new(wallet: Address, rpc_url: String) -> anyhow::Result<Self> {
         let provider = tokio::time::timeout(
             Duration::from_secs(15),
             ProviderBuilder::default().connect(&rpc_url),
@@ -354,7 +354,7 @@ impl BalanceChecker {
         Ok(Self { wallet, provider })
     }
 
-    pub(crate) async fn balance(&self) -> anyhow::Result<rust_decimal::Decimal> {
+    pub async fn balance(&self) -> anyhow::Result<rust_decimal::Decimal> {
         use rust_decimal::Decimal;
 
         let usdc = IERC20::new(POLYGON_USDC, &self.provider);

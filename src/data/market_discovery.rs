@@ -13,12 +13,12 @@ use serde::{Deserialize, Serialize};
 use crate::pipeline::signal::Direction;
 
 const WINDOW_SECS: i64 = 300;
-pub(crate) const SERIES_ID: &str = "btc-updown-5m";
+pub const SERIES_ID: &str = "btc-updown-5m";
 
 // ─── Gamma API Types ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct GammaMarket {
+pub struct GammaMarket {
     #[serde(default)]
     pub slug: String,
     #[serde(rename = "endDate", default)]
@@ -38,13 +38,13 @@ pub(crate) struct GammaMarket {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ResolutionState {
+pub enum ResolutionState {
     Pending,
     Resolved(Direction),
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ActiveMarket {
+pub struct ActiveMarket {
     pub market: GammaMarket,
     pub token_id_yes: String,
     pub token_id_no: String,
@@ -55,19 +55,19 @@ pub(crate) struct ActiveMarket {
 // ─── Discovery Config ───
 
 #[derive(Debug, Clone)]
-pub(crate) struct DiscoveryConfig {
+pub struct DiscoveryConfig {
     pub gamma_api_url: String,
 }
 
 // ─── Market Discovery ───
 
-pub(crate) struct MarketDiscovery {
+pub struct MarketDiscovery {
     config: DiscoveryConfig,
     client: reqwest::Client,
 }
 
 impl MarketDiscovery {
-    pub(crate) fn new(config: DiscoveryConfig) -> Self {
+    pub fn new(config: DiscoveryConfig) -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
@@ -89,7 +89,7 @@ impl MarketDiscovery {
     }
 
     /// Find the next active market by searching slug patterns
-    pub(crate) async fn discover(&self) -> Result<ActiveMarket> {
+    pub async fn discover(&self) -> Result<ActiveMarket> {
         let base = &self.config.gamma_api_url;
         let window_ts = Self::current_window_ts();
 
@@ -145,7 +145,7 @@ impl MarketDiscovery {
         anyhow::bail!("No active market found for series: {}", SERIES_ID)
     }
 
-    pub(crate) async fn fetch_market_by_slug(&self, slug: &str) -> Result<GammaMarket> {
+    pub async fn fetch_market_by_slug(&self, slug: &str) -> Result<GammaMarket> {
         let url = format!("{}/markets/slug/{}", self.config.gamma_api_url, slug);
         let market = self
             .client
@@ -217,7 +217,7 @@ fn parse_json_string_array(value: &Option<String>) -> Option<Vec<String>> {
     serde_json::from_str::<Vec<String>>(raw).ok()
 }
 
-pub(crate) fn infer_resolution_state(market: &GammaMarket) -> Option<ResolutionState> {
+pub fn infer_resolution_state(market: &GammaMarket) -> Option<ResolutionState> {
     let status = match market.uma_resolution_status.as_deref() {
         Some(s) => s.to_ascii_lowercase(),
         None => return Some(ResolutionState::Pending), // not yet published, wait silently

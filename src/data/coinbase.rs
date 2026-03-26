@@ -13,18 +13,18 @@ const WS_URL: &str = "wss://advanced-trade-ws.coinbase.com";
 const PRICE_CHANNEL_BUFFER: usize = 1000;
 
 #[derive(Debug, Clone)]
-pub(crate) struct TickerUpdate {
+pub struct TickerUpdate {
     pub price: Decimal,
     pub timestamp_ms: i64,
 }
 
-pub(crate) struct CoinbaseClient {
+pub struct CoinbaseClient {
     product_id: String,
     price_tx: broadcast::Sender<TickerUpdate>,
 }
 
 impl CoinbaseClient {
-    pub(crate) fn new(product_id: &str) -> Self {
+    pub fn new(product_id: &str) -> Self {
         let (price_tx, _) = broadcast::channel(PRICE_CHANNEL_BUFFER);
         Self {
             product_id: product_id.to_string(),
@@ -32,11 +32,11 @@ impl CoinbaseClient {
         }
     }
 
-    pub(crate) fn subscribe(&self) -> broadcast::Receiver<TickerUpdate> {
+    pub fn subscribe(&self) -> broadcast::Receiver<TickerUpdate> {
         self.price_tx.subscribe()
     }
 
-    pub(crate) async fn start_ticker_ws(self: Arc<Self>) -> Result<()> {
+    pub async fn start_ticker_ws(self: Arc<Self>) -> Result<()> {
         tracing::info!("[WS] connecting {}", WS_URL);
         let mut backoff_secs: u64 = 1;
         const MAX_BACKOFF_SECS: u64 = 60;

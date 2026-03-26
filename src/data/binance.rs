@@ -13,7 +13,7 @@ const WS_URL: &str = "wss://stream.binance.com:9443/ws";
 const PRICE_CHANNEL_BUFFER: usize = 1000;
 
 #[derive(Debug, Clone)]
-pub(crate) struct TickerUpdate {
+pub struct TickerUpdate {
     pub price: Decimal,
     pub timestamp_ms: i64,
 }
@@ -23,13 +23,13 @@ enum WsLoopError {
     Transient(anyhow::Error),
 }
 
-pub(crate) struct BinanceClient {
+pub struct BinanceClient {
     symbol: String,
     price_tx: broadcast::Sender<TickerUpdate>,
 }
 
 impl BinanceClient {
-    pub(crate) fn new(symbol: &str) -> Self {
+    pub fn new(symbol: &str) -> Self {
         let (price_tx, _) = broadcast::channel(PRICE_CHANNEL_BUFFER);
         Self {
             symbol: symbol.to_string(),
@@ -37,12 +37,12 @@ impl BinanceClient {
         }
     }
 
-    pub(crate) fn subscribe(&self) -> broadcast::Receiver<TickerUpdate> {
+    pub fn subscribe(&self) -> broadcast::Receiver<TickerUpdate> {
         self.price_tx.subscribe()
     }
 
     /// Start WebSocket connection for real-time price updates
-    pub(crate) async fn start_ticker_ws(self: Arc<Self>) -> anyhow::Result<()> {
+    pub async fn start_ticker_ws(self: Arc<Self>) -> anyhow::Result<()> {
         let stream_name = format!("{}@ticker", self.symbol.to_lowercase());
         let ws_url = format!("{}/{}", WS_URL, stream_name);
 

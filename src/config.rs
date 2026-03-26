@@ -11,7 +11,7 @@ fn dec(s: &str) -> Decimal {
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct Config {
+pub struct Config {
     #[serde(default)]
     pub trading: TradingConfig,
     pub market: MarketConfig,
@@ -29,18 +29,18 @@ pub(crate) struct Config {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum TradingMode {
+pub enum TradingMode {
     #[default]
     Paper,
     Live,
 }
 
 impl TradingMode {
-    pub(crate) fn is_paper(self) -> bool {
+    pub fn is_paper(self) -> bool {
         matches!(self, Self::Paper)
     }
 
-    pub(crate) fn is_live(self) -> bool {
+    pub fn is_live(self) -> bool {
         matches!(self, Self::Live)
     }
 }
@@ -55,7 +55,7 @@ impl std::fmt::Display for TradingMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct TradingConfig {
+pub struct TradingConfig {
     #[serde(default)]
     pub mode: TradingMode,
     /// Loaded from PRIVATE_KEY env var (not stored in config.json)
@@ -70,7 +70,7 @@ fn default_private_key() -> SecretString {
 // ─── Market ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MarketConfig {
+pub struct MarketConfig {
     #[serde(default = "default_stale_threshold_ms")]
     pub stale_threshold_ms: i64,
     #[serde(default = "default_min_ttl_ms")]
@@ -87,14 +87,14 @@ fn default_min_ttl_ms() -> i64 {
 // ─── Polymarket CLOB ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PolymarketConfig {
+pub struct PolymarketConfig {
     pub gamma_api_url: String,
 }
 
 // ─── Strategy ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct StrategyConfig {
+pub struct StrategyConfig {
     #[serde(
         default = "default_extreme_threshold",
         with = "rust_decimal::serde::float"
@@ -169,7 +169,7 @@ fn default_spot_momentum_60s_threshold() -> Decimal {
 // ─── Risk ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct RiskConfig {
+pub struct RiskConfig {
     #[serde(default = "default_max_fak_retries")]
     pub max_fak_retries: u32,
     #[serde(default = "default_fak_backoff_ms")]
@@ -197,7 +197,7 @@ fn default_fak_backoff_ms() -> u64 {
 // ─── Polling ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PollingConfig {
+pub struct PollingConfig {
     pub signal_interval_ms: u64,
     #[serde(default = "default_status_interval_ms")]
     pub status_interval_ms: u64,
@@ -210,7 +210,7 @@ fn default_status_interval_ms() -> u64 {
 // ─── Execution ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ExecutionConfig {
+pub struct ExecutionConfig {
     /// Price slippage tolerance (e.g., 0.01 = 1%)
     #[serde(
         default = "default_slippage_tolerance",
@@ -227,7 +227,7 @@ fn default_slippage_tolerance() -> Decimal {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum PriceSourceType {
+pub enum PriceSourceType {
     #[default]
     Binance,
     BinanceWs,
@@ -236,7 +236,7 @@ pub(crate) enum PriceSourceType {
 }
 
 impl PriceSourceType {
-    pub(crate) fn expects_dash_symbol(self) -> bool {
+    pub fn expects_dash_symbol(self) -> bool {
         matches!(self, Self::Coinbase | Self::CoinbaseWs)
     }
 }
@@ -253,7 +253,7 @@ impl std::fmt::Display for PriceSourceType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PriceSourceConfig {
+pub struct PriceSourceConfig {
     #[serde(default)]
     pub source: PriceSourceType,
     #[serde(default = "default_symbol")]
@@ -370,7 +370,7 @@ impl Default for PriceSourceConfig {
 }
 
 impl Config {
-    pub(crate) fn load(path: &Path) -> anyhow::Result<Self> {
+    pub fn load(path: &Path) -> anyhow::Result<Self> {
         let content = fs::read_to_string(path)?;
         let mut config: Config = serde_json::from_str(&content)?;
         // Load secrets from env (not stored in config.json)
@@ -380,13 +380,13 @@ impl Config {
         Ok(config)
     }
 
-    pub(crate) fn save(&self, path: &Path) -> anyhow::Result<()> {
+    pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         let content = serde_json::to_string_pretty(self)?;
         fs::write(path, content)?;
         Ok(())
     }
 
-    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+    pub fn validate(&self) -> anyhow::Result<()> {
         let zero = Decimal::ZERO;
         let one = Decimal::ONE;
 
@@ -456,7 +456,7 @@ impl Config {
         Ok(())
     }
 
-    pub(crate) fn is_default_non_trading(&self) -> bool {
+    pub fn is_default_non_trading(&self) -> bool {
         let defaults = Config::default();
 
         self.market.stale_threshold_ms == defaults.market.stale_threshold_ms

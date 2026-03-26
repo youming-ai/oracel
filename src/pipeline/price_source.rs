@@ -47,18 +47,18 @@ struct PriceTick {
     timestamp_ms: i64,
 }
 
-pub(crate) struct SpotMomentumSnapshot {
+pub struct SpotMomentumSnapshot {
     pub latest: Decimal,
     pub price_30s_ago: Option<Decimal>,
     pub price_60s_ago: Option<Decimal>,
 }
 
-pub(crate) enum PriceClient {
+pub enum PriceClient {
     Binance(Arc<BinanceClient>),
     Coinbase(Arc<CoinbaseClient>),
 }
 
-pub(crate) struct PriceSource {
+pub struct PriceSource {
     client: PriceClient,
     buffer: Arc<RwLock<VecDeque<PriceTick>>>,
     max: usize,
@@ -66,7 +66,7 @@ pub(crate) struct PriceSource {
 }
 
 impl PriceSource {
-    pub(crate) fn new(source_type: PriceSourceType, symbol: &str, max: usize) -> Self {
+    pub fn new(source_type: PriceSourceType, symbol: &str, max: usize) -> Self {
         let client = match source_type {
             PriceSourceType::Binance | PriceSourceType::BinanceWs => {
                 PriceClient::Binance(Arc::new(BinanceClient::new(symbol)))
@@ -85,17 +85,17 @@ impl PriceSource {
     }
 
     #[inline]
-    pub(crate) async fn latest(&self) -> Option<Decimal> {
+    pub async fn latest(&self) -> Option<Decimal> {
         self.buffer.read().await.back().map(|t| t.price)
     }
 
     #[inline]
-    pub(crate) async fn last_tick_ms(&self) -> Option<i64> {
+    pub async fn last_tick_ms(&self) -> Option<i64> {
         self.buffer.read().await.back().map(|t| t.timestamp_ms)
     }
 
     #[inline]
-    pub(crate) async fn momentum_snapshot(&self) -> Option<SpotMomentumSnapshot> {
+    pub async fn momentum_snapshot(&self) -> Option<SpotMomentumSnapshot> {
         let buffer = self.buffer.read().await;
         let latest_tick = *buffer.back()?;
 
@@ -120,11 +120,11 @@ impl PriceSource {
         })
     }
 
-    pub(crate) async fn buffer_len(&self) -> usize {
+    pub async fn buffer_len(&self) -> usize {
         self.buffer.read().await.len()
     }
 
-    pub(crate) async fn start(self: Arc<Self>) {
+    pub async fn start(self: Arc<Self>) {
         if self.started.swap(true, std::sync::atomic::Ordering::SeqCst) {
             tracing::warn!("[PRICE] PriceSource already started, skipping");
             return;
