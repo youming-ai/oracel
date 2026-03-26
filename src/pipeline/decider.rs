@@ -10,7 +10,7 @@ use crate::pipeline::signal::Direction;
 use rust_decimal::Decimal;
 
 #[derive(Debug, Clone)]
-pub(crate) enum Decision {
+pub enum Decision {
     Pass(String),
     Trade {
         direction: Direction,
@@ -22,7 +22,7 @@ pub(crate) enum Decision {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct DeciderConfig {
+pub struct DeciderConfig {
     pub position_size_usdc: Decimal,
     pub extreme_threshold: Decimal,
     pub fair_value: Decimal,
@@ -78,7 +78,7 @@ impl From<&crate::config::Config> for DeciderConfig {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct AccountState {
+pub struct AccountState {
     pub balance: Decimal,
     pub initial_balance: Decimal,
     pub consecutive_losses: u32,
@@ -90,7 +90,7 @@ pub(crate) struct AccountState {
 }
 
 impl AccountState {
-    pub(crate) fn new(balance: Decimal) -> Self {
+    pub fn new(balance: Decimal) -> Self {
         Self {
             balance,
             initial_balance: balance,
@@ -103,18 +103,15 @@ impl AccountState {
         }
     }
 
-    pub(crate) fn pnl(&self) -> Decimal {
+    pub fn pnl(&self) -> Decimal {
         self.balance - self.initial_balance
     }
 
-    pub(crate) fn record_trade(&mut self, cost: Decimal) {
+    pub fn record_trade(&mut self, cost: Decimal) {
         self.balance -= cost;
     }
 
-    pub(crate) fn record_settlement(
-        &mut self,
-        result: &crate::pipeline::settler::SettlementResult,
-    ) {
+    pub fn record_settlement(&mut self, result: &crate::pipeline::settler::SettlementResult) {
         self.balance += result.payout;
         self.daily_pnl += result.pnl;
 
@@ -129,7 +126,7 @@ impl AccountState {
         }
     }
 
-    pub(crate) fn reset_daily_if_needed(&mut self, today: &str) {
+    pub fn reset_daily_if_needed(&mut self, today: &str) {
         if self.daily_reset_date != today {
             self.daily_pnl = Decimal::ZERO;
             self.daily_reset_date = today.to_string();
@@ -139,19 +136,19 @@ impl AccountState {
 
 /// Input context for the decide function
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct SpotConfirmationContext {
+pub struct SpotConfirmationContext {
     pub momentum_30s: Option<Decimal>,
     pub momentum_60s: Option<Decimal>,
 }
 
-pub(crate) struct DecideContext {
+pub struct DecideContext {
     pub market_yes: Option<Decimal>,
     pub market_no: Option<Decimal>,
     pub remaining_ms: i64,
     pub spot_confirmation: SpotConfirmationContext,
 }
 
-pub(crate) fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderConfig) -> Decision {
+pub fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderConfig) -> Decision {
     if account.balance <= Decimal::ZERO {
         return Decision::Pass("insufficient_balance".into());
     }

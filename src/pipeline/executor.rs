@@ -9,7 +9,7 @@ use anyhow::Result;
 use rust_decimal::Decimal;
 
 #[derive(Debug, Clone)]
-pub(crate) struct OrderResult {
+pub struct OrderResult {
     pub order_id: String,
     pub direction: Direction,
     pub size_usdc: Decimal,
@@ -20,13 +20,13 @@ pub(crate) struct OrderResult {
     pub entry_btc_price: Decimal,
 }
 
-pub(crate) struct Executor {
+pub struct Executor {
     mode: TradingMode,
     auth_client: Option<AuthenticatedPolyClient>,
     execution_config: ExecutionConfig,
 }
 
-pub(crate) struct ExecuteContext<'a> {
+pub struct ExecuteContext<'a> {
     pub decision: &'a Decision,
     pub token_yes: &'a str,
     pub token_no: &'a str,
@@ -37,7 +37,7 @@ pub(crate) struct ExecuteContext<'a> {
 }
 
 impl Executor {
-    pub(crate) fn new(
+    pub fn new(
         mode: TradingMode,
         auth_client: Option<AuthenticatedPolyClient>,
         execution_config: ExecutionConfig,
@@ -49,7 +49,7 @@ impl Executor {
         }
     }
 
-    pub(crate) async fn execute(&self, ctx: &ExecuteContext<'_>) -> Option<OrderResult> {
+    pub async fn execute(&self, ctx: &ExecuteContext<'_>) -> Option<OrderResult> {
         match ctx.decision {
             Decision::Pass(_) => None,
             Decision::Trade {

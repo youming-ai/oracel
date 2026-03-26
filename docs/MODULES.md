@@ -4,6 +4,7 @@
 1. [Configuration Module](#configuration-module)
 2. [Data Layer](#data-layer)
 3. [Pipeline Layer](#pipeline-layer)
+4. [CLI Tools](#cli-tools)
 
 ---
 
@@ -11,7 +12,7 @@
 
 ### `src/config.rs`
 
-Central configuration management with validation and defaults.
+Central configuration management with validation. All default values are consolidated in a `defaults` submodule for a single source of truth.
 
 #### Key Structures
 
@@ -22,10 +23,10 @@ pub struct Config {
     pub market: MarketConfig,
     pub polyclob: PolymarketConfig,
     pub strategy: StrategyConfig,
-    pub edge: EdgeConfigFile,
     pub risk: RiskConfig,
     pub polling: PollingConfig,
     pub price_source: PriceSourceConfig,
+    pub execution: ExecutionConfig,
 }
 ```
 
@@ -54,7 +55,7 @@ The `validate()` method performs startup checks:
 | Extreme threshold | 0 < value < 1 | `strategy.extreme_threshold must be in (0, 1)` |
 | Fair value | 0 < value < 1 | `strategy.fair_value must be in (0, 1)` |
 | Position size | > 0 | `strategy.position_size_usdc must be > 0` |
-| Edge threshold | 0 < value < 1 | `edge.edge_threshold_early must be in (0, 1)` |
+| Min edge | [0, 1) | `strategy.min_edge must be in [0, 1)` |
 | Symbol format | Exchange-specific | `price_source.symbol must match...` |
 
 #### Symbol Format Validation
@@ -303,7 +304,7 @@ if state.resolved {
 
 ### `src/data/polymarket.rs`
 
-Polymarket CLOB (Central Limit Order Book) client.
+Polymarket CLOB (Central Limit Order Book) client and Polygon RPC URL selection.
 
 #### Key Structures
 
@@ -378,23 +379,6 @@ let order = auth.place_fok_order(
     "0.15"      // price
 ).await?;
 ```
-
----
-
-### `src/data/chainlink.rs`
-
-Polygon RPC configuration for on-chain operations.
-
-#### Key Functions
-
-**`rpc_url()`** - Get appropriate RPC endpoint
-```rust
-pub fn rpc_url(mode: TradingMode) -> String
-```
-
-**Priority**:
-1. `ALCHEMY_KEY` env var set → Use Alchemy (higher reliability)
-2. Fallback → Public Polygon RPC
 
 ---
 
@@ -910,3 +894,26 @@ if market_resolved {
     println!("Settled: PnL = ${}", result.pnl);
 }
 ```
+
+---
+
+## CLI Tools
+
+### `src/cli.rs`
+
+Separate binary (`polybot-tools`) for utility commands that are not part of the trading loop.
+
+#### Commands
+
+```bash
+polybot-tools --derive-keys        # Derive Polymarket CLOB API credentials
+polybot-tools --redeem-all         # Redeem all winning positions (last 24h)
+polybot-tools --redeem <slug>      # Redeem a single market by slug
+```
+
+#### Shared Library
+
+Both `polybot` and `polybot-tools` binaries share code via `src/lib.rs`, which re-exports:
+- `config` — configuration types and validation
+- `data` — exchange clients, Polymarket CLOB, market discovery
+- `pipeline` — trading pipeline stages

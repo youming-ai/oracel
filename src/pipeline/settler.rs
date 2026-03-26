@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::pipeline::signal::Direction;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct PendingPosition {
+pub struct PendingPosition {
     pub direction: Direction,
     pub size_usdc: Decimal,
     pub entry_price: Decimal,
@@ -21,7 +21,7 @@ pub(crate) struct PendingPosition {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct SettlementResult {
+pub struct SettlementResult {
     pub direction: Direction,
     pub payout: Decimal,
     pub pnl: Decimal,
@@ -30,18 +30,24 @@ pub(crate) struct SettlementResult {
     pub entry_btc_price: Decimal,
 }
 
-pub(crate) struct Settler {
+pub struct Settler {
     pending: VecDeque<PendingPosition>,
 }
 
+impl Default for Settler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Settler {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             pending: VecDeque::new(),
         }
     }
 
-    pub(crate) fn restore_positions(&mut self, positions: Vec<PendingPosition>) {
+    pub fn restore_positions(&mut self, positions: Vec<PendingPosition>) {
         for pos in positions {
             // Skip duplicates based on condition_id
             if self
@@ -59,11 +65,11 @@ impl Settler {
         }
     }
 
-    pub(crate) fn pending_positions(&self) -> Vec<PendingPosition> {
+    pub fn pending_positions(&self) -> Vec<PendingPosition> {
         self.pending.iter().cloned().collect()
     }
 
-    pub(crate) fn add_position(&mut self, pos: PendingPosition) {
+    pub fn add_position(&mut self, pos: PendingPosition) {
         // Prevent duplicate positions for same market
         if self
             .pending
@@ -79,11 +85,11 @@ impl Settler {
         self.pending.push_back(pos);
     }
 
-    pub(crate) fn pending_count(&self) -> usize {
+    pub fn pending_count(&self) -> usize {
         self.pending.len()
     }
 
-    pub(crate) fn due_positions(&self) -> Vec<PendingPosition> {
+    pub fn due_positions(&self) -> Vec<PendingPosition> {
         let now = Utc::now().timestamp_millis();
         self.pending
             .iter()
@@ -92,7 +98,7 @@ impl Settler {
             .collect()
     }
 
-    pub(crate) fn settle_by_slug(&mut self, slug: &str, won: bool) -> Option<SettlementResult> {
+    pub fn settle_by_slug(&mut self, slug: &str, won: bool) -> Option<SettlementResult> {
         let matching: Vec<PendingPosition> = self
             .pending
             .iter()

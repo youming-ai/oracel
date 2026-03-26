@@ -632,7 +632,7 @@ tracing::warn!("Order execution failed: {}", error);
 | `[STATUS]` | Periodic status summary |
 | `[RISK]` | Risk control warnings |
 | `[WS]` | WebSocket connection events |
-| `[STATE]` | State persistence events |
+| `[BAL]` | Balance update events |
 
 ### Custom Log Messages
 

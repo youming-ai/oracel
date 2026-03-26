@@ -10,8 +10,67 @@ fn dec(s: &str) -> Decimal {
     Decimal::from_str_exact(s).expect("valid decimal literal")
 }
 
+mod defaults {
+    use super::*;
+
+    pub fn stale_threshold_ms() -> i64 {
+        30_000
+    }
+    pub fn min_ttl_ms() -> i64 {
+        30_000
+    }
+    pub fn extreme_threshold() -> Decimal {
+        dec("0.80")
+    }
+    pub fn fair_value() -> Decimal {
+        dec("0.50")
+    }
+    pub fn position_size_usdc() -> Decimal {
+        dec("1.0")
+    }
+    pub fn min_edge() -> Decimal {
+        dec("0.05")
+    }
+    pub fn min_entry_price() -> Decimal {
+        dec("0.08")
+    }
+    pub fn max_entry_price() -> Decimal {
+        dec("0.12")
+    }
+    pub fn min_ttl_for_entry_ms() -> u64 {
+        120_000
+    }
+    pub fn spot_momentum_30s_threshold() -> Decimal {
+        dec("40")
+    }
+    pub fn spot_momentum_60s_threshold() -> Decimal {
+        dec("70")
+    }
+    pub fn daily_loss_limit() -> Decimal {
+        dec("0")
+    }
+    pub fn max_fak_retries() -> u32 {
+        3
+    }
+    pub fn fak_backoff_ms() -> u64 {
+        3_000
+    }
+    pub fn status_interval_ms() -> u64 {
+        10_000
+    }
+    pub fn slippage_tolerance() -> Decimal {
+        dec("0.01")
+    }
+    pub fn symbol() -> String {
+        "BTCUSDT".to_string()
+    }
+    pub fn private_key() -> SecretString {
+        SecretString::new(String::new().into())
+    }
+}
+
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct Config {
+pub struct Config {
     #[serde(default)]
     pub trading: TradingConfig,
     pub market: MarketConfig,
@@ -29,18 +88,18 @@ pub(crate) struct Config {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum TradingMode {
+pub enum TradingMode {
     #[default]
     Paper,
     Live,
 }
 
 impl TradingMode {
-    pub(crate) fn is_paper(self) -> bool {
+    pub fn is_paper(self) -> bool {
         matches!(self, Self::Paper)
     }
 
-    pub(crate) fn is_live(self) -> bool {
+    pub fn is_live(self) -> bool {
         matches!(self, Self::Live)
     }
 }
@@ -55,179 +114,121 @@ impl std::fmt::Display for TradingMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct TradingConfig {
+pub struct TradingConfig {
     #[serde(default)]
     pub mode: TradingMode,
     /// Loaded from PRIVATE_KEY env var (not stored in config.json)
-    #[serde(skip, default = "default_private_key")]
+    #[serde(skip, default = "defaults::private_key")]
     pub private_key: SecretString,
-}
-
-fn default_private_key() -> SecretString {
-    SecretString::new(String::new().into())
 }
 
 // ─── Market ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MarketConfig {
-    #[serde(default = "default_stale_threshold_ms")]
+pub struct MarketConfig {
+    #[serde(default = "defaults::stale_threshold_ms")]
     pub stale_threshold_ms: i64,
-    #[serde(default = "default_min_ttl_ms")]
+    #[serde(default = "defaults::min_ttl_ms")]
     pub min_ttl_ms: i64,
-}
-
-fn default_stale_threshold_ms() -> i64 {
-    30_000
-}
-fn default_min_ttl_ms() -> i64 {
-    30_000
 }
 
 // ─── Polymarket CLOB ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PolymarketConfig {
+pub struct PolymarketConfig {
     pub gamma_api_url: String,
 }
 
 // ─── Strategy ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct StrategyConfig {
+pub struct StrategyConfig {
     #[serde(
-        default = "default_extreme_threshold",
+        default = "defaults::extreme_threshold",
         with = "rust_decimal::serde::float"
     )]
     pub extreme_threshold: Decimal,
-    #[serde(default = "default_fair_value", with = "rust_decimal::serde::float")]
+    #[serde(default = "defaults::fair_value", with = "rust_decimal::serde::float")]
     pub fair_value: Decimal,
     #[serde(
-        default = "default_position_size_usdc",
+        default = "defaults::position_size_usdc",
         with = "rust_decimal::serde::float"
     )]
     pub position_size_usdc: Decimal,
     /// Minimum edge required to trade (default 0.05 = 5%)
-    #[serde(default = "default_min_edge", with = "rust_decimal::serde::float")]
+    #[serde(default = "defaults::min_edge", with = "rust_decimal::serde::float")]
     pub min_edge: Decimal,
     /// Minimum entry price to trade (avoid illiquid extreme prices)
     #[serde(
-        default = "default_min_entry_price",
+        default = "defaults::min_entry_price",
         with = "rust_decimal::serde::float"
     )]
     pub min_entry_price: Decimal,
     /// Maximum entry price to trade (avoid illiquid extreme prices)
     #[serde(
-        default = "default_max_entry_price",
+        default = "defaults::max_entry_price",
         with = "rust_decimal::serde::float"
     )]
     pub max_entry_price: Decimal,
     /// Minimum time-to-live for market to enter a trade (ms)
-    #[serde(default = "default_min_ttl_for_entry_ms")]
+    #[serde(default = "defaults::min_ttl_for_entry_ms")]
     pub min_ttl_for_entry_ms: u64,
     /// Spot price momentum threshold over 30s (in USD)
     #[serde(
-        default = "default_spot_momentum_30s_threshold",
+        default = "defaults::spot_momentum_30s_threshold",
         with = "rust_decimal::serde::float"
     )]
     pub spot_momentum_30s_threshold: Decimal,
     /// Spot price momentum threshold over 60s (in USD)
     #[serde(
-        default = "default_spot_momentum_60s_threshold",
+        default = "defaults::spot_momentum_60s_threshold",
         with = "rust_decimal::serde::float"
     )]
     pub spot_momentum_60s_threshold: Decimal,
 }
 
-fn default_extreme_threshold() -> Decimal {
-    dec("0.80")
-}
-fn default_fair_value() -> Decimal {
-    dec("0.50")
-}
-fn default_position_size_usdc() -> Decimal {
-    dec("1.0")
-}
-fn default_min_edge() -> Decimal {
-    dec("0.05")
-}
-fn default_min_entry_price() -> Decimal {
-    dec("0.08")
-}
-fn default_max_entry_price() -> Decimal {
-    dec("0.12")
-}
-fn default_min_ttl_for_entry_ms() -> u64 {
-    120_000
-}
-fn default_spot_momentum_30s_threshold() -> Decimal {
-    dec("40")
-}
-fn default_spot_momentum_60s_threshold() -> Decimal {
-    dec("70")
-}
 // ─── Risk ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct RiskConfig {
-    #[serde(default = "default_max_fak_retries")]
+pub struct RiskConfig {
+    #[serde(default = "defaults::max_fak_retries")]
     pub max_fak_retries: u32,
-    #[serde(default = "default_fak_backoff_ms")]
+    #[serde(default = "defaults::fak_backoff_ms")]
     pub fak_backoff_ms: u64,
     /// Daily loss limit in USDC (0 = disabled)
     #[serde(
-        default = "default_daily_loss_limit",
+        default = "defaults::daily_loss_limit",
         with = "rust_decimal::serde::float"
     )]
     pub daily_loss_limit_usdc: Decimal,
 }
 
-fn default_daily_loss_limit() -> Decimal {
-    dec("0") // disabled by default
-}
-
-fn default_max_fak_retries() -> u32 {
-    3
-}
-
-fn default_fak_backoff_ms() -> u64 {
-    3_000
-}
-
 // ─── Polling ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PollingConfig {
+pub struct PollingConfig {
     pub signal_interval_ms: u64,
-    #[serde(default = "default_status_interval_ms")]
+    #[serde(default = "defaults::status_interval_ms")]
     pub status_interval_ms: u64,
-}
-
-fn default_status_interval_ms() -> u64 {
-    10_000
 }
 
 // ─── Execution ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ExecutionConfig {
+pub struct ExecutionConfig {
     /// Price slippage tolerance (e.g., 0.01 = 1%)
     #[serde(
-        default = "default_slippage_tolerance",
+        default = "defaults::slippage_tolerance",
         with = "rust_decimal::serde::float"
     )]
     pub slippage_tolerance: Decimal,
-}
-
-fn default_slippage_tolerance() -> Decimal {
-    dec("0.01") // 1%
 }
 
 // ─── Price Source ───
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum PriceSourceType {
+pub enum PriceSourceType {
     #[default]
     Binance,
     BinanceWs,
@@ -236,7 +237,7 @@ pub(crate) enum PriceSourceType {
 }
 
 impl PriceSourceType {
-    pub(crate) fn expects_dash_symbol(self) -> bool {
+    pub fn expects_dash_symbol(self) -> bool {
         matches!(self, Self::Coinbase | Self::CoinbaseWs)
     }
 }
@@ -253,15 +254,11 @@ impl std::fmt::Display for PriceSourceType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PriceSourceConfig {
+pub struct PriceSourceConfig {
     #[serde(default)]
     pub source: PriceSourceType,
-    #[serde(default = "default_symbol")]
+    #[serde(default = "defaults::symbol")]
     pub symbol: String,
-}
-
-fn default_symbol() -> String {
-    "BTCUSDT".to_string()
 }
 
 fn is_valid_binance_symbol(symbol: &str) -> bool {
@@ -295,7 +292,7 @@ impl Default for TradingConfig {
     fn default() -> Self {
         Self {
             mode: TradingMode::default(),
-            private_key: default_private_key(),
+            private_key: defaults::private_key(),
         }
     }
 }
@@ -303,8 +300,8 @@ impl Default for TradingConfig {
 impl Default for MarketConfig {
     fn default() -> Self {
         Self {
-            stale_threshold_ms: 30_000,
-            min_ttl_ms: 30_000,
+            stale_threshold_ms: defaults::stale_threshold_ms(),
+            min_ttl_ms: defaults::min_ttl_ms(),
         }
     }
 }
@@ -320,15 +317,15 @@ impl Default for PolymarketConfig {
 impl Default for StrategyConfig {
     fn default() -> Self {
         Self {
-            extreme_threshold: default_extreme_threshold(),
-            fair_value: default_fair_value(),
-            position_size_usdc: default_position_size_usdc(),
-            min_edge: default_min_edge(),
-            min_entry_price: default_min_entry_price(),
-            max_entry_price: default_max_entry_price(),
-            min_ttl_for_entry_ms: default_min_ttl_for_entry_ms(),
-            spot_momentum_30s_threshold: default_spot_momentum_30s_threshold(),
-            spot_momentum_60s_threshold: default_spot_momentum_60s_threshold(),
+            extreme_threshold: defaults::extreme_threshold(),
+            fair_value: defaults::fair_value(),
+            position_size_usdc: defaults::position_size_usdc(),
+            min_edge: defaults::min_edge(),
+            min_entry_price: defaults::min_entry_price(),
+            max_entry_price: defaults::max_entry_price(),
+            min_ttl_for_entry_ms: defaults::min_ttl_for_entry_ms(),
+            spot_momentum_30s_threshold: defaults::spot_momentum_30s_threshold(),
+            spot_momentum_60s_threshold: defaults::spot_momentum_60s_threshold(),
         }
     }
 }
@@ -336,9 +333,9 @@ impl Default for StrategyConfig {
 impl Default for RiskConfig {
     fn default() -> Self {
         Self {
-            max_fak_retries: 3,
-            fak_backoff_ms: 3_000,
-            daily_loss_limit_usdc: dec("0"),
+            max_fak_retries: defaults::max_fak_retries(),
+            fak_backoff_ms: defaults::fak_backoff_ms(),
+            daily_loss_limit_usdc: defaults::daily_loss_limit(),
         }
     }
 }
@@ -346,7 +343,7 @@ impl Default for RiskConfig {
 impl Default for ExecutionConfig {
     fn default() -> Self {
         Self {
-            slippage_tolerance: dec("0.01"),
+            slippage_tolerance: defaults::slippage_tolerance(),
         }
     }
 }
@@ -355,7 +352,7 @@ impl Default for PollingConfig {
     fn default() -> Self {
         Self {
             signal_interval_ms: 1000,
-            status_interval_ms: 10_000,
+            status_interval_ms: defaults::status_interval_ms(),
         }
     }
 }
@@ -364,13 +361,13 @@ impl Default for PriceSourceConfig {
     fn default() -> Self {
         Self {
             source: PriceSourceType::Binance,
-            symbol: default_symbol(),
+            symbol: defaults::symbol(),
         }
     }
 }
 
 impl Config {
-    pub(crate) fn load(path: &Path) -> anyhow::Result<Self> {
+    pub fn load(path: &Path) -> anyhow::Result<Self> {
         let content = fs::read_to_string(path)?;
         let mut config: Config = serde_json::from_str(&content)?;
         // Load secrets from env (not stored in config.json)
@@ -380,13 +377,13 @@ impl Config {
         Ok(config)
     }
 
-    pub(crate) fn save(&self, path: &Path) -> anyhow::Result<()> {
+    pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         let content = serde_json::to_string_pretty(self)?;
         fs::write(path, content)?;
         Ok(())
     }
 
-    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+    pub fn validate(&self) -> anyhow::Result<()> {
         let zero = Decimal::ZERO;
         let one = Decimal::ONE;
 
@@ -456,26 +453,10 @@ impl Config {
         Ok(())
     }
 
-    pub(crate) fn is_default_non_trading(&self) -> bool {
-        let defaults = Config::default();
-
-        self.market.stale_threshold_ms == defaults.market.stale_threshold_ms
-            && self.market.min_ttl_ms == defaults.market.min_ttl_ms
-            && self.polyclob.gamma_api_url == defaults.polyclob.gamma_api_url
-            && self.strategy.extreme_threshold == defaults.strategy.extreme_threshold
-            && self.strategy.fair_value == defaults.strategy.fair_value
-            && self.strategy.position_size_usdc == defaults.strategy.position_size_usdc
-            && self.strategy.min_edge == defaults.strategy.min_edge
-            && self.strategy.min_entry_price == defaults.strategy.min_entry_price
-            && self.strategy.max_entry_price == defaults.strategy.max_entry_price
-            && self.strategy.min_ttl_for_entry_ms == defaults.strategy.min_ttl_for_entry_ms
-            && self.strategy.spot_momentum_30s_threshold
-                == defaults.strategy.spot_momentum_30s_threshold
-            && self.strategy.spot_momentum_60s_threshold
-                == defaults.strategy.spot_momentum_60s_threshold
-            && self.risk.max_fak_retries == defaults.risk.max_fak_retries
-            && self.polling.signal_interval_ms == defaults.polling.signal_interval_ms
-            && self.polling.status_interval_ms == defaults.polling.status_interval_ms
+    pub fn is_default_non_trading(&self) -> bool {
+        self.strategy.extreme_threshold == defaults::extreme_threshold()
+            && self.strategy.position_size_usdc == defaults::position_size_usdc()
+            && self.risk.daily_loss_limit_usdc == defaults::daily_loss_limit()
     }
 }
 

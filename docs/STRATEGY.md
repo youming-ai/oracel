@@ -218,21 +218,14 @@ Automatic flow:
 Manual redemption for historical markets:
 
 ```bash
-cargo run --release -- --redeem-all
+cargo run --release --bin polybot-tools -- --redeem-all
 ```
 
 This scans the last 24 hours of 5-minute markets (288 windows) and attempts redemption for any positions held on-chain.
 
-## 10. State Persistence
+## 10. State Management
 
-The bot persists the following to `logs/<mode>/state.json` after every trade and settlement:
-
-- Pending positions (direction, cost, shares, settlement time, condition ID)
-- Last traded settlement timestamp (prevents duplicate trades on restart)
-- Consecutive win/loss streaks
-- Daily PnL and reset date
-
-On startup, the bot restores this state to continue seamlessly after a restart.
+The bot uses in-memory state only. Balance is persisted to `logs/<mode>/balance` (atomic write via tmp+rename). Since markets are 5-minute windows, any pending positions from a previous run will have already settled by the time the bot restarts — no state.json persistence is needed.
 
 ## 11. Key Assumptions
 
