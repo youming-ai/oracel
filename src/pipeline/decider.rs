@@ -30,8 +30,6 @@ pub struct DeciderConfig {
     pub min_entry_price: Decimal,
     pub max_entry_price: Decimal,
     pub min_ttl_for_entry_ms: u64,
-    pub spot_momentum_30s_threshold: Decimal,
-    pub spot_momentum_60s_threshold: Decimal,
     pub daily_loss_limit_usdc: Decimal,
 }
 
@@ -45,8 +43,6 @@ impl Default for DeciderConfig {
             min_entry_price: decimal("0.02"),
             max_entry_price: decimal("0.06"),
             min_ttl_for_entry_ms: 120_000,
-            spot_momentum_30s_threshold: decimal("40"),
-            spot_momentum_60s_threshold: decimal("70"),
             daily_loss_limit_usdc: decimal("0"),
         }
     }
@@ -70,8 +66,6 @@ impl From<&crate::config::Config> for DeciderConfig {
             min_entry_price: cfg.strategy.min_entry_price,
             max_entry_price: cfg.strategy.max_entry_price,
             min_ttl_for_entry_ms: cfg.strategy.min_ttl_for_entry_ms,
-            spot_momentum_30s_threshold: cfg.strategy.spot_momentum_30s_threshold,
-            spot_momentum_60s_threshold: cfg.strategy.spot_momentum_60s_threshold,
             daily_loss_limit_usdc: cfg.risk.daily_loss_limit_usdc,
         }
     }
@@ -134,18 +128,10 @@ impl AccountState {
     }
 }
 
-/// Input context for the decide function
-#[derive(Debug, Clone, Copy)]
-pub struct SpotConfirmationContext {
-    pub momentum_30s: Option<Decimal>,
-    pub momentum_60s: Option<Decimal>,
-}
-
 pub struct DecideContext {
     pub market_yes: Option<Decimal>,
     pub market_no: Option<Decimal>,
     pub remaining_ms: i64,
-    pub spot_confirmation: SpotConfirmationContext,
 }
 
 pub fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderConfig) -> Decision {
@@ -210,46 +196,6 @@ pub fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderConfig) 
         return Decision::Pass(format!("ttl_below_entry_floor_{seconds}"));
     }
 
-    let spot_30s = match ctx.spot_confirmation.momentum_30s {
-        Some(momentum) => momentum,
-        None => return Decision::Pass("spot_confirmation_unavailable".into()),
-    };
-    let spot_60s = match ctx.spot_confirmation.momentum_60s {
-        Some(momentum) => momentum,
-        None => return Decision::Pass("spot_confirmation_unavailable".into()),
-    };
-
-    match base_direction {
-        Direction::Down => {
-            if spot_30s > cfg.spot_momentum_30s_threshold {
-                return Decision::Pass(format!(
-                    "spot_up_accelerating_30s_{}",
-                    integer_suffix(spot_30s)
-                ));
-            }
-            if spot_60s > cfg.spot_momentum_60s_threshold {
-                return Decision::Pass(format!(
-                    "spot_up_accelerating_60s_{}",
-                    integer_suffix(spot_60s)
-                ));
-            }
-        }
-        Direction::Up => {
-            if spot_30s < -cfg.spot_momentum_30s_threshold {
-                return Decision::Pass(format!(
-                    "spot_down_accelerating_30s_{}",
-                    integer_suffix(spot_30s)
-                ));
-            }
-            if spot_60s < -cfg.spot_momentum_60s_threshold {
-                return Decision::Pass(format!(
-                    "spot_down_accelerating_60s_{}",
-                    integer_suffix(spot_60s)
-                ));
-            }
-        }
-    }
-
     let payoff_ratio = if cheap_price > Decimal::ZERO {
         (Decimal::ONE - cheap_price) / cheap_price
     } else {
@@ -286,10 +232,6 @@ mod tests {
             market_yes: Some(d("0.97")),
             market_no: Some(d("0.03")),
             remaining_ms: 240_000,
-            spot_confirmation: SpotConfirmationContext {
-                momentum_30s: Some(Decimal::ZERO),
-                momentum_60s: Some(Decimal::ZERO),
-            },
         }
     }
 
@@ -529,110 +471,6 @@ mod tests {
         match decision {
             Decision::Pass(reason) => assert_eq!(reason, "ttl_below_entry_floor_1"),
             Decision::Trade { .. } => panic!("expected pass due to ttl floor"),
-        }
-    }
-
-    #[test]
-    fn test_pass_when_down_trade_spot_still_accelerates_up_spot_up_accelerating() {
-        let account = AccountState::new(d("1000"));
-        let cfg = cfg_for_entry_filter_test();
-        let mut ctx = default_ctx();
-        ctx.market_yes = Some(d("0.97"));
-        ctx.market_no = Some(d("0.03"));
-        ctx.spot_confirmation = SpotConfirmationContext {
-            momentum_30s: Some(d("45")),
-            momentum_60s: Some(Decimal::ZERO),
-        };
-
-        let decision = decide(&ctx, &account, &cfg);
-
-        match decision {
-            Decision::Pass(reason) => assert_eq!(reason, "spot_up_accelerating_30s_45"),
-            Decision::Trade { .. } => panic!("expected pass due to up acceleration"),
-        }
-    }
-
-    #[test]
-    fn test_pass_when_up_trade_spot_still_accelerates_down_spot_down_accelerating() {
-        let account = AccountState::new(d("1000"));
-        let cfg = cfg_for_entry_filter_test();
-        let mut ctx = default_ctx();
-        ctx.market_yes = Some(d("0.03"));
-        ctx.market_no = Some(d("0.97"));
-        ctx.spot_confirmation = SpotConfirmationContext {
-            momentum_30s: Some(d("-45")),
-            momentum_60s: Some(Decimal::ZERO),
-        };
-
-        let decision = decide(&ctx, &account, &cfg);
-
-        match decision {
-            Decision::Pass(reason) => assert_eq!(reason, "spot_down_accelerating_30s_45"),
-            Decision::Trade { .. } => panic!("expected pass due to down acceleration"),
-        }
-    }
-
-    #[test]
-    fn test_pass_when_spot_confirmation_missing_spot_confirmation_unavailable() {
-        let account = AccountState::new(d("1000"));
-        let cfg = cfg_for_entry_filter_test();
-        let mut ctx = default_ctx();
-        ctx.market_yes = Some(d("0.97"));
-        ctx.market_no = Some(d("0.03"));
-        ctx.spot_confirmation = SpotConfirmationContext {
-            momentum_30s: None,
-            momentum_60s: Some(Decimal::ZERO),
-        };
-
-        let decision = decide(&ctx, &account, &cfg);
-
-        match decision {
-            Decision::Pass(reason) => assert_eq!(reason, "spot_confirmation_unavailable"),
-            Decision::Trade { .. } => panic!("expected pass due to missing spot confirmation"),
-        }
-    }
-
-    #[test]
-    fn test_trade_when_spot_is_flat_or_countertrend() {
-        let account = AccountState::new(d("1000"));
-        let cfg = cfg_for_entry_filter_test();
-
-        let mut down_ctx = default_ctx();
-        down_ctx.market_yes = Some(d("0.97"));
-        down_ctx.market_no = Some(d("0.03"));
-        down_ctx.spot_confirmation = SpotConfirmationContext {
-            momentum_30s: Some(d("-5")),
-            momentum_60s: Some(d("0")),
-        };
-
-        let mut up_ctx = default_ctx();
-        up_ctx.market_yes = Some(d("0.03"));
-        up_ctx.market_no = Some(d("0.97"));
-        up_ctx.spot_confirmation = SpotConfirmationContext {
-            momentum_30s: Some(d("5")),
-            momentum_60s: Some(d("0")),
-        };
-
-        match decide(&down_ctx, &account, &cfg) {
-            Decision::Trade {
-                direction: Direction::Down,
-                ..
-            } => {}
-            Decision::Trade { direction, .. } => {
-                panic!("expected down trade, got {:?}", direction)
-            }
-            Decision::Pass(reason) => {
-                panic!("expected trade for down case but got pass: {}", reason)
-            }
-        }
-
-        match decide(&up_ctx, &account, &cfg) {
-            Decision::Trade {
-                direction: Direction::Up,
-                ..
-            } => {}
-            Decision::Trade { direction, .. } => panic!("expected up trade, got {:?}", direction),
-            Decision::Pass(reason) => panic!("expected trade for up case but got pass: {}", reason),
         }
     }
 }
