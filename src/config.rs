@@ -28,23 +28,14 @@ mod defaults {
     pub fn position_size_usdc() -> Decimal {
         dec("1.0")
     }
-    pub fn min_edge() -> Decimal {
-        dec("0.05")
-    }
     pub fn min_entry_price() -> Decimal {
         dec("0.02")
     }
     pub fn max_entry_price() -> Decimal {
-        dec("0.06")
+        dec("0.10")
     }
     pub fn min_ttl_for_entry_ms() -> u64 {
         120_000
-    }
-    pub fn spot_momentum_30s_threshold() -> Decimal {
-        dec("40")
-    }
-    pub fn spot_momentum_60s_threshold() -> Decimal {
-        dec("70")
     }
     pub fn daily_loss_limit() -> Decimal {
         dec("0")
@@ -155,9 +146,6 @@ pub struct StrategyConfig {
         with = "rust_decimal::serde::float"
     )]
     pub position_size_usdc: Decimal,
-    /// Minimum edge required to trade (default 0.05 = 5%)
-    #[serde(default = "defaults::min_edge", with = "rust_decimal::serde::float")]
-    pub min_edge: Decimal,
     /// Minimum entry price to trade (avoid illiquid extreme prices)
     #[serde(
         default = "defaults::min_entry_price",
@@ -173,18 +161,6 @@ pub struct StrategyConfig {
     /// Minimum time-to-live for market to enter a trade (ms)
     #[serde(default = "defaults::min_ttl_for_entry_ms")]
     pub min_ttl_for_entry_ms: u64,
-    /// Spot price momentum threshold over 30s (in USD)
-    #[serde(
-        default = "defaults::spot_momentum_30s_threshold",
-        with = "rust_decimal::serde::float"
-    )]
-    pub spot_momentum_30s_threshold: Decimal,
-    /// Spot price momentum threshold over 60s (in USD)
-    #[serde(
-        default = "defaults::spot_momentum_60s_threshold",
-        with = "rust_decimal::serde::float"
-    )]
-    pub spot_momentum_60s_threshold: Decimal,
 }
 
 // ─── Risk ───
@@ -320,12 +296,9 @@ impl Default for StrategyConfig {
             extreme_threshold: defaults::extreme_threshold(),
             fair_value: defaults::fair_value(),
             position_size_usdc: defaults::position_size_usdc(),
-            min_edge: defaults::min_edge(),
             min_entry_price: defaults::min_entry_price(),
             max_entry_price: defaults::max_entry_price(),
             min_ttl_for_entry_ms: defaults::min_ttl_for_entry_ms(),
-            spot_momentum_30s_threshold: defaults::spot_momentum_30s_threshold(),
-            spot_momentum_60s_threshold: defaults::spot_momentum_60s_threshold(),
         }
     }
 }
@@ -413,9 +386,6 @@ impl Config {
         if self.strategy.position_size_usdc <= zero {
             anyhow::bail!("strategy.position_size_usdc must be > 0");
         }
-        if self.strategy.min_edge < zero || self.strategy.min_edge >= one {
-            anyhow::bail!("strategy.min_edge must be in [0, 1)");
-        }
         if !(zero < self.strategy.min_entry_price
             && self.strategy.min_entry_price < self.strategy.max_entry_price
             && self.strategy.max_entry_price < one)
@@ -426,12 +396,6 @@ impl Config {
         }
         if self.strategy.min_ttl_for_entry_ms == 0 {
             anyhow::bail!("strategy.min_ttl_for_entry_ms must be > 0");
-        }
-        if self.strategy.spot_momentum_30s_threshold <= zero {
-            anyhow::bail!("strategy.spot_momentum_30s_threshold must be > 0");
-        }
-        if self.strategy.spot_momentum_60s_threshold <= zero {
-            anyhow::bail!("strategy.spot_momentum_60s_threshold must be > 0");
         }
         if self.price_source.source.expects_dash_symbol() {
             if !is_valid_coinbase_symbol(&self.price_source.symbol) {
@@ -556,24 +520,6 @@ mod tests {
 
         let err = cfg.validate().expect_err("expected validation failure");
         assert!(err.to_string().contains("min_ttl_for_entry_ms"));
-    }
-
-    #[test]
-    fn test_validate_rejects_non_positive_spot_momentum_30s_threshold() {
-        let mut cfg = Config::default();
-        cfg.strategy.spot_momentum_30s_threshold = Decimal::ZERO;
-
-        let err = cfg.validate().expect_err("expected validation failure");
-        assert!(err.to_string().contains("spot_momentum_30s_threshold"));
-    }
-
-    #[test]
-    fn test_validate_rejects_non_positive_spot_momentum_60s_threshold() {
-        let mut cfg = Config::default();
-        cfg.strategy.spot_momentum_60s_threshold = Decimal::ZERO;
-
-        let err = cfg.validate().expect_err("expected validation failure");
-        assert!(err.to_string().contains("spot_momentum_60s_threshold"));
     }
 
     #[test]

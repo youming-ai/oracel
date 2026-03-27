@@ -26,7 +26,6 @@ pub struct DeciderConfig {
     pub position_size_usdc: Decimal,
     pub extreme_threshold: Decimal,
     pub fair_value: Decimal,
-    pub min_edge: Decimal,
     pub min_entry_price: Decimal,
     pub max_entry_price: Decimal,
     pub min_ttl_for_entry_ms: u64,
@@ -39,9 +38,8 @@ impl Default for DeciderConfig {
             position_size_usdc: decimal("1.0"),
             extreme_threshold: decimal("0.95"),
             fair_value: decimal("0.50"),
-            min_edge: decimal("0.05"),
             min_entry_price: decimal("0.02"),
-            max_entry_price: decimal("0.06"),
+            max_entry_price: decimal("0.10"),
             min_ttl_for_entry_ms: 120_000,
             daily_loss_limit_usdc: decimal("0"),
         }
@@ -62,7 +60,6 @@ impl From<&crate::config::Config> for DeciderConfig {
             position_size_usdc: cfg.strategy.position_size_usdc,
             extreme_threshold: cfg.strategy.extreme_threshold,
             fair_value: cfg.strategy.fair_value,
-            min_edge: cfg.strategy.min_edge,
             min_entry_price: cfg.strategy.min_entry_price,
             max_entry_price: cfg.strategy.max_entry_price,
             min_ttl_for_entry_ms: cfg.strategy.min_ttl_for_entry_ms,
@@ -177,13 +174,6 @@ pub fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderConfig) 
     };
 
     let edge = cfg.fair_value - cheap_price;
-
-    if edge < cfg.min_edge {
-        return Decision::Pass(format!(
-            "edge_too_low_{}",
-            integer_suffix(edge * decimal("100"))
-        ));
-    }
 
     if cheap_price < cfg.min_entry_price || cheap_price > cfg.max_entry_price {
         let cents = integer_suffix(cheap_price * decimal("100"));
@@ -363,46 +353,6 @@ mod tests {
     }
 
     #[test]
-    fn test_min_edge_rejects_low_edge() {
-        let account = AccountState::new(d("1000"));
-        // Set min_edge absurdly high to trigger rejection
-        let cfg = DeciderConfig {
-            min_edge: d("0.49"),
-            ..DeciderConfig::default()
-        };
-
-        let mut ctx = default_ctx();
-        // mkt_up = 0.97/1.00 = 0.97 > 0.95, cheap = 0.03, edge = 0.50 - 0.03 = 0.47 < 0.49
-        ctx.market_yes = Some(d("0.97"));
-        ctx.market_no = Some(d("0.03"));
-
-        let decision = decide(&ctx, &account, &cfg);
-
-        match decision {
-            Decision::Pass(reason) => assert_eq!(reason, "edge_too_low_47"),
-            Decision::Trade { .. } => panic!("expected pass due to low edge"),
-        }
-    }
-
-    #[test]
-    fn test_min_edge_allows_high_edge() {
-        let account = AccountState::new(d("1000"));
-        let cfg = DeciderConfig::default(); // min_edge = 0.05
-
-        let mut ctx = default_ctx();
-        // mkt_up = 0.98/1.00 = 0.98 > 0.95, cheap = 0.02, edge = 0.50 - 0.02 = 0.48
-        ctx.market_yes = Some(d("0.98"));
-        ctx.market_no = Some(d("0.02"));
-
-        let decision = decide(&ctx, &account, &cfg);
-
-        match decision {
-            Decision::Trade { .. } => {}
-            Decision::Pass(reason) => panic!("expected trade but got pass: {}", reason),
-        }
-    }
-
-    #[test]
     fn test_pass_when_entry_price_below_range_price_out_of_range() {
         let account = AccountState::new(d("1000"));
         let cfg = cfg_for_entry_filter_test();
@@ -424,18 +374,17 @@ mod tests {
         let account = AccountState::new(d("1000"));
         // Use a lower threshold to get cheap_price above max_entry_price
         let cfg = DeciderConfig {
-            extreme_threshold: d("0.90"),
+            extreme_threshold: d("0.85"),
             ..DeciderConfig::default()
         };
         let mut ctx = default_ctx();
-        // mkt_up = 0.92/1.00 = 0.92 > 0.90, cheap = 0.08/1.00 = 0.08 > max_entry(0.06)
-        ctx.market_yes = Some(d("0.92"));
-        ctx.market_no = Some(d("0.08"));
+        ctx.market_yes = Some(d("0.88"));
+        ctx.market_no = Some(d("0.12"));
 
         let decision = decide(&ctx, &account, &cfg);
 
         match decision {
-            Decision::Pass(reason) => assert_eq!(reason, "price_out_of_range_8"),
+            Decision::Pass(reason) => assert_eq!(reason, "price_out_of_range_12"),
             Decision::Trade { .. } => panic!("expected pass due to entry price above range"),
         }
     }
