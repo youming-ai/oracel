@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -13,6 +13,33 @@ import {
 } from '@/components/ui/table'
 import type { TradeEntry, TradeRecord, TradeSettlement } from '@/lib/dashboard-types'
 import { formatBtc, formatCurrency } from '@/lib/format'
+
+function useNow(intervalMs = 1000): Date {
+  const [now, setNow] = useState(() => new Date())
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), intervalMs)
+    return () => clearInterval(id)
+  }, [intervalMs])
+  return now
+}
+
+function toTodayUtc(timeStr: string): Date {
+  const [h, m, s] = timeStr.split(':').map(Number)
+  const d = new Date()
+  d.setUTCHours(h, m, s ?? 0, 0)
+  return d
+}
+
+function relativeTime(timeStr: string, now: Date): string {
+  const then = toTodayUtc(timeStr)
+  const diffSec = Math.max(0, Math.floor((now.getTime() - then.getTime()) / 1000))
+  if (diffSec < 60) return `${diffSec}s ago`
+  const diffMin = Math.floor(diffSec / 60)
+  if (diffMin < 60) return `${diffMin}m ago`
+  const diffHr = Math.floor(diffMin / 60)
+  if (diffHr < 24) return `${diffHr}h ago`
+  return timeStr
+}
 
 type TradeFilter = 'all' | 'WIN' | 'LOSS' | 'pending'
 
@@ -29,8 +56,12 @@ function isEntry(trade: TradeRecord): trade is TradeEntry {
   return trade.type === 'entry'
 }
 
+const PAGE_SIZE = 20
+
 export function TradesTable({ trades, pendingTrades }: TradesTableProps) {
   const [filter, setFilter] = useState<TradeFilter>('all')
+  const [page, setPage] = useState(0)
+  const now = useNow()
 
   const settlements = useMemo(
     () => trades.filter(isSettlement),
@@ -50,8 +81,20 @@ export function TradesTable({ trades, pendingTrades }: TradesTableProps) {
       return [...pendingTrades].reverse()
     }
 
-    return [...pendingTrades, ...settlements].reverse().slice(0, 100)
+    return [...pendingTrades, ...settlements].reverse()
   }, [filter, pendingTrades, settlements])
+
+  const totalPages = Math.max(1, Math.ceil(filteredTrades.length / PAGE_SIZE))
+  const safePage = Math.min(page, totalPages - 1)
+  const pagedTrades = filteredTrades.slice(
+    safePage * PAGE_SIZE,
+    safePage * PAGE_SIZE + PAGE_SIZE,
+  )
+
+  function changeFilter(value: TradeFilter) {
+    setFilter(value)
+    setPage(0)
+  }
 
   return (
     <Card className="glass gap-0 border-0 py-0 ring-0">
@@ -59,34 +102,35 @@ export function TradesTable({ trades, pendingTrades }: TradesTableProps) {
         <CardTitle className="text-sm font-semibold text-[var(--text-secondary)]">Recent Trades</CardTitle>
 
         <div className="flex flex-wrap gap-2">
-          <FilterButton label="All" value="all" activeFilter={filter} onClick={setFilter} />
-          <FilterButton label="Wins" value="WIN" activeFilter={filter} onClick={setFilter} />
-          <FilterButton label="Losses" value="LOSS" activeFilter={filter} onClick={setFilter} />
-          <FilterButton label="Pending" value="pending" activeFilter={filter} onClick={setFilter} />
+          <FilterButton label="All" value="all" activeFilter={filter} onClick={changeFilter} />
+          <FilterButton label="Wins" value="WIN" activeFilter={filter} onClick={changeFilter} />
+          <FilterButton label="Losses" value="LOSS" activeFilter={filter} onClick={changeFilter} />
+          <FilterButton label="Pending" value="pending" activeFilter={filter} onClick={changeFilter} />
         </div>
       </CardHeader>
 
       <CardContent className="px-0 pb-0">
-        <div className="scrollbar-thin max-h-[400px] overflow-auto">
-          <Table className="mono text-xs">
-            <TableHeader className="sticky top-0 z-10 bg-[var(--bg-card)]">
-              <TableRow className="border-b border-[rgba(30,45,61,0.5)] hover:bg-transparent">
-                <TableHead className="h-9 px-3 text-[var(--text-dim)]">Time</TableHead>
-                <TableHead className="h-9 px-3 text-[var(--text-dim)]">Status</TableHead>
-                <TableHead className="h-9 px-3 text-[var(--text-dim)]">Direction</TableHead>
-                <TableHead className="h-9 px-3 text-right text-[var(--text-dim)]">PnL</TableHead>
-                <TableHead className="h-9 px-3 text-right text-[var(--text-dim)]">Entry BTC</TableHead>
-                <TableHead className="h-9 px-3 text-right text-[var(--text-dim)]">Exit BTC</TableHead>
-                <TableHead className="h-9 px-3 text-right text-[var(--text-dim)]">Price</TableHead>
-                <TableHead className="h-9 px-3 text-right text-[var(--text-dim)]">Edge</TableHead>
-                <TableHead className="h-9 px-3 text-right text-[var(--text-dim)]">Payoff</TableHead>
-              </TableRow>
-            </TableHeader>
+        <Table className="mono text-xs">
+          <TableHeader>
+            <TableRow className="border-b border-[rgba(30,45,61,0.5)] hover:bg-transparent">
+              <TableHead className="h-9 px-3 text-[var(--text-dim)]">Time</TableHead>
+              <TableHead className="h-9 px-3 text-[var(--text-dim)]">Status</TableHead>
+              <TableHead className="h-9 px-3 text-[var(--text-dim)]">Direction</TableHead>
+              <TableHead className="h-9 px-3 text-right text-[var(--text-dim)]">PnL</TableHead>
+              <TableHead className="h-9 px-3 text-right text-[var(--text-dim)]">Entry BTC</TableHead>
+              <TableHead className="h-9 px-3 text-right text-[var(--text-dim)]">Exit BTC</TableHead>
+              <TableHead className="h-9 px-3 text-right text-[var(--text-dim)]">Price</TableHead>
+              <TableHead className="h-9 px-3 text-right text-[var(--text-dim)]">Edge</TableHead>
+              <TableHead className="h-9 px-3 text-right text-[var(--text-dim)]">Payoff</TableHead>
+            </TableRow>
+          </TableHeader>
 
             <TableBody>
-              {filteredTrades.map((trade) => (
+              {pagedTrades.map((trade) => (
                 <TableRow key={buildTradeKey(trade)} className="trade-row border-b-0">
-                  <TableCell className="px-3 py-2 text-[var(--text-secondary)]">{trade.time}</TableCell>
+                  <TableCell className="px-3 py-2 text-[var(--text-secondary)]" title={trade.time}>
+                    {relativeTime(trade.time, now)}
+                  </TableCell>
                   <TableCell className="px-3 py-2">{renderStatusBadge(trade)}</TableCell>
                   <TableCell className="px-3 py-2">{renderDirectionBadge(trade.direction)}</TableCell>
                   <TableCell className="px-3 py-2 text-right">{renderPnl(trade)}</TableCell>
@@ -108,8 +152,37 @@ export function TradesTable({ trades, pendingTrades }: TradesTableProps) {
                 </TableRow>
               ))}
             </TableBody>
-          </Table>
-        </div>
+        </Table>
+
+        {totalPages > 1 && (
+          <div className="flex items-center justify-between border-t border-[rgba(30,45,61,0.5)] px-4 py-2">
+            <span className="mono text-xs text-[var(--text-dim)]">
+              {filteredTrades.length} trades · Page {safePage + 1} of {totalPages}
+            </span>
+            <div className="flex gap-1">
+              <Button
+                size="xs"
+                variant="ghost"
+                className="mono rounded-md px-3 py-1 text-xs"
+                disabled={safePage === 0}
+                style={{ color: 'var(--text-dim)' }}
+                onClick={() => setPage(safePage - 1)}
+              >
+                ← Prev
+              </Button>
+              <Button
+                size="xs"
+                variant="ghost"
+                className="mono rounded-md px-3 py-1 text-xs"
+                disabled={safePage >= totalPages - 1}
+                style={{ color: 'var(--text-dim)' }}
+                onClick={() => setPage(safePage + 1)}
+              >
+                Next →
+              </Button>
+            </div>
+          </div>
+        )}
       </CardContent>
     </Card>
   )

@@ -39,14 +39,14 @@ export function HourlyChart({ data }: HourlyChartProps) {
                 dataKey="hour"
                 axisLine={false}
                 tickLine={false}
-                tick={{ fill: 'var(--text-secondary)', fontFamily: 'JetBrains Mono', fontSize: 10 }}
+                tick={{ fill: 'var(--text-secondary)', fontFamily: '"Geist Pixel", monospace', fontSize: 10 }}
               />
               <YAxis
                 domain={[0, 100]}
                 axisLine={false}
                 tickLine={false}
                 tickFormatter={(value) => `${value}%`}
-                tick={{ fill: 'var(--text-secondary)', fontFamily: 'JetBrains Mono', fontSize: 10 }}
+                tick={{ fill: 'var(--text-secondary)', fontFamily: '"Geist Pixel", monospace', fontSize: 10 }}
               />
               <Tooltip
                 formatter={(value) => `${Number(value).toFixed(1)}%`}
@@ -55,7 +55,7 @@ export function HourlyChart({ data }: HourlyChartProps) {
                   border: '1px solid var(--border)',
                   borderRadius: '8px',
                   color: 'var(--text-primary)',
-                  fontFamily: 'JetBrains Mono, monospace',
+                  fontFamily: '"Geist Pixel", monospace',
                   fontSize: '11px',
                 }}
                 labelStyle={{ color: 'var(--text-secondary)' }}

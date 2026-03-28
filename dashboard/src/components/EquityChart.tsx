@@ -41,7 +41,7 @@ export function EquityChart({ equity }: EquityChartProps) {
               <CartesianGrid stroke="rgba(30,45,61,0.3)" strokeDasharray="0" vertical={false} />
               <XAxis dataKey="label" hide />
               <YAxis
-                tick={{ fill: 'var(--text-secondary)', fontFamily: 'JetBrains Mono', fontSize: 10 }}
+                tick={{ fill: 'var(--text-secondary)', fontFamily: '"Geist Pixel", monospace', fontSize: 10 }}
                 tickFormatter={(value) => formatCurrency(value as number, 0)}
                 axisLine={false}
                 tickLine={false}
@@ -54,7 +54,7 @@ export function EquityChart({ equity }: EquityChartProps) {
                   border: '1px solid var(--border)',
                   borderRadius: '8px',
                   color: 'var(--text-primary)',
-                  fontFamily: 'JetBrains Mono, monospace',
+                  fontFamily: '"Geist Pixel", monospace',
                   fontSize: '11px',
                 }}
                 labelStyle={{ color: 'var(--text-secondary)' }}

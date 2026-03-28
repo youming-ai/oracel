@@ -24,13 +24,13 @@ export function DirectionChart({ data }: DirectionChartProps) {
               dataKey="direction"
               axisLine={false}
               tickLine={false}
-              tick={{ fill: 'var(--text-secondary)', fontFamily: 'JetBrains Mono', fontSize: 11 }}
+              tick={{ fill: 'var(--text-secondary)', fontFamily: '"Geist Pixel", monospace', fontSize: 11 }}
             />
             <YAxis
               allowDecimals={false}
               axisLine={false}
               tickLine={false}
-              tick={{ fill: 'var(--text-secondary)', fontFamily: 'JetBrains Mono', fontSize: 10 }}
+              tick={{ fill: 'var(--text-secondary)', fontFamily: '"Geist Pixel", monospace', fontSize: 10 }}
             />
             <Tooltip
               contentStyle={{
@@ -38,7 +38,7 @@ export function DirectionChart({ data }: DirectionChartProps) {
                 border: '1px solid var(--border)',
                 borderRadius: '8px',
                 color: 'var(--text-primary)',
-                fontFamily: 'JetBrains Mono, monospace',
+                fontFamily: '"Geist Pixel", monospace',
                 fontSize: '11px',
               }}
               labelStyle={{ color: 'var(--text-secondary)' }}
@@ -47,7 +47,7 @@ export function DirectionChart({ data }: DirectionChartProps) {
               iconType="rect"
               wrapperStyle={{
                 color: 'var(--text-secondary)',
-                fontFamily: 'JetBrains Mono, monospace',
+                fontFamily: '"Geist Pixel", monospace',
                 fontSize: '10px',
               }}
             />

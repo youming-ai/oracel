@@ -1,9 +1,23 @@
+# Rust
 /target/
+
+# Node
+node_modules/
+
+# Runtime
 /logs/
 config.json
 .env
+
+# Editor
 *.swp
 *.tmp
+.vscode/
+.idea/
+
+# Tooling
 .worktrees/
 .sisyphus/
+
+# OS
 .DS_Store
