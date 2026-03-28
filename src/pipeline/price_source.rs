@@ -6,6 +6,7 @@
 //! - Zero-allocation hot path
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
@@ -63,6 +64,11 @@ pub struct PriceSource {
     buffer: Arc<RwLock<VecDeque<PriceTick>>>,
     max: usize,
     started: std::sync::atomic::AtomicBool,
+}
+
+pub struct PriceSourceHandles {
+    pub ws_handle: tokio::task::JoinHandle<()>,
+    pub receiver_handle: tokio::task::JoinHandle<()>,
 }
 
 impl PriceSource {
@@ -124,35 +130,53 @@ impl PriceSource {
         self.buffer.read().await.len()
     }
 
-    pub async fn start(self: Arc<Self>) {
-        if self.started.swap(true, std::sync::atomic::Ordering::SeqCst) {
+    pub async fn start(self: Arc<Self>, shutdown: Arc<AtomicBool>) -> PriceSourceHandles {
+        if self.started.swap(true, Ordering::SeqCst) {
             tracing::warn!("[PRICE] PriceSource already started, skipping");
-            return;
+            return PriceSourceHandles {
+                ws_handle: tokio::spawn(async {}),
+                receiver_handle: tokio::spawn(async {}),
+            };
         }
 
         match &self.client {
             PriceClient::Binance(client) => {
                 let ws_client = client.clone();
-                tokio::spawn(async move {
+                let ws_handle = tokio::spawn(async move {
                     if let Err(e) = ws_client.start_ticker_ws().await {
                         tracing::error!("[WS] Binance WS stopped: {}", e);
                     }
                 });
-                Self::spawn_receiver(self.buffer.clone(), self.max, client.subscribe(), "Binance");
+                let receiver_handle = Self::spawn_receiver(
+                    self.buffer.clone(),
+                    self.max,
+                    client.subscribe(),
+                    "Binance",
+                    shutdown.clone(),
+                );
+                PriceSourceHandles {
+                    ws_handle,
+                    receiver_handle,
+                }
             }
             PriceClient::Coinbase(client) => {
                 let ws_client = client.clone();
-                tokio::spawn(async move {
+                let ws_handle = tokio::spawn(async move {
                     if let Err(e) = ws_client.start_ticker_ws().await {
                         tracing::error!("[WS] Coinbase WS stopped: {}", e);
                     }
                 });
-                Self::spawn_receiver(
+                let receiver_handle = Self::spawn_receiver(
                     self.buffer.clone(),
                     self.max,
                     client.subscribe(),
                     "Coinbase",
+                    shutdown,
                 );
+                PriceSourceHandles {
+                    ws_handle,
+                    receiver_handle,
+                }
             }
         }
     }
@@ -162,9 +186,14 @@ impl PriceSource {
         max: usize,
         mut rx: broadcast::Receiver<T>,
         source: &'static str,
-    ) {
+        shutdown: Arc<AtomicBool>,
+    ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             loop {
+                if shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+
                 match rx.recv().await {
                     Ok(raw) => {
                         let ticker: TickerUpdate = raw.into();
@@ -198,7 +227,7 @@ impl PriceSource {
                     }
                 }
             }
-        });
+        })
     }
 }
 
