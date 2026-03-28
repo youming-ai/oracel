@@ -47,30 +47,7 @@ impl Settler {
         }
     }
 
-    pub fn restore_positions(&mut self, positions: Vec<PendingPosition>) {
-        for pos in positions {
-            // Skip duplicates based on condition_id
-            if self
-                .pending
-                .iter()
-                .any(|p| p.condition_id == pos.condition_id)
-            {
-                tracing::debug!(
-                    "[SETTLER] Skipping duplicate position restore for {}",
-                    pos.condition_id
-                );
-                continue;
-            }
-            self.pending.push_back(pos);
-        }
-    }
-
-    pub fn pending_positions(&self) -> Vec<PendingPosition> {
-        self.pending.iter().cloned().collect()
-    }
-
     pub fn add_position(&mut self, pos: PendingPosition) {
-        // Prevent duplicate positions for same market
         if self
             .pending
             .iter()
@@ -245,25 +222,14 @@ mod tests {
     }
 
     #[test]
-    fn test_restore_positions_dedupes() {
-        let mut settler = Settler::new();
-        let pos1 = sample_pending();
-        let mut pos2 = sample_pending();
-        pos2.size_usdc = d("10.0");
-
-        settler.restore_positions(vec![pos1, pos2]);
-
-        assert_eq!(settler.pending_count(), 1);
-    }
-
-    #[test]
     fn test_settle_by_slug_removes_all_duplicates() {
         let mut settler = Settler::new();
         let pos1 = sample_pending();
         let mut pos2 = sample_pending();
         pos2.condition_id = "cid2".into();
 
-        settler.restore_positions(vec![pos1, pos2]);
+        settler.add_position(pos1);
+        settler.add_position(pos2);
         assert_eq!(settler.pending_count(), 2);
 
         let result = settler.settle_by_slug("btc-updown-5m-1", true).unwrap();
@@ -283,7 +249,8 @@ mod tests {
         pos2.filled_shares = d("30.0");
         pos2.cost = d("7.5");
 
-        settler.restore_positions(vec![pos1, pos2]);
+        settler.add_position(pos1);
+        settler.add_position(pos2);
 
         let result = settler.settle_by_slug("btc-updown-5m-1", true).unwrap();
 
@@ -320,7 +287,8 @@ mod tests {
             market_slug: "slug".into(),
         };
 
-        settler.restore_positions(vec![pos1, pos2]);
+        settler.add_position(pos1);
+        settler.add_position(pos2);
         let result = settler.settle_by_slug("slug", true).unwrap();
         assert_eq!(result.pnl, d("47.0")); // 55 - 8 = 47
     }
