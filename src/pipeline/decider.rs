@@ -46,8 +46,8 @@ impl Default for DeciderConfig {
     }
 }
 
-fn decimal(value: &str) -> Decimal {
-    Decimal::from_str_exact(value).expect("valid decimal literal")
+fn decimal(value: &'static str) -> Decimal {
+    Decimal::from_str_exact(value).expect(value)
 }
 
 fn integer_suffix(value: Decimal) -> String {

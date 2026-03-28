@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
-fn dec(s: &str) -> Decimal {
-    Decimal::from_str_exact(s).expect("valid decimal literal")
+fn dec(s: &'static str) -> Decimal {
+    Decimal::from_str_exact(s).expect(s)
 }
 
 mod defaults {
