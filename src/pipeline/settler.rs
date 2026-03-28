@@ -2,7 +2,7 @@
 
 use chrono::Utc;
 use rust_decimal::Decimal;
-use std::collections::VecDeque;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::pipeline::signal::Direction;
@@ -31,7 +31,8 @@ pub struct SettlementResult {
 }
 
 pub struct Settler {
-    pending: VecDeque<PendingPosition>,
+    /// condition_id -> PendingPosition for O(1) lookup
+    pending: HashMap<Arc<str>, PendingPosition>,
 }
 
 impl Default for Settler {
@@ -43,23 +44,19 @@ impl Default for Settler {
 impl Settler {
     pub fn new() -> Self {
         Self {
-            pending: VecDeque::new(),
+            pending: HashMap::new(),
         }
     }
 
     pub fn add_position(&mut self, pos: PendingPosition) {
-        if self
-            .pending
-            .iter()
-            .any(|p| p.condition_id == pos.condition_id)
-        {
+        if self.pending.contains_key(&pos.condition_id) {
             tracing::warn!(
                 "[SETTLER] Attempted to add duplicate position for {}",
                 pos.condition_id
             );
             return;
         }
-        self.pending.push_back(pos);
+        self.pending.insert(Arc::clone(&pos.condition_id), pos);
     }
 
     pub fn pending_count(&self) -> usize {
@@ -69,25 +66,30 @@ impl Settler {
     pub fn due_positions(&self) -> Vec<PendingPosition> {
         let now = Utc::now().timestamp_millis();
         self.pending
-            .iter()
+            .values()
             .filter(|p| p.settlement_time_ms <= now)
             .cloned()
             .collect()
     }
 
     pub fn settle_by_slug(&mut self, slug: &str, won: bool) -> Option<SettlementResult> {
-        let matching: Vec<PendingPosition> = self
+        // Collect condition_ids of matching positions first
+        let matching_ids: Vec<Arc<str>> = self
             .pending
-            .iter()
-            .filter(|p| p.market_slug == slug.into())
-            .cloned()
+            .values()
+            .filter(|p| p.market_slug.as_ref() == slug)
+            .map(|p| Arc::clone(&p.condition_id))
             .collect();
 
-        if matching.is_empty() {
+        if matching_ids.is_empty() {
             return None;
         }
 
-        self.pending.retain(|p| p.market_slug != slug.into());
+        // Remove matching positions and collect them
+        let matching: Vec<PendingPosition> = matching_ids
+            .into_iter()
+            .filter_map(|id| self.pending.remove(&id))
+            .collect();
 
         let combined = self.combine_positions(matching, slug);
         Some(self.finish_settlement(combined, won))

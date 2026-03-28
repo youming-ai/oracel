@@ -3,7 +3,7 @@
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
 use rust_decimal::Decimal;
-use std::str::FromStr;
+use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -11,6 +11,24 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 const WS_URL: &str = "wss://stream.binance.com:9443/ws";
 const PRICE_CHANNEL_BUFFER: usize = 1000;
+
+/// Binance error response
+#[derive(Debug, Deserialize)]
+struct BinanceError {
+    code: i64,
+    msg: String,
+}
+
+/// Binance 24hr ticker message
+#[derive(Debug, Deserialize)]
+struct BinanceTicker {
+    /// Close price
+    #[serde(rename = "c")]
+    close_price: String,
+    /// Event time
+    #[serde(rename = "E")]
+    event_time: i64,
+}
 
 #[derive(Debug, Clone)]
 pub struct TickerUpdate {
@@ -103,33 +121,30 @@ impl BinanceClient {
     }
 
     fn handle_message(&self, text: &str) -> std::result::Result<(), WsLoopError> {
-        if let Ok(data) = serde_json::from_str::<serde_json::Value>(text) {
-            if data.get("code").and_then(|v| v.as_i64()) == Some(-1121) {
-                let message = data
-                    .get("msg")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Invalid symbol");
+        // Try to parse as error first
+        if let Ok(error) = serde_json::from_str::<BinanceError>(text) {
+            if error.code == -1121 {
                 return Err(WsLoopError::Permanent(format!(
                     "invalid Binance symbol '{}': {}",
-                    self.symbol, message
+                    self.symbol, error.msg
                 )));
             }
+            // Other errors are transient
+            return Err(WsLoopError::Transient(anyhow::anyhow!(
+                "Binance error {}: {}",
+                error.code,
+                error.msg
+            )));
+        }
 
-            if let Some(price) = data
-                .get("c")
-                .and_then(|v| v.as_str())
-                .and_then(|s| Decimal::from_str(s).ok())
-            {
-                let timestamp_ms = data
-                    .get("E")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
-
+        // Try to parse as ticker
+        if let Ok(ticker) = serde_json::from_str::<BinanceTicker>(text) {
+            if let Ok(price) = Decimal::from_str_exact(&ticker.close_price) {
                 if self
                     .price_tx
                     .send(TickerUpdate {
                         price,
-                        timestamp_ms,
+                        timestamp_ms: ticker.event_time,
                     })
                     .is_err()
                 {

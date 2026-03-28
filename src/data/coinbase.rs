@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use rust_decimal::Decimal;
-use std::str::FromStr;
+use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -11,6 +11,28 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 const WS_URL: &str = "wss://advanced-trade-ws.coinbase.com";
 const PRICE_CHANNEL_BUFFER: usize = 1000;
+
+/// Coinbase ticker event
+#[derive(Debug, Deserialize)]
+struct CoinbaseTicker {
+    product_id: String,
+    price: String,
+}
+
+/// Coinbase event wrapper
+#[derive(Debug, Deserialize)]
+struct CoinbaseEvent {
+    tickers: Vec<CoinbaseTicker>,
+}
+
+/// Coinbase WebSocket message
+#[derive(Debug, Deserialize)]
+struct CoinbaseMessage {
+    channel: String,
+    #[serde(rename = "timestamp")]
+    timestamp_str: String,
+    events: Vec<CoinbaseEvent>,
+}
 
 #[derive(Debug, Clone)]
 pub struct TickerUpdate {
@@ -93,43 +115,30 @@ impl CoinbaseClient {
     }
 
     fn handle_message(&self, text: &str) {
-        if let Ok(root) = serde_json::from_str::<serde_json::Value>(text) {
-            if root.get("channel").and_then(|v| v.as_str()) != Some("ticker") {
+        if let Ok(msg) = serde_json::from_str::<CoinbaseMessage>(text) {
+            if msg.channel != "ticker" {
                 return;
             }
-            let timestamp_ms = root
-                .get("timestamp")
-                .and_then(|v| v.as_str())
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+
+            let timestamp_ms = chrono::DateTime::parse_from_rfc3339(&msg.timestamp_str)
                 .map(|dt| dt.timestamp_millis())
-                .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
-            if let Some(events) = root.get("events").and_then(|v| v.as_array()) {
-                for event in events {
-                    if let Some(tickers) = event.get("tickers").and_then(|v| v.as_array()) {
-                        for ticker in tickers {
-                            let pid = ticker
-                                .get("product_id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            if pid != self.product_id {
-                                continue;
-                            }
-                            if let Some(price) = ticker
-                                .get("price")
-                                .and_then(|v| v.as_str())
-                                .and_then(|s| Decimal::from_str(s).ok())
-                            {
-                                if self
-                                    .price_tx
-                                    .send(TickerUpdate {
-                                        price,
-                                        timestamp_ms,
-                                    })
-                                    .is_err()
-                                {
-                                    tracing::debug!("[WS] no price receivers");
-                                }
-                            }
+                .unwrap_or_else(|_| chrono::Utc::now().timestamp_millis());
+
+            for event in msg.events {
+                for ticker in event.tickers {
+                    if ticker.product_id != self.product_id {
+                        continue;
+                    }
+                    if let Ok(price) = Decimal::from_str_exact(&ticker.price) {
+                        if self
+                            .price_tx
+                            .send(TickerUpdate {
+                                price,
+                                timestamp_ms,
+                            })
+                            .is_err()
+                        {
+                            tracing::debug!("[WS] no price receivers");
                         }
                     }
                 }

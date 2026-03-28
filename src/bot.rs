@@ -1,3 +1,4 @@
+use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -7,6 +8,7 @@ use chrono::Utc;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use secrecy::ExposeSecret;
+use tokio::join;
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::RwLock;
@@ -32,6 +34,8 @@ fn decimal(value: &'static str) -> Decimal {
     Decimal::from_str_exact(value).expect(value)
 }
 
+type TradeLogWriter = Arc<tokio::sync::Mutex<BufWriter<std::fs::File>>>;
+
 pub(crate) struct Bot {
     config: Config,
     log_dir: String,
@@ -46,6 +50,7 @@ pub(crate) struct Bot {
     balance_checker: Option<BalanceChecker>,
     market_state: Arc<RwLock<MarketState>>,
     shutdown: Arc<AtomicBool>,
+    trade_log_writer: Option<TradeLogWriter>,
 }
 
 impl Bot {
@@ -147,6 +152,36 @@ impl Bot {
         let settler = Settler::new();
         let account = AccountState::new(initial_balance);
 
+        // Initialize trade log writer for live mode
+        let trade_log_writer = if config.trading.mode.is_live() {
+            let trades_path = Path::new(&log_dir).join("trades.csv");
+            match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&trades_path)
+            {
+                Ok(file) => {
+                    // Check if file is empty and write header
+                    let metadata = file.metadata()?;
+                    let mut writer = BufWriter::new(file);
+                    if metadata.len() == 0 {
+                        use std::io::Write;
+                        writeln!(
+                            writer,
+                            "timestamp,direction,order_id,entry_price,cost,edge,balance,remaining_ms,yes_price,no_price,payoff_ratio"
+                        )?;
+                    }
+                    Some(Arc::new(tokio::sync::Mutex::new(writer)))
+                }
+                Err(e) => {
+                    tracing::warn!("[INIT] Failed to open trade log: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             config,
             log_dir,
@@ -161,6 +196,7 @@ impl Bot {
             balance_checker,
             market_state: Arc::new(RwLock::new(MarketState::default())),
             shutdown: Arc::new(AtomicBool::new(false)),
+            trade_log_writer,
         })
     }
 
@@ -248,12 +284,22 @@ impl Bot {
         let mut tick = interval(Duration::from_millis(
             self.config.polling.signal_interval_ms,
         ));
+        let mut flush_tick = interval(Duration::from_secs(30)); // Flush trade log every 30s
 
         loop {
             tokio::select! {
                 _ = tick.tick() => {
                     if let Err(e) = self.tick().await {
                         tracing::error!("[BOT] Tick error: {}", e);
+                    }
+                }
+                _ = flush_tick.tick() => {
+                    // Periodic flush of trade log buffer
+                    if let Some(ref writer) = self.trade_log_writer {
+                        let mut writer = writer.lock().await;
+                        if let Err(e) = writer.flush() {
+                            tracing::warn!("[LOG] Failed to flush trade log: {}", e);
+                        }
                     }
                 }
                 signal = &mut shutdown_signal => {
@@ -305,6 +351,14 @@ impl Bot {
         })
         .await;
 
+        // Final flush of trade log on shutdown
+        if let Some(ref writer) = self.trade_log_writer {
+            let mut writer = writer.lock().await;
+            if let Err(e) = writer.flush() {
+                tracing::warn!("[LOG] Failed to flush trade log on shutdown: {}", e);
+            }
+        }
+
         Ok(())
     }
 
@@ -316,8 +370,22 @@ impl Bot {
         if let Some(ref checker) = self.balance_checker {
             match checker.balance().await {
                 Ok(on_chain_bal) => {
-                    self.account.write().await.balance = on_chain_bal;
-                    Self::write_balance(&self.log_dir, on_chain_bal).await;
+                    let mut account = self.account.write().await;
+                    account.balance = on_chain_bal;
+                    drop(account); // Release lock early
+
+                    // Debounced write - only write when balance changes significantly
+                    let should_write = {
+                        let state = self.state.read().await;
+                        state.balance_state.should_write(on_chain_bal)
+                    };
+
+                    if should_write {
+                        Self::write_balance(&self.log_dir, on_chain_bal).await;
+                        let state = self.state.read().await;
+                        state.balance_state.record_write(on_chain_bal);
+                        tracing::debug!("[BALANCE] Wrote balance: ${:.2}", on_chain_bal);
+                    }
                 }
                 Err(e) => {
                     tracing::warn!("[BAL] Failed to query on-chain USDC balance: {}", e);
@@ -372,10 +440,13 @@ impl Bot {
             }
         }
 
-        let (poly_yes_dec, poly_no_dec) = match (
-            self.polymarket.fetch_mid_price(&mkt.token_yes).await,
-            self.polymarket.fetch_mid_price(&mkt.token_no).await,
-        ) {
+        // Fetch both prices in parallel
+        let (yes_result, no_result) = join!(
+            self.polymarket.fetch_mid_price(&mkt.token_yes),
+            self.polymarket.fetch_mid_price(&mkt.token_no),
+        );
+
+        let (poly_yes_dec, poly_no_dec) = match (yes_result, no_result) {
             (Ok(y), Ok(n)) => {
                 tracing::debug!("[PRICE] Yes={:.3} No={:.3} | buffer={}", y, n, buf_len);
                 (Some(y), Some(n))
@@ -545,36 +616,30 @@ impl Bot {
                     let bal = self.account.read().await.balance;
                     Self::write_balance(&self.log_dir, bal).await;
 
-                    let order_id_short: String = order.order_id.chars().take(8).collect();
-                    let log_line = format!(
-                        "{},{},{},{:.3},{:.2},{:.1},{:.2},{}s,{:.3},{:.3},{:.1}x\n",
-                        Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
-                        order.direction.as_str(),
-                        order_id_short,
-                        order.entry_price,
-                        order.cost,
-                        (*edge * decimal("100")).round_dp(1),
-                        bal,
-                        remaining_ms / 1000,
-                        poly_yes_dec.unwrap_or_default(),
-                        poly_no_dec.unwrap_or_default(),
-                        payoff_ratio,
-                    );
-                    let trades_path = Path::new(&self.log_dir).join("trades.csv");
-                    match tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-                        use std::io::Write;
+                    // Write to buffered trade log
+                    if let Some(ref writer) = self.trade_log_writer {
+                        let order_id_short: String = order.order_id.chars().take(8).collect();
+                        let log_line = format!(
+                            "{},{},{},{:.3},{:.2},{:.1},{:.2},{}s,{:.3},{:.3},{:.1}x\n",
+                            Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
+                            order.direction.as_str(),
+                            order_id_short,
+                            order.entry_price,
+                            order.cost,
+                            (*edge * decimal("100")).round_dp(1),
+                            bal,
+                            remaining_ms / 1000,
+                            poly_yes_dec.unwrap_or_default(),
+                            poly_no_dec.unwrap_or_default(),
+                            payoff_ratio,
+                        );
 
-                        let mut file = std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(trades_path)?;
-                        file.write_all(log_line.as_bytes())
-                    })
-                    .await
-                    {
-                        Ok(Ok(())) => {}
-                        Ok(Err(e)) => tracing::warn!("[LOG] trades.csv write failed: {}", e),
-                        Err(e) => tracing::warn!("[LOG] trades.csv task failed: {}", e),
+                        let mut writer = writer.lock().await;
+                        use std::io::Write;
+                        if let Err(e) = writer.write_all(log_line.as_bytes()) {
+                            tracing::warn!("[LOG] trades.csv write failed: {}", e);
+                        }
+                        // BufWriter will flush when buffer is full or on drop
                     }
                 }
             }
