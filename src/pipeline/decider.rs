@@ -182,7 +182,7 @@ pub fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderConfig) 
 
     let min_ttl_for_entry_ms = i64::try_from(cfg.min_ttl_for_entry_ms).unwrap_or(i64::MAX);
     if ctx.remaining_ms < min_ttl_for_entry_ms {
-        let seconds = ctx.remaining_ms.unsigned_abs() / 1000;
+        let seconds = ctx.remaining_ms.max(0) / 1000;
         return Decision::Pass(format!("ttl_below_entry_floor_{seconds}"));
     }
 
@@ -407,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pass_when_remaining_ms_negative_ttl_suffix_is_unsigned() {
+    fn test_pass_when_remaining_ms_negative_ttl_suffix_is_zero() {
         let account = AccountState::new(d("1000"));
         let cfg = cfg_for_entry_filter_test();
         let mut ctx = default_ctx();
@@ -418,7 +418,7 @@ mod tests {
         let decision = decide(&ctx, &account, &cfg);
 
         match decision {
-            Decision::Pass(reason) => assert_eq!(reason, "ttl_below_entry_floor_1"),
+            Decision::Pass(reason) => assert_eq!(reason, "ttl_below_entry_floor_0"),
             Decision::Trade { .. } => panic!("expected pass due to ttl floor"),
         }
     }

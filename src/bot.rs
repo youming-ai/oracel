@@ -174,7 +174,8 @@ impl Bot {
     async fn write_balance(log_dir: &str, bal: Decimal) {
         let tmp = Path::new(log_dir).join("balance.tmp");
         let dst = Path::new(log_dir).join("balance");
-        let text = format!("{:.2}", bal);
+        // Preserve full decimal precision to avoid accumulating rounding errors
+        let text = format!("{}", bal.normalize());
         if let Err(e) = tokio::fs::write(&tmp, &text).await {
             tracing::warn!("[STATE] Failed to write balance: {}", e);
             return;
@@ -286,7 +287,7 @@ impl Bot {
             }
         }
 
-        self.shutdown.store(true, Ordering::Relaxed);
+        self.shutdown.store(true, Ordering::Release);
 
         price_handles.ws_handle.abort();
         price_handles.receiver_handle.abort();
@@ -362,7 +363,7 @@ impl Bot {
         if mkt.settlement_ms > 0 {
             let remaining = mkt.settlement_ms - Utc::now().timestamp_millis();
             if remaining < min_ttl_ms {
-                let detail = format!("remaining={}s", remaining / 1000);
+                let detail = format!("remaining={}s", remaining.max(0) / 1000);
                 self.state
                     .write()
                     .await
@@ -401,7 +402,7 @@ impl Bot {
         }
         let account_read = self.account.read().await.clone();
         let decider_cfg = self.decider_cfg();
-        let remaining_ms = settlement_ms - Utc::now().timestamp_millis();
+        let remaining_ms = (settlement_ms - Utc::now().timestamp_millis()).max(0);
 
         let decide_ctx = decider::DecideContext {
             market_yes: poly_yes_dec,
@@ -572,8 +573,8 @@ impl Bot {
                     .await
                     {
                         Ok(Ok(())) => {}
-                        Ok(Err(e)) => tracing::debug!("[LOG] trades.csv write failed: {}", e),
-                        Err(e) => tracing::debug!("[LOG] trades.csv task failed: {}", e),
+                        Ok(Err(e)) => tracing::warn!("[LOG] trades.csv write failed: {}", e),
+                        Err(e) => tracing::warn!("[LOG] trades.csv task failed: {}", e),
                     }
                 }
             }
@@ -589,7 +590,7 @@ impl Bot {
                     "[MKT] {} ends {} cid={}",
                     active.market.slug,
                     active.end_date,
-                    &active.condition_id[..8.min(active.condition_id.len())]
+                    &active.condition_id.get(..8).unwrap_or(&active.condition_id)
                 );
                 *self.market_state.write().await = MarketState {
                     token_yes: active.token_id_yes.into(),

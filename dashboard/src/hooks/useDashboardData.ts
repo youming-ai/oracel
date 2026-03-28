@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import type { DashboardStats, TradeRecord } from '@/lib/dashboard-types'
 import { parseTrades } from '@/lib/csv-parser'
@@ -15,9 +15,9 @@ interface DashboardDataState {
   lastUpdated: Date | null
 }
 
-async function fetchBalanceFile(): Promise<number | null> {
+async function fetchBalanceFile(signal?: AbortSignal): Promise<number | null> {
   try {
-    const response = await fetch('balance', { cache: 'no-store' })
+    const response = await fetch('balance', { cache: 'no-store', signal })
     if (!response.ok) return null
 
     const rawBalance = (await response.text()).trim()
@@ -42,9 +42,16 @@ export function useDashboardData() {
     lastUpdated: null,
   })
 
+  const abortRef = useRef<AbortController | null>(null)
+
   const loadData = useCallback(async () => {
+    // Cancel any in-flight request
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+
     try {
-      const response = await fetch('trades.csv', { cache: 'no-store' })
+      const response = await fetch('trades.csv', { cache: 'no-store', signal: controller.signal })
 
       if (!response.ok) {
         throw new Error(`Failed to fetch trades.csv (HTTP ${response.status})`)
@@ -54,17 +61,20 @@ export function useDashboardData() {
       const parsedTrades = parseTrades(csv)
 
       const stats = computeStats(parsedTrades)
-      const fileBalance = await fetchBalanceFile()
+      const fileBalance = await fetchBalanceFile(controller.signal)
       const parsedBalance = fileBalance ?? balanceFromEquity(stats)
 
-      setState({
-        trades: parsedTrades,
-        balance: parsedBalance,
-        loading: false,
-        error: null,
-        lastUpdated: new Date(),
-      })
+      if (!controller.signal.aborted) {
+        setState({
+          trades: parsedTrades,
+          balance: parsedBalance,
+          loading: false,
+          error: null,
+          lastUpdated: new Date(),
+        })
+      }
     } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return
       setState((previous) => ({
         ...previous,
         loading: false,
@@ -82,6 +92,7 @@ export function useDashboardData() {
 
     return () => {
       window.clearInterval(interval)
+      abortRef.current?.abort()
     }
   }, [loadData])
 

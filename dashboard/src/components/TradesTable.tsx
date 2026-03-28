@@ -24,9 +24,13 @@ function useNow(intervalMs = 1000): Date {
 }
 
 function toTodayUtc(timeStr: string): Date {
-  const [h, m, s] = timeStr.split(':').map(Number)
+  const parts = timeStr.split(':').map(Number)
+  const [h = 0, m = 0, s = 0] = parts
+  if (parts.some(Number.isNaN) || h < 0 || h > 23 || m < 0 || m > 59 || s < 0 || s > 59) {
+    return new Date()
+  }
   const d = new Date()
-  d.setUTCHours(h, m, s ?? 0, 0)
+  d.setUTCHours(h, m, s, 0)
   return d
 }
 

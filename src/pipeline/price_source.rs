@@ -158,7 +158,7 @@ impl PriceSource {
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             loop {
-                if shutdown.load(Ordering::Relaxed) {
+                if shutdown.load(Ordering::Acquire) {
                     break;
                 }
 
@@ -187,7 +187,7 @@ impl PriceSource {
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::debug!("[WS] Price receiver lagged by {} messages", n);
+                        tracing::info!("[WS] Price receiver lagged by {} messages", n);
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         tracing::error!("[WS] {} price channel closed", source);

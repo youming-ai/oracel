@@ -78,6 +78,10 @@ impl Executor {
                     mid_price
                 };
 
+                // Round price to 2dp for CLOB compatibility; use rounded price
+                // consistently for both order submission and cost accounting.
+                let price = price.round_dp(2);
+
                 let mut filled_shares = match Self::compute_filled_shares(*size_usdc, price) {
                     Some(shares) => shares,
                     None => return None,
@@ -110,7 +114,7 @@ impl Executor {
                         Ok(id) => {
                             tracing::info!(
                                 "[EXEC] filled id={} shares={} cost={:.2}",
-                                &id[..8.min(id.len())],
+                                id.get(..8).unwrap_or(&id),
                                 filled_shares,
                                 cost,
                             );
@@ -215,10 +219,10 @@ mod tests {
             .await
             .expect("expected paper order");
 
-        // Slippage 1%: price = 0.201 * 1.01 = 0.20301
-        // floor(5.00 / 0.20301) = 24 shares, cost = 24 × 0.20301 = 4.87224
-        assert_eq!(result.filled_shares, d("24"));
-        assert_eq!(result.cost, d("4.87224"));
+        // Slippage 1%: price = 0.201 * 1.01 = 0.20301, rounded to 0.20
+        // floor(5.00 / 0.20) = 25 shares, cost = 25 × 0.20 = 5.00
+        assert_eq!(result.filled_shares, d("25"));
+        assert_eq!(result.cost, d("5.00"));
         assert!(result.cost <= d("5.00"));
     }
 

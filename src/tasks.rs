@@ -23,7 +23,8 @@ use crate::state::MarketState;
 async fn write_balance(log_dir: &str, bal: Decimal) {
     let tmp = Path::new(log_dir).join("balance.tmp");
     let dst = Path::new(log_dir).join("balance");
-    let text = format!("{:.2}", bal);
+    // Preserve full decimal precision to avoid accumulating rounding errors
+    let text = format!("{}", bal.normalize());
     if let Err(e) = tokio::fs::write(&tmp, &text).await {
         tracing::warn!("[STATE] Failed to write balance: {}", e);
         return;
@@ -41,7 +42,7 @@ pub(crate) fn start_market_refresher(
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         loop {
-            if shutdown.load(Ordering::Relaxed) {
+            if shutdown.load(Ordering::Acquire) {
                 tracing::info!("[TASK] market refresher shutting down");
                 break;
             }
@@ -81,7 +82,7 @@ pub(crate) fn start_status_printer(
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(status_interval_ms));
         loop {
-            if shutdown.load(Ordering::Relaxed) {
+            if shutdown.load(Ordering::Acquire) {
                 tracing::info!("[TASK] status printer shutting down");
                 break;
             }
@@ -93,16 +94,16 @@ pub(crate) fn start_status_printer(
             let pending = settler.read().await.pending_count();
             let settle = market_state.read().await.settlement_ms;
 
-            #[allow(clippy::obfuscated_if_else)]
-            let ttl = (settle > 0)
-                .then(|| {
-                    let remaining_s = (settle - Utc::now().timestamp_millis()) / 1000;
-                    match remaining_s {
-                        r if r > 0 => format!("{}m{}s", r / 60, r % 60),
-                        _ => "expired".into(),
-                    }
-                })
-                .unwrap_or_else(|| "?".into());
+            let ttl = if settle > 0 {
+                let remaining_s = (settle - Utc::now().timestamp_millis()).max(0) / 1000;
+                if remaining_s > 0 {
+                    format!("{}m{}s", remaining_s / 60, remaining_s % 60)
+                } else {
+                    "expired".into()
+                }
+            } else {
+                "?".into()
+            };
 
             let pnl = acc.pnl();
             tracing::info!(
@@ -142,7 +143,7 @@ pub(crate) fn start_settlement_checker(
         let mut pending_retries: HashMap<String, u32> = HashMap::new();
 
         loop {
-            if shutdown.load(Ordering::Relaxed) {
+            if shutdown.load(Ordering::Acquire) {
                 tracing::info!("[TASK] settlement checker shutting down");
                 break;
             }
@@ -164,7 +165,7 @@ pub(crate) fn start_settlement_checker(
                     Ok(m) => m,
                     Err(e) => {
                         let retries = pending_retries.entry(slug).or_insert(0);
-                        *retries += 1;
+                        *retries = retries.saturating_add(1);
                         if *retries == 1 || (*retries).is_multiple_of(20) {
                             tracing::warn!(
                                 "[SETTLE] Gamma fetch failed for {} (attempt {}): {}",
@@ -194,7 +195,7 @@ pub(crate) fn start_settlement_checker(
                     }
                     Some(ResolutionState::Pending) => {
                         let retries = pending_retries.entry(slug).or_insert(0);
-                        *retries += 1;
+                        *retries = retries.saturating_add(1);
                         if *retries == 1 || (*retries).is_multiple_of(20) {
                             tracing::warn!(
                                 "[SETTLE] {} still pending after {}s",
@@ -205,7 +206,7 @@ pub(crate) fn start_settlement_checker(
                     }
                     None => {
                         let retries = pending_retries.entry(slug).or_insert(0);
-                        *retries += 1;
+                        *retries = retries.saturating_add(1);
                         if *retries == 1 || (*retries).is_multiple_of(20) {
                             tracing::warn!(
                                 "[SETTLE] resolution unclear for {} (attempt {})",
@@ -263,8 +264,8 @@ pub(crate) fn start_settlement_checker(
                     .await
                     {
                         Ok(Ok(())) => {}
-                        Ok(Err(e)) => tracing::debug!("[LOG] trades.csv write failed: {}", e),
-                        Err(e) => tracing::debug!("[LOG] trades.csv task failed: {}", e),
+                        Ok(Err(e)) => tracing::warn!("[LOG] trades.csv write failed: {}", e),
+                        Err(e) => tracing::warn!("[LOG] trades.csv task failed: {}", e),
                     }
                 }
 

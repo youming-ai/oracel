@@ -32,6 +32,7 @@ export function parseTrades(csvText: string): TradeRecord[] {
   for (const line of lines) {
     const cols = line.split(',')
     if (cols.length < 3) {
+      console.warn(`[csv-parser] Skipping malformed line (${cols.length} columns): ${line.slice(0, 80)}`)
       continue
     }
 

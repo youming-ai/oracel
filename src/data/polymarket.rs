@@ -122,16 +122,14 @@ impl AuthenticatedPolyClient {
     ) -> Result<String> {
         let tid = U256::from_str(token_id).context("Invalid token_id")?;
         let sdk_side = if side == "BUY" { Side::Buy } else { Side::Sell };
-        let price_dec = price.round_dp(2);
-        let size_dec = size.trunc();
-
+        // price is already rounded to 2dp and size already truncated by the caller
         let order = self
             .client
             .limit_order()
             .token_id(tid)
             .side(sdk_side)
-            .price(price_dec)
-            .size(size_dec)
+            .price(price)
+            .size(size)
             .order_type(OrderType::FAK)
             .build()
             .await
