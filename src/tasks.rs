@@ -243,7 +243,7 @@ pub(crate) fn start_settlement_checker(
                     for r in &results {
                         log_lines.push_str(&format!(
                             "{},{},{},{:+.2},{:.0},{:.0}\n",
-                            Utc::now().format("%H:%M:%S"),
+                            Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
                             if r.won { "WIN" } else { "LOSS" },
                             r.direction.as_str(),
                             r.pnl.round_dp(2),

@@ -548,7 +548,7 @@ impl Bot {
                     let order_id_short: String = order.order_id.chars().take(8).collect();
                     let log_line = format!(
                         "{},{},{},{:.3},{:.2},{:.1},{:.2},{}s,{:.3},{:.3},{:.1}x\n",
-                        Utc::now().format("%H:%M:%S"),
+                        Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
                         order.direction.as_str(),
                         order_id_short,
                         order.entry_price,

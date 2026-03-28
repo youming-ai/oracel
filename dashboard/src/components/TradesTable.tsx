@@ -13,6 +13,7 @@ import {
 } from '@/components/ui/table'
 import type { TradeEntry, TradeRecord, TradeSettlement } from '@/lib/dashboard-types'
 import { formatBtc, formatCurrency } from '@/lib/format'
+import { CheckCircle, Clock, TrendingDown, TrendingUp, XCircle } from 'lucide-react'
 
 function useNow(intervalMs = 1000): Date {
   const [now, setNow] = useState(() => new Date())
@@ -23,7 +24,15 @@ function useNow(intervalMs = 1000): Date {
   return now
 }
 
-function toTodayUtc(timeStr: string): Date {
+/** Parse a time string into a Date. Supports ISO 8601 and legacy HH:MM:SS. */
+function parseTradeTime(timeStr: string): Date {
+  // ISO format: 2025-03-28T14:30:00Z or similar
+  if (timeStr.includes('T') || timeStr.includes('-')) {
+    const d = new Date(timeStr)
+    if (!Number.isNaN(d.getTime())) return d
+  }
+
+  // Legacy HH:MM:SS — assume today UTC
   const parts = timeStr.split(':').map(Number)
   const [h = 0, m = 0, s = 0] = parts
   if (parts.some(Number.isNaN) || h < 0 || h > 23 || m < 0 || m > 59 || s < 0 || s > 59) {
@@ -35,14 +44,15 @@ function toTodayUtc(timeStr: string): Date {
 }
 
 function relativeTime(timeStr: string, now: Date): string {
-  const then = toTodayUtc(timeStr)
+  const then = parseTradeTime(timeStr)
   const diffSec = Math.max(0, Math.floor((now.getTime() - then.getTime()) / 1000))
   if (diffSec < 60) return `${diffSec}s ago`
   const diffMin = Math.floor(diffSec / 60)
   if (diffMin < 60) return `${diffMin}m ago`
   const diffHr = Math.floor(diffMin / 60)
   if (diffHr < 24) return `${diffHr}h ago`
-  return timeStr
+  const diffDay = Math.floor(diffHr / 24)
+  return `${diffDay}d ago`
 }
 
 type TradeFilter = 'all' | 'WIN' | 'LOSS' | 'pending'
@@ -221,8 +231,9 @@ function FilterButton({ label, value, activeFilter, onClick }: FilterButtonProps
 function renderStatusBadge(trade: TradeRecord) {
   if (isEntry(trade)) {
     return (
-      <Badge className="rounded-md border-0 bg-[rgba(255,165,2,0.15)] px-2 py-0.5 text-[11px] text-[var(--warn)]">
-        ⏳ PENDING
+      <Badge className="inline-flex items-center gap-1 rounded-md border-0 bg-[rgba(255,165,2,0.15)] px-2 py-0.5 text-[11px] text-[var(--warn)]">
+        <Clock className="size-3" />
+        PENDING
       </Badge>
     )
   }
@@ -230,13 +241,14 @@ function renderStatusBadge(trade: TradeRecord) {
   const win = trade.result === 'WIN'
   return (
     <Badge
-      className="rounded-md border-0 px-2 py-0.5 text-[11px]"
+      className="inline-flex items-center gap-1 rounded-md border-0 px-2 py-0.5 text-[11px]"
       style={{
         background: win ? 'rgba(0,212,170,0.15)' : 'rgba(255,71,87,0.15)',
         color: win ? 'var(--win)' : 'var(--loss)',
       }}
     >
-      {win ? '✅ WIN' : '❌ LOSS'}
+      {win ? <CheckCircle className="size-3" /> : <XCircle className="size-3" />}
+      {win ? 'WIN' : 'LOSS'}
     </Badge>
   )
 }
@@ -245,12 +257,13 @@ function renderDirectionBadge(direction: 'UP' | 'DOWN') {
   const up = direction === 'UP'
   return (
     <Badge
-      className="rounded-md border-0 px-2 py-0.5 text-[11px]"
+      className="inline-flex items-center gap-1 rounded-md border-0 px-2 py-0.5 text-[11px]"
       style={{
         background: up ? 'rgba(0,212,170,0.15)' : 'rgba(255,71,87,0.15)',
         color: up ? 'var(--win)' : 'var(--loss)',
       }}
     >
+      {up ? <TrendingUp className="size-3" /> : <TrendingDown className="size-3" />}
       {direction}
     </Badge>
   )
