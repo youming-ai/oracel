@@ -41,12 +41,9 @@ Then edit `config.json` with your settings.
     "extreme_threshold": 0.95,
     "fair_value": 0.5,
     "position_size_usdc": 1.0,
-    "min_edge": 0.05,
     "min_entry_price": 0.02,
     "max_entry_price": 0.06,
-    "min_ttl_for_entry_ms": 120000,
-    "spot_momentum_30s_threshold": 40,
-    "spot_momentum_60s_threshold": 70
+    "min_ttl_for_entry_ms": 120000
   },
   "risk": {
     "max_fak_retries": 3,
@@ -173,12 +170,9 @@ The stale threshold ensures you don't trade on old price data. The minimum TTL p
   "extreme_threshold": 0.95,
   "fair_value": 0.5,
   "position_size_usdc": 1.0,
-  "min_edge": 0.05,
   "min_entry_price": 0.02,
   "max_entry_price": 0.06,
-  "min_ttl_for_entry_ms": 120000,
-  "spot_momentum_30s_threshold": 40,
-  "spot_momentum_60s_threshold": 70
+  "min_ttl_for_entry_ms": 120000
 }
 ```
 
@@ -187,12 +181,9 @@ The stale threshold ensures you don't trade on old price data. The minimum TTL p
 | `extreme_threshold` | float | `0.95` | Market bias threshold to consider sentiment extreme (0.0-1.0) |
 | `fair_value` | float | `0.50` | Fair-value assumption for binary outcome (0.0-1.0) |
 | `position_size_usdc` | float | `1.0` | Configured target size per trade in USDC; runtime enforces a $1 minimum order |
-| `min_edge` | float | `0.05` | Minimum required edge to trade, where `edge = fair_value - candidate_entry_price` |
 | `min_entry_price` | float | `0.02` | Lower bound for candidate entry quote; candidates below this price are rejected |
 | `max_entry_price` | float | `0.06` | Upper bound for candidate entry quote; candidates above this price are rejected |
 | `min_ttl_for_entry_ms` | integer | `120000` | Strategy-level TTL floor; candidate must have at least this much time remaining to enter |
-| `spot_momentum_30s_threshold` | float | `40` | 30-second spot momentum threshold (spot price points) used by entry confirmation |
-| `spot_momentum_60s_threshold` | float | `70` | 60-second spot momentum threshold (spot price points) used by entry confirmation |
 
 #### Extreme Threshold
 
@@ -208,20 +199,6 @@ otherwise → No trade
 - `0.95` (default): Trade when market is ≥95% or ≤5%
 - `0.90`: More aggressive, trade at >90% or <10%
 - `0.97`: More conservative, trade at >97% or <3%
-
-#### Spot Momentum Thresholds
-
-Entry confirmation computes momentum as spot price delta:
-
-```text
-momentum_30s = latest_spot_price - spot_price_30s_ago
-momentum_60s = latest_spot_price - spot_price_60s_ago
-```
-
-Both thresholds are in spot price points (USD delta), not percentages.
-
-- `DOWN` candidates are rejected when momentum shows accelerating upward movement
-- `UP` candidates are rejected when momentum shows accelerating downward movement
 
 #### Position Size
 
@@ -315,11 +292,8 @@ The bot validates the effective configuration on startup. Validation failures te
 | `extreme_threshold` | > fair_value | `strategy.extreme_threshold (X) must be > fair_value (Y)` |
 | `fair_value` | 0 < value < 1 | `strategy.fair_value must be in (0, 1)` |
 | `position_size_usdc` | > 0 | `strategy.position_size_usdc must be > 0` |
-| `min_edge` | `0 <= min_edge < 1` | `strategy.min_edge must be in [0, 1)` |
 | `min_entry_price`, `max_entry_price` | `0 < min_entry_price < max_entry_price < 1` | `strategy min/max entry price must satisfy 0 < min < max < 1` |
 | `min_ttl_for_entry_ms` | > 0 | `strategy.min_ttl_for_entry_ms must be > 0` |
-| `spot_momentum_30s_threshold` | > 0 | `strategy.spot_momentum_30s_threshold must be > 0` |
-| `spot_momentum_60s_threshold` | > 0 | `strategy.spot_momentum_60s_threshold must be > 0` |
 | `symbol` | Source-specific format | `price_source.symbol must match...` |
 
 ### Example Validation Errors

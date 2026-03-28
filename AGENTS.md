@@ -169,14 +169,19 @@ fn d(value: &str) -> Decimal {
 
 ```
 src/
-├── main.rs              # Entry point, bot state, CLI, persistence
+├── main.rs              # Entry point, tracing setup, CLI
+├── bot.rs               # Bot struct, main loop, order logic, trade recording
 ├── config.rs            # Configuration definitions and validation
+├── state.rs             # BotState (in-memory: idle reasons, FAK state)
+├── tasks.rs             # Background tasks: settlement, market refresh, status, balance write
+├── lib.rs               # Library re-exports
+├── cli.rs               # polybot-tools binary (derive-keys, redeem)
 ├── data/                # External data sources
+│   ├── mod.rs           # Data module exports
 │   ├── binance.rs       # Binance WebSocket client
 │   ├── coinbase.rs      # Coinbase WebSocket client
-│   ├── chainlink.rs     # Polygon RPC URL selection
 │   ├── market_discovery.rs  # Gamma API market discovery
-│   └── polymarket.rs    # CLOB client, order placement, CTF redemption
+│   └── polymarket.rs    # CLOB client, order placement, CTF redemption, RPC URL selection
 └── pipeline/            # Trading pipeline stages
     ├── mod.rs           # Module exports
     ├── price_source.rs  # Stage 1: BTC price buffer
@@ -185,6 +190,8 @@ src/
     ├── executor.rs      # Stage 4: Order execution
     ├── settler.rs       # Stage 5: Position settlement
     └── test_helpers.rs  # Test utilities
+
+dashboard/               # Real-time web dashboard (Bun + React)
 ```
 
 ## Configuration

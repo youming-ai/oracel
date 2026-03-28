@@ -33,7 +33,7 @@ pub struct Config {
 **`RiskConfig`** - Risk management settings
 ```rust
 pub struct RiskConfig {
-    pub max_fok_retries: u32,            // Maximum FOK order retries
+    pub max_fak_retries: u32,            // Maximum FAK order retries
 }
 ```
 
@@ -55,7 +55,6 @@ The `validate()` method performs startup checks:
 | Extreme threshold | 0 < value < 1 | `strategy.extreme_threshold must be in (0, 1)` |
 | Fair value | 0 < value < 1 | `strategy.fair_value must be in (0, 1)` |
 | Position size | > 0 | `strategy.position_size_usdc must be > 0` |
-| Min edge | [0, 1) | `strategy.min_edge must be in [0, 1)` |
 | Symbol format | Exchange-specific | `price_source.symbol must match...` |
 
 #### Symbol Format Validation
@@ -80,7 +79,6 @@ let config = Config::load(Path::new("config.json"))?;
 config.validate()?;
 
 // Access settings
-let cooldown = config.risk.cooldown_ms;
 let symbol = &config.price_source.symbol;
 ```
 
@@ -99,14 +97,13 @@ Binance WebSocket client for real-time price feeds.
 pub struct BinanceClient {
     symbol: String,
     price_tx: broadcast::Sender<TickerUpdate>,
-    latest_price: Arc<RwLock<Option<f64>>>,
 }
 ```
 
 **`TickerUpdate`** - Price tick with exchange timestamp
 ```rust
 pub struct TickerUpdate {
-    pub price: f64,
+    pub price: Decimal,
     pub timestamp_ms: i64,  // Binance event time ("E" field)
 }
 ```
@@ -180,7 +177,6 @@ Coinbase Advanced Trade WebSocket client.
 pub struct CoinbaseClient {
     product_id: String,
     price_tx: broadcast::Sender<TickerUpdate>,
-    latest_price: Arc<RwLock<Option<f64>>>,
 }
 ```
 
@@ -249,14 +245,14 @@ pub struct ResolutionState {
 
 #### Key Methods
 
-**`find_active_market()`** - Find current 5-minute market
+**`discover()`** - Find current 5-minute market
 ```rust
-pub async fn find_active_market(&self) -> Result<Option<ActiveMarket>>
+pub async fn discover(&self) -> Result<ActiveMarket>
 ```
 
-**`check_resolution()`** - Check if market is resolved
+**`fetch_market_by_slug()`** - Fetch a specific market by slug
 ```rust
-pub async fn check_resolution(&self, condition_id: &str) -> Result<ResolutionState>
+pub async fn fetch_market_by_slug(&self, slug: &str) -> Result<GammaMarket>
 ```
 
 **`generate_slug()`** - Generate market slug from timestamp
@@ -286,18 +282,15 @@ let discovery = MarketDiscovery::new(DiscoveryConfig {
 });
 
 // Find active market
-if let Some(market) = discovery.find_active_market().await? {
+if let Some(market) = discovery.discover().await? {
     println!("Trading: {} settling at {}", 
         market.market_slug, 
         market.settlement_time
     );
 }
 
-// Check resolution
-let state = discovery.check_resolution(&condition_id).await?;
-if state.resolved {
-    println!("Winner: {:?}", state.outcome);
-}
+// Fetch market by slug
+let gamma_market = discovery.fetch_market_by_slug("btc-updown-5m-1704067200").await?;
 ```
 
 ---
@@ -338,13 +331,13 @@ pub struct CtfRedeemer {
 pub async fn get_orderbook(&self, token_id: &str) -> Result<OrderBook>
 
 // Get mid prices
-pub async fn get_mid_prices(&self, token_ids: &[String]) -> Result<HashMap<String, f64>>
+pub async fn get_mid_prices(&self, token_ids: &[String]) -> Result<HashMap<String, Decimal>>
 ```
 
 **Authenticated Operations:**
 ```rust
-// Place FOK order
-pub async fn place_fok_order(
+// Place FAK order
+pub async fn place_fak_order(
     &self,
     token_id: &str,
     side: OrderSide,
@@ -358,7 +351,7 @@ pub async fn get_balances(&self) -> Result<Balances>
 
 #### Order Types
 
-**Fill-or-Kill (FOK)**:
+**Fill-And-Kill (FAK)**:
 - Order must be filled immediately at specified price
 - If not fillable, order is cancelled
 - Used to ensure known execution price
@@ -372,7 +365,7 @@ let orderbook = client.get_orderbook(&token_yes_id).await?;
 
 // Authenticated - place trades
 let auth = AuthenticatedPolyClient::new(&private_key).await?;
-let order = auth.place_fok_order(
+let order = auth.place_fak_order(
     &token_id,
     OrderSide::Buy,
     "100",      // size
@@ -411,7 +404,7 @@ pub enum PriceClient {
 **`PriceTick`** - Normalized price tick
 ```rust
 pub struct PriceTick {
-    pub price: f64,
+    pub price: Decimal,
     pub timestamp_ms: i64,
 }
 ```
@@ -426,13 +419,13 @@ pub fn new(source_type: PriceSourceType, symbol: &str, max: usize) -> Self
 pub async fn start(self: Arc<Self>)
 
 // Get latest price
-pub async fn latest(&self) -> Option<f64>
-
-// Get price history
-pub async fn history(&self) -> Vec<PriceTick>
+pub async fn latest(&self) -> Option<Decimal>
 
 // Get last tick timestamp
 pub async fn last_tick_ms(&self) -> Option<i64>
+
+// Get buffer length
+pub async fn buffer_len(&self) -> usize
 ```
 
 #### Task Architecture
@@ -476,8 +469,8 @@ if let Some(price) = price_source.latest().await {
     println!("Current BTC: ${}", price);
 }
 
-let history = price_source.history().await;
-println!("Last {} prices", history.len());
+let history = price_source.buffer_len().await;
+println!("Buffer: {} ticks", history);
 ```
 
 ---
@@ -493,7 +486,6 @@ Signal detection module for extreme market sentiment.
 pub enum Signal {
     Up,    // Market extremely bearish, buy UP
     Down,  // Market extremely bullish, buy DOWN
-    None,  // Market balanced, no trade
 }
 ```
 
@@ -508,16 +500,16 @@ pub struct SignalComputer {
 #### Signal Detection Algorithm
 
 ```rust
-fn compute_signal(&self, yes_price: Decimal, no_price: Decimal) -> Signal {
+fn compute_signal(&self, yes_price: Decimal, no_price: Decimal) -> Option<Signal> {
     let total = yes_price + no_price;
     let mkt_up = yes_price / total;
     
     if mkt_up > self.extreme_threshold {
-        Signal::Down  // Market bullish → buy cheap DOWN
+        Some(Signal::Down)  // Market bullish → buy cheap DOWN
     } else if mkt_up < (Decimal::ONE - self.extreme_threshold) {
-        Signal::Up    // Market bearish → buy cheap UP
+        Some(Signal::Up)    // Market bearish → buy cheap UP
     } else {
-        Signal::None  // Balanced
+        None  // Balanced
     }
 }
 ```
@@ -545,10 +537,13 @@ let signal = computer.compute_signal(
 );
 
 match signal {
-    Signal::Up => println!("Signal: Buy UP"),
-    Signal::Down => println!("Signal: Buy DOWN"),
-    Signal::None => println!("No signal"),
+    Some(Signal::Up) => println!("Signal: Buy UP"),
+    Some(Signal::Down) => println!("Signal: Buy DOWN"),
+    None => println!("No signal (balanced market)"),
 }
+
+// The decider wraps signal into a Decision:
+// Decision::Trade { direction, size_usdc, edge, payoff_ratio } or Decision::Pass(reason)
 ```
 
 ---
@@ -563,25 +558,26 @@ Trade decision logic and risk management.
 ```rust
 pub struct AccountState {
     pub balance: Decimal,
+    pub initial_balance: Decimal,
     pub consecutive_losses: u32,
     pub consecutive_wins: u32,
+    pub total_wins: u32,
+    pub total_losses: u32,
     pub daily_pnl: Decimal,
-    pub last_trade_time_ms: i64,
-    pub last_traded_settlement_ms: i64,
+    pub daily_reset_date: String,
 }
 ```
 
 **`DeciderConfig`** - Decision parameters
 ```rust
 pub struct DeciderConfig {
-    /// Minimum edge to trade (default: 15%)
-    pub edge_threshold: Decimal,
-    /// Fixed position size per trade in USDC (default: 1.0)
-    pub position_size_usdc: Decimal,
-    /// Market price threshold to consider "extreme" (default: 0.95)
     pub extreme_threshold: Decimal,
-    /// Fair value assumption for binary outcome (default: 0.50)
     pub fair_value: Decimal,
+    pub position_size_usdc: Decimal,
+    pub min_entry_price: Decimal,
+    pub max_entry_price: Decimal,
+    pub min_ttl_for_entry_ms: u64,
+    pub daily_loss_limit_usdc: Decimal,
 }
 ```
 
@@ -602,10 +598,13 @@ pub enum Decision {
 
 ```
 decide()
-├── 1. Already traded? → Pass("already_traded")
-├── 2. Market data valid? → Pass("no_market_data")
-├── 3. Edge > threshold? → Pass("edge_X%<Y%")
-├── 4. Balance > 0? → Pass("insufficient_balance")
+├── 1. Market data valid? → Pass("no_market_data")
+├── 2. Spread check? → Pass("spread_too_wide")
+├── 3. Extreme check? → Pass("not_extreme_XX%")
+├── 4. Entry price range? → Pass("entry_price_out_of_range")
+├── 5. Min TTL for entry? → Pass("ttl_too_short")
+├── 6. Balance > 0? → Pass("insufficient_balance")
+├── 7. Daily loss limit? → Pass("daily_loss_limit")
 └── TRADE: Calculate position size
 ```
 
@@ -632,9 +631,11 @@ let account = AccountState::new(decimal("1000"));
 let cfg = DeciderConfig::default();
 
 let decision = decide(
-    Some(decimal("0.85")),  // yes price
-    Some(decimal("0.15")),  // no price
-    settlement_ms,
+    &DecideContext {
+        market_yes: Some(decimal("0.85")),
+        market_no: Some(decimal("0.15")),
+        remaining_ms: 120000,
+    },
     &account,
     &cfg,
 );
@@ -674,9 +675,8 @@ pub struct ExecuteContext<'a> {
     pub poly_yes: Option<Decimal>,
     pub poly_no: Option<Decimal>,
     pub settlement_time_ms: i64,
-    pub btc_price: f64,
+    pub btc_price: Decimal,
 }
-```
 
 **`PaperOrder`** - Simulated order result
 ```rust
@@ -717,8 +717,8 @@ async fn execute_live(&self, ctx: &ExecuteContext<'_>) -> Option<LiveOrder> {
         return None;
     }
     
-    // Place FOK order
-    let response = client.place_fok_order(
+    // Place FAK order
+    let response = client.place_fak_order(
         &token_id,
         OrderSide::Buy,
         &shares.to_string(),
@@ -817,9 +817,6 @@ pub fn due_positions(&self) -> Vec<PendingPosition>
 
 // Settle positions by market slug
 pub fn settle_by_slug(&mut self, slug: &str, won: bool) -> Option<SettlementResult>
-
-// Restore positions from state (deduplicates)
-pub fn restore_positions(&mut self, positions: Vec<PendingPosition>)
 ```
 
 #### Settlement Logic

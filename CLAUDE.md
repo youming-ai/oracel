@@ -26,7 +26,7 @@ cargo audit                        # Security audit (requires cargo-audit)
 
 ## Architecture
 
-Pipeline architecture with 5 sequential stages, all driven by a tokio async event loop in `src/main.rs`:
+Pipeline architecture with 5 sequential stages, all driven by a tokio async event loop in `src/bot.rs` (entry point and tracing setup in `src/main.rs`, background tasks in `src/tasks.rs`, in-memory bot state in `src/state.rs`):
 
 ```
 PriceSource → Signal → Decider → Executor → Settler
@@ -44,9 +44,9 @@ PriceSource → Signal → Decider → Executor → Settler
 - `polymarket.rs`: CLOB client for price queries, order placement, CTF balance/redemption, and RPC URL selection
 - `market_discovery.rs`: Gamma API market discovery by slug pattern
 
-### Main event loop (`src/main.rs`)
+### Main event loop (`src/bot.rs`)
 
-Four concurrent `tokio::select!` tasks: signal tick (1s), settlement check (15s), market refresh (60s), status print (10s). Balance is persisted atomically (tmp + rename) to `logs/{mode}/balance`. CLI tools (`--derive-keys`, `--redeem-all`, `--redeem`) live in a separate `polybot-tools` binary (`src/cli.rs`).
+Four concurrent `tokio::select!` tasks (spawned in `src/tasks.rs`): signal tick (1s), settlement check (15s), market refresh (60s), status print (10s). Balance is persisted atomically (tmp + rename) to `logs/{mode}/balance`. CLI tools (`--derive-keys`, `--redeem-all`, `--redeem`) live in a separate `polybot-tools` binary (`src/cli.rs`). In-memory bot state (idle reasons, FAK state) lives in `src/state.rs`.
 
 ## Key Conventions
 
@@ -65,8 +65,9 @@ Four concurrent `tokio::select!` tasks: signal tick (1s), settlement check (15s)
 ## Monitoring
 
 ```bash
-scripts/watch.sh              # Paper mode real-time dashboard
-scripts/watch.sh live         # Live mode dashboard
+# Web dashboard (from dashboard/ directory)
+cd dashboard && bun run dev              # Paper mode
+BOT_MODE=live bun run dev                # Live mode
 ```
 
 Log files are in `logs/{paper,live}/` — `bot.log`, `trades.csv`, `balance`.

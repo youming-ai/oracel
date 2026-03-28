@@ -252,14 +252,14 @@ docker logs -f polybot
 
 ### Real-time Log Monitor
 
-Use the provided watch script:
+Use the web dashboard:
 
 ```bash
-# Paper mode
-scripts/watch.sh
+# Paper mode (from dashboard/ directory)
+cd dashboard && bun run dev
 
 # Live mode
-scripts/watch.sh live
+BOT_MODE=live bun run dev
 ```
 
 ### Log Files
@@ -336,7 +336,7 @@ systemctl is-active polybot
 
 **Healthy signs**:
 ```
-[INIT] Starting balance: $1000.00
+[INIT] Starting balance: $100.00
 [STATUS] paper | BTC=$50000 balance=$1010.00 pnl=+10.00
 [TRADE] DOWN @ 0.150 edge=35% BTC=$50000
 ```

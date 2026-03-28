@@ -18,10 +18,10 @@ pub struct Config {
     pub market: MarketConfig,
     pub polyclob: PolymarketConfig,
     pub strategy: StrategyConfig,
-    pub edge: EdgeConfigFile,
     pub risk: RiskConfig,
     pub polling: PollingConfig,
     pub price_source: PriceSourceConfig,
+    pub execution: ExecutionConfig,
 }
 ```
 
@@ -52,7 +52,6 @@ config.validate()?;
 
 // Access settings
 println!("Mode: {:?}", config.trading.mode);
-println!("Cooldown: {}ms", config.risk.cooldown_ms);
 ```
 
 ---
@@ -85,7 +84,7 @@ pub struct PriceSource {
 - Spawns client and consumer tasks
 - Idempotent (safe to call multiple times)
 
-**`latest(&self) -> Option<f64>`**
+**`latest(&self) -> Option<Decimal>`**
 - Returns most recent price
 - Async method, requires `.await`
 - Returns `None` if buffer empty
@@ -94,8 +93,8 @@ pub struct PriceSource {
 - Returns timestamp of most recent tick
 - Async method, requires `.await`
 
-**`history(&self) -> Vec<PriceTick>`**
-- Returns all buffered price ticks
+**`buffer_len(&self) -> usize`**
+- Returns number of ticks currently in the buffer
 - Async method, requires `.await`
 
 #### Example
@@ -117,9 +116,9 @@ if let Some(price) = price_source.latest().await {
     println!("BTC: ${}", price);
 }
 
-// Get history
-let history = price_source.history().await;
-println!("Buffer: {} ticks", history.len());
+// Get buffer size
+let len = price_source.buffer_len().await;
+println!("Buffer: {} ticks", len);
 ```
 
 ---
@@ -132,12 +131,9 @@ Main trading decision function.
 
 ```rust
 pub fn decide(
-    market_yes: Option<Decimal>,
-    market_no: Option<Decimal>,
-    settlement_ms: i64,
+    ctx: &DecideContext,
     account: &AccountState,
     cfg: &DeciderConfig,
-    btc_prices: &[(f64, i64)],
 ) -> Decision
 ```
 
@@ -145,12 +141,9 @@ pub fn decide(
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `market_yes` | `Option<Decimal>` | YES token mid price from CLOB |
-| `market_no` | `Option<Decimal>` | NO token mid price from CLOB |
-| `settlement_ms` | `i64` | Settlement time in milliseconds |
+| `ctx` | `&DecideContext` | Market context (yes/no prices, remaining_ms) |
 | `account` | `&AccountState` | Current account state |
 | `cfg` | `&DeciderConfig` | Decision configuration |
-| `btc_prices` | `&[(f64, i64)]` | BTC price history [(price, timestamp), ...] |
 
 #### Returns
 
@@ -168,7 +161,6 @@ pub fn decide(
 
 | Reason | Meaning |
 |--------|---------|
-| `"already_traded"` | Already traded this window |
 | `"insufficient_balance"` | Account balance ≤ 0 |
 | `"no_market_data"` | Missing or invalid market prices |
 | `"no_liquidity"` | Zero or negative total liquidity |
@@ -179,12 +171,13 @@ pub fn decide(
 
 ```rust
 let decision = decide(
-    Some(decimal("0.85")),  // YES price
-    Some(decimal("0.15")),  // NO price
-    settlement_time,
+    &DecideContext {
+        market_yes: Some(decimal("0.85")),
+        market_no: Some(decimal("0.15")),
+        remaining_ms: 120000,
+    },
     &account,
     &config,
-    &btc_prices,
 );
 
 match decision {
@@ -209,14 +202,13 @@ Tracks trading account information.
 ```rust
 pub struct AccountState {
     pub balance: Decimal,
+    pub initial_balance: Decimal,
     pub consecutive_losses: u32,
     pub consecutive_wins: u32,
     pub total_losses: u32,
     pub total_wins: u32,
-    pub last_trade_time_ms: i64,
     pub daily_pnl: Decimal,
-    pub pnl_reset_date: String,
-    pub last_traded_settlement_ms: i64,
+    pub daily_reset_date: String,
 }
 ```
 
@@ -257,7 +249,7 @@ let result = SettlementResult {
     pnl: decimal("40"),
     won: true,
     condition_id: "0x...".to_string(),
-    entry_btc_price: 50000.0,
+    entry_btc_price: decimal("50000"),
 };
 account.record_settlement(&result, 8);
 
@@ -301,7 +293,7 @@ pub struct ExecuteContext<'a> {
     pub poly_yes: Option<Decimal>,
     pub poly_no: Option<Decimal>,
     pub settlement_time_ms: i64,
-    pub btc_price: f64,
+    pub btc_price: Decimal,
 }
 ```
 
@@ -317,7 +309,7 @@ let ctx = ExecuteContext {
     poly_yes: Some(decimal("0.15")),
     poly_no: Some(decimal("0.85")),
     settlement_time_ms,
-    btc_price: 50000.0,
+    btc_price: decimal("50000"),
 };
 
 if let Some(order) = executor.execute(&ctx).await {
@@ -349,10 +341,6 @@ pub struct Settler {
 **`add_position(&mut self, pos: PendingPosition)`**
 - Adds new position to pending queue
 - Prevents duplicates (by condition_id)
-
-**`restore_positions(&mut self, positions: Vec<PendingPosition>)`**
-- Restores positions from saved state
-- Deduplicates against existing positions
 
 **`due_positions(&self) -> Vec<PendingPosition>`**
 - Returns positions past settlement time
@@ -426,13 +414,13 @@ pub struct MarketDiscovery {
 **`new(config: DiscoveryConfig) -> Self`**
 - Creates new discovery client
 
-**`find_active_market(&self) -> Result<Option<ActiveMarket>>`**
+**`discover() -> Result<ActiveMarket>`**
 - Finds currently active 5-minute market
-- Returns market info if found
+- Returns market info
 
-**`check_resolution(&self, condition_id: &str) -> Result<ResolutionState>`**
-- Checks if market is resolved
-- Returns resolution status and outcome
+**`fetch_market_by_slug(slug: &str) -> Result<GammaMarket>`**
+- Fetches a specific market by slug
+- Returns market data
 
 #### ActiveMarket
 
@@ -463,21 +451,14 @@ let discovery = MarketDiscovery::new(DiscoveryConfig {
 });
 
 // Find active market
-if let Some(market) = discovery.find_active_market().await? {
+if let Ok(market) = discovery.discover().await {
     println!("Active: {} settling at {}", 
         market.market_slug, 
         market.settlement_time);
 }
 
-// Check resolution
-let state = discovery.check_resolution(&condition_id).await?;
-if state.resolved {
-    match state.outcome {
-        Some(Direction::Up) => println!("UP won!"),
-        Some(Direction::Down) => println!("DOWN won!"),
-        None => println!("Resolved but outcome unclear"),
-    }
-}
+// Fetch market by slug
+let gamma_market = discovery.fetch_market_by_slug("btc-updown-5m-1704067200").await?;
 ```
 
 ---
@@ -511,7 +492,6 @@ pub enum Direction {
 
 impl Direction {
     pub fn as_str(&self) -> &'static str;  // "UP" or "DOWN"
-    pub fn opposite(&self) -> Self;        // Up -> Down, Down -> Up
 }
 ```
 
@@ -537,7 +517,7 @@ impl PriceSourceType {
 ```rust
 #[derive(Debug, Clone, Copy)]
 pub struct PriceTick {
-    pub price: f64,
+    pub price: Decimal,
     pub timestamp_ms: i64,
 }
 ```
@@ -551,7 +531,7 @@ pub struct SettlementResult {
     pub pnl: Decimal,
     pub won: bool,
     pub condition_id: String,
-    pub entry_btc_price: f64,
+    pub entry_btc_price: Decimal,
 }
 ```
 
@@ -559,14 +539,13 @@ pub struct SettlementResult {
 
 ```rust
 pub struct DeciderConfig {
-    /// Minimum edge to trade (default: 15%)
-    pub edge_threshold: Decimal,
-    /// Fixed position size per trade in USDC (default: 1.0)
-    pub position_size_usdc: Decimal,
-    /// Market price threshold to consider "extreme" (default: 0.95)
     pub extreme_threshold: Decimal,
-    /// Fair value assumption for binary outcome (default: 0.50)
     pub fair_value: Decimal,
+    pub position_size_usdc: Decimal,
+    pub min_entry_price: Decimal,
+    pub max_entry_price: Decimal,
+    pub min_ttl_for_entry_ms: u64,
+    pub daily_loss_limit_usdc: Decimal,
 }
 ```
 
@@ -671,28 +650,23 @@ debug!("Price update: {} @ {}", price, timestamp);
 ```rust
 async fn trading_tick(&mut self) -> Result<()> {
     // 1. Get market data
-    let market = self.discovery.find_active_market().await?;
+    let market = self.discovery.discover().await?;
     let market = match market {
-        Some(m) => m,
-        None => {
-            debug!("No active market");
-            return Ok(());
-        }
-    };
     
     // 2. Get prices
     let (yes_price, no_price) = self.get_market_prices(&market).await?;
-    let btc_prices = self.price_source.history().await;
     
     // 3. Make decision
     let account = self.account.read().await.clone();
+    let remaining_ms = market.settlement_time.timestamp_millis() - now_ms();
     let decision = decide(
-        yes_price,
-        no_price,
-        market.settlement_time.timestamp_millis(),
+        &DecideContext {
+            market_yes: yes_price,
+            market_no: no_price,
+            remaining_ms,
+        },
         &account,
         &self.decider_config,
-        &btc_prices.iter().map(|t| (t.price, t.timestamp_ms)).collect::<Vec<_>>(),
     );
     
     // 4. Execute if trade
@@ -704,7 +678,7 @@ async fn trading_tick(&mut self) -> Result<()> {
             poly_yes: yes_price,
             poly_no: no_price,
             settlement_time_ms: market.settlement_time.timestamp_millis(),
-            btc_price: self.price_source.latest().await.unwrap_or(0.0),
+            btc_price: self.price_source.latest().await.unwrap_or_default(),
         };
         
         if let Some(order) = self.executor.execute(&ctx).await {

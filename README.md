@@ -7,7 +7,7 @@ An automated trading bot for Polymarket BTC 5-minute up/down markets. It monitor
 - Buy `DOWN` when the market becomes extremely bullish (≥95%)
 - Buy `UP` when the market becomes extremely bearish (≤5%)
 - Fair value assumption: `0.50` for a 5-minute binary outcome
-- Only trade when edge and momentum filter pass
+- Only trade when edge and entry filters pass
 - Position size: 1% of balance per trade, $1 minimum
 - Risk warnings are logged for cooldown, loss streaks, and daily loss; only zero balance blocks trading
 
@@ -35,8 +35,8 @@ Polymarket CLOB REST ─────► Yes/No mid prices
                          │     Pipeline       │
                          │  1. PriceSource    │  BTC price history (multi-exchange)
                          │  2. Signal         │  Extreme market detection
-                         │  3. Decider        │  Edge, momentum checks, zero-balance guard
-                         │  4. Executor       │  Paper UUID / Live FOK order
+                         │  3. Decider        │  Edge, entry filters, zero-balance guard
+                         │  4. Executor       │  Paper UUID / Live FAK order
                          │  5. Settler        │  Expiry settlement + PnL
                          └─────────┬─────────┘
                                    │
@@ -62,24 +62,32 @@ The main loop runs four concurrent tasks:
 
 ```text
 src/
-├── main.rs                  # Main loop, bot state, CLI, persistence
+├── main.rs                  # Entry point, tracing setup, CLI
+├── bot.rs                   # Bot struct, main loop, order logic, trade recording
 ├── config.rs                # Config definitions, defaults, validation
+├── state.rs                 # BotState (in-memory only: idle reasons, FAK state)
+├── tasks.rs                 # Background tasks: settlement, market refresh, status, balance write
+├── lib.rs                   # Library re-exports
+├── cli.rs                   # polybot-tools binary (derive-keys, redeem)
 ├── data/
-│   ├── binance.rs           # Binance WebSocket client (NEW)
-│   ├── chainlink.rs         # Polygon RPC URL selection (Alchemy fallback)
+│   ├── mod.rs               # Data module exports
+│   ├── binance.rs           # Binance WebSocket client
 │   ├── coinbase.rs          # Coinbase Advanced Trade WebSocket client
 │   ├── market_discovery.rs  # Gamma API market discovery and resolution
-│   └── polymarket.rs        # CLOB client, order placement, CTF redemption
+│   └── polymarket.rs        # CLOB client, order placement, CTF redemption, RPC URL selection
 └── pipeline/
     ├── mod.rs               # Pipeline module
-    ├── price_source.rs      # BTC price buffer with history (multi-exchange)
+    ├── price_source.rs      # BTC price buffer (multi-exchange)
     ├── signal.rs            # Extreme market detection
-    ├── decider.rs           # Trade decision, momentum, account state (risk logged)
+    ├── decider.rs           # Trade decision logic, entry filters
     ├── executor.rs          # Paper/live order execution
-    └── settler.rs           # Position settlement and PnL calculation
+    ├── settler.rs           # Position settlement and PnL calculation
+    └── test_helpers.rs      # Test utilities
 
-scripts/
-└── watch.sh                 # Real-time terminal log monitor
+dashboard/                   # Real-time web dashboard (Bun + React)
+├── src/
+├── package.json
+└── vite.config.ts
 
 deploy/
 └── polybot.service          # systemd service template
@@ -88,13 +96,11 @@ logs/                        # Generated at runtime (gitignored)
 ├── paper/                   # Paper mode data
 │   ├── bot.log              # Runtime log
 │   ├── trades.csv           # Trade entries and settlements
-│   ├── balance              # Current balance snapshot
-│   └── state.json           # Persisted bot state
+│   └── balance              # Current balance snapshot
 └── live/                    # Live mode data
     ├── bot.log
     ├── trades.csv
-    ├── balance
-    └── state.json
+    └── balance
 ```
 
 ## Quick Start
@@ -109,9 +115,8 @@ cp config.example.json config.json
 # 3. Run in paper mode (default)
 cargo run --release
 
-# 4. Monitor logs
-scripts/watch.sh          # paper mode (default)
-scripts/watch.sh live     # live mode
+# 4. Monitor (web dashboard)
+cd dashboard && BOT_MODE=live bun run dev   # or omit BOT_MODE for paper
 ```
 
 ## CLI
@@ -139,13 +144,13 @@ cargo run --release -- --redeem btc-updown-5m-1773926700
 - Does not require `PRIVATE_KEY`
 - Generates a local UUID as the order ID instead of placing a real order
 - Settlement uses Gamma API market resolution
-- Starts with $1,000 simulated balance (or restores from `logs/paper/balance`)
+- Starts with $100 simulated balance (or restores from `logs/paper/balance`)
 
 ### Live
 
 - Set `trading.mode` to `"live"` in `config.json`
 - Requires `PRIVATE_KEY` in `.env`
-- Authenticates with the Polymarket CLOB and places real FOK limit orders
+- Authenticates with the Polymarket CLOB and places real FAK limit orders
 - Balance is synced from the on-chain USDC wallet every tick
 - Settlement uses Gamma API market resolution
 - Enables CTF redeemer for automatic on-chain redemption of winning positions
@@ -175,8 +180,10 @@ Trading mode and all strategy parameters are configured in `config.json`. See `c
 | `strategy.extreme_threshold` | `0.95` | Market bias threshold to consider sentiment extreme |
 | `strategy.fair_value` | `0.50` | Fair-value assumption for a binary 5-minute outcome |
 | `strategy.position_size_usdc` | `1.0` | Fixed position size per trade in USDC |
-| `edge.edge_threshold_early` | `0.15` | Minimum edge required to place a trade (15%) |
-| `risk.max_fok_retries` | `3` | Maximum retries for Fill-or-Kill orders |
+| `strategy.min_entry_price` | `0.02` | Minimum entry price for a trade candidate |
+| `strategy.max_entry_price` | `0.06` | Maximum entry price for a trade candidate |
+| `strategy.min_ttl_for_entry_ms` | `120000` | Minimum remaining TTL to enter a trade (ms) |
+| `risk.max_fak_retries` | `3` | Maximum retries for FAK (Fill-And-Kill) orders |
 | `polling.signal_interval_ms` | `1000` | Main signal loop interval in milliseconds |
 | `polling.status_interval_ms` | `10000` | Status log printing interval in milliseconds |
 
@@ -224,7 +231,6 @@ All logs are written to `logs/<mode>/` where mode is `paper` or `live`.
 | `bot.log` | Full runtime log with `[INIT]`, `[MKT]`, `[IDLE]`, `[SKIP]`, `[TRADE]`, `[SETTLED]`, `[STATUS]` prefixes |
 | `trades.csv` | One row per trade entry and one row per settlement |
 | `balance` | Current balance as a plain decimal (atomically updated) |
-| `state.json` | Pending positions, streak counters, daily PnL |
 
 Log tag reference:
 
@@ -240,8 +246,9 @@ Log tag reference:
 Terminal monitoring:
 
 ```bash
-scripts/watch.sh          # paper mode (default)
-scripts/watch.sh live     # live mode
+# Web dashboard (from dashboard/ directory)
+cd dashboard && bun run dev          # paper mode
+BOT_MODE=live bun run dev            # live mode
 ```
 
 ## Deployment

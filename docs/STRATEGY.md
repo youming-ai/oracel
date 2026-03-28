@@ -38,7 +38,7 @@ Configuration in `config.json`:
 }
 ```
 
-The bot maintains a rolling buffer of price ticks for momentum calculations. WebSocket connections automatically reconnect on disconnection.
+The bot maintains a rolling buffer of price ticks. WebSocket connections automatically reconnect on disconnection.
 
 ## 3. Signal Detection
 
@@ -83,10 +83,9 @@ tick()
       ├── 7. Spread check: skip if yes + no < 0.80 (wide spread)
       ├── 8. Extreme check: evaluate extreme threshold inside decide()
       ├── 9. Candidate creation: extreme quote creates directional candidate
-      ├── 10. Min-edge gate: require fair_value - candidate_entry_price >= min_edge
-      ├── 11. Entry price range: candidate quote must be within strategy min/max
-      ├── 12. Strategy TTL floor: candidate must satisfy min_ttl_for_entry_ms
-      ├── 13. Spot momentum confirmation: candidate must pass 30s and 60s checks
+      ├── 10. Entry price range: candidate quote must be within strategy min/max
+      ├── 11. Strategy TTL floor: candidate must satisfy min_ttl_for_entry_ms
+      ├── 12. Daily loss limit: skip if daily PnL exceeds loss limit
       │
       └── TRADE: size the position and execute only after all candidate filters pass
 ```
@@ -94,20 +93,6 @@ tick()
 There is no separate pre-decide extreme gate in `tick()`: the extreme filter runs inside `decide()`, where a qualifying quote becomes a trade candidate and then passes the remaining entry filters.
 
 The bot trades at most once per 5-minute settlement window.
-
-### Spot Momentum Confirmation
-
-Entry confirmation uses directional spot momentum over two windows:
-
-```text
-momentum_30s = latest_spot_price - spot_price_30s_ago
-momentum_60s = latest_spot_price - spot_price_60s_ago
-```
-
-Units are spot price points (USD price delta on BTC spot), not percentages.
-
-- For `DOWN` candidates, reject when momentum is accelerating up (positive 30s/60s deltas above configured thresholds)
-- For `UP` candidates, reject when momentum is accelerating down (negative 30s/60s deltas beyond configured thresholds in absolute direction)
 
 ## 5. Position Sizing
 

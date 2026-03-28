@@ -64,7 +64,7 @@ The Polymarket 5m Bot follows a pipeline architecture with clear separation of c
 ```rust
 if market_bias > extreme_threshold (0.95) → Signal::Down
 if market_bias < 1 - extreme_threshold (0.05) → Signal::Up
-else → Signal::None
+else → no signal (balanced market)
 ```
 
 ### Stage 3: Decider
@@ -80,10 +80,13 @@ else → Signal::None
 **Decision Pipeline**:
 ```
 decide()
-├── 1. Already traded this window? → Pass("already_traded")
-├── 2. Market data valid? → Pass("no_market_data")
-├── 3. Edge > threshold? → Pass("edge_X%<Y%")
-├── 4. Balance > 0? → Pass("insufficient_balance")
+├── 1. Market data valid? → Pass("no_market_data")
+├── 2. Spread check? → Pass("spread_too_wide")
+├── 3. Extreme check? → Pass("not_extreme_XX%")
+├── 4. Entry price range? → Pass("entry_price_out_of_range")
+├── 5. Min TTL for entry? → Pass("ttl_too_short")
+├── 6. Balance > 0? → Pass("insufficient_balance")
+├── 7. Daily loss limit? → Pass("daily_loss_limit")
 └── TRADE: Calculate position size
 ```
 
@@ -92,10 +95,10 @@ decide()
 
 **Key Responsibilities**:
 - Paper mode: Generate simulated orders with UUID tracking
-- Live mode: Place FOK (Fill-or-Kill) limit orders via CLOB
+- Live mode: Place FAK (Fill-And-Kill) limit orders via CLOB
 - Zero-share order rejection
 - Order ID safe handling (prevent slicing panics)
-- FOK retry logic on failure
+- FAK retry logic on failure
 
 ### Stage 5: Settler
 **Purpose**: Position settlement and PnL calculation
@@ -136,10 +139,13 @@ decide()
      ▼
 ┌─────────────────────────────────────────┐
 │           Decision Pipeline             │
-│ - Already traded this window?           │
 │ - Market data valid?                    │
-│ - Edge > threshold?                     │
+│ - Spread check?                         │
+│ - Extreme market?                       │
+│ - Entry price in range?                 │
+│ - TTL sufficient for entry?             │
 │ - Balance > 0?                          │
+│ - Daily loss limit?                     │
 └─────────────────────────────────────────┘
      │
      ▼
@@ -156,12 +162,16 @@ decide()
 
 ```
 src/
-├── main.rs                  # Bot entry point, main event loop
-├── cli.rs                   # CLI tools binary (polybot-tools)
-├── lib.rs                   # Shared library (re-exports config, data, pipeline)
+├── main.rs                  # Entry point, tracing setup, CLI
+├── bot.rs                   # Bot struct, main loop, order logic, trade recording
 ├── config.rs                # Configuration definitions, validation, defaults
+├── state.rs                 # BotState (in-memory: idle reasons, FAK state)
+├── tasks.rs                 # Background tasks: settlement, market refresh, status, balance
+├── lib.rs                   # Library re-exports (config, data, pipeline)
+├── cli.rs                   # CLI tools binary (polybot-tools)
 │
 ├── data/                    # External data source clients
+│   ├── mod.rs               # Data module exports
 │   ├── binance.rs          # Binance WebSocket client
 │   ├── coinbase.rs         # Coinbase WebSocket client
 │   ├── market_discovery.rs # Gamma API integration

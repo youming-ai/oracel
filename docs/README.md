@@ -51,7 +51,7 @@ The bot follows a 5-stage pipeline:
 ### Risk Controls
 
 - **Balance guard**: Trades are rejected when balance ≤ 0
-- **FOK retries**: Failed orders are retried up to `max_fok_retries` times
+- **FAK retries**: Failed orders are retried up to `max_fak_retries` times
 
 ### Trading Modes
 
