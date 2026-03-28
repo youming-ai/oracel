@@ -13,7 +13,7 @@ import {
 } from '@/components/ui/table'
 import type { TradeEntry, TradeRecord, TradeSettlement } from '@/lib/dashboard-types'
 import { formatBtc, formatCurrency } from '@/lib/format'
-import { CheckCircle, Clock, TrendingDown, TrendingUp, XCircle } from 'lucide-react'
+import { CheckCircle, ChevronLeft, ChevronRight, Clock, List, TrendingDown, TrendingUp, XCircle } from 'lucide-react'
 
 function useNow(intervalMs = 1000): Date {
   const [now, setNow] = useState(() => new Date())
@@ -26,13 +26,11 @@ function useNow(intervalMs = 1000): Date {
 
 /** Parse a time string into a Date. Supports ISO 8601 and legacy HH:MM:SS. */
 function parseTradeTime(timeStr: string): Date {
-  // ISO format: 2025-03-28T14:30:00Z or similar
   if (timeStr.includes('T') || timeStr.includes('-')) {
     const d = new Date(timeStr)
     if (!Number.isNaN(d.getTime())) return d
   }
 
-  // Legacy HH:MM:SS — assume today UTC
   const parts = timeStr.split(':').map(Number)
   const [h = 0, m = 0, s = 0] = parts
   if (parts.some(Number.isNaN) || h < 0 || h > 23 || m < 0 || m > 59 || s < 0 || s > 59) {
@@ -111,11 +109,14 @@ export function TradesTable({ trades, pendingTrades }: TradesTableProps) {
   }
 
   return (
-    <Card className="glass gap-0 border-0 py-0 ring-0">
-      <CardHeader className="flex flex-col justify-between gap-4 border-0 px-5 pt-5 pb-4 md:flex-row md:items-center">
-        <CardTitle className="text-sm font-semibold text-[var(--text-secondary)]">Recent Trades</CardTitle>
+    <Card className="hud-card gap-0 border-0 py-0 ring-0">
+      <CardHeader className="flex flex-col justify-between gap-3 border-0 px-4 pt-4 pb-3 sm:flex-row sm:items-center sm:px-5 sm:pt-5 sm:pb-4">
+        <CardTitle className="card-title-hud">
+          <List className="size-3.5 text-[var(--accent)]" />
+          Recent Trades
+        </CardTitle>
 
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap gap-1.5">
           <FilterButton label="All" value="all" activeFilter={filter} onClick={changeFilter} />
           <FilterButton label="Wins" value="WIN" activeFilter={filter} onClick={changeFilter} />
           <FilterButton label="Losses" value="LOSS" activeFilter={filter} onClick={changeFilter} />
@@ -124,75 +125,83 @@ export function TradesTable({ trades, pendingTrades }: TradesTableProps) {
       </CardHeader>
 
       <CardContent className="px-0 pb-0">
-        <Table className="mono text-xs">
-          <TableHeader>
-            <TableRow className="border-b border-[rgba(30,45,61,0.5)] hover:bg-transparent">
-              <TableHead className="h-9 px-3 text-[var(--text-dim)]">Time</TableHead>
-              <TableHead className="h-9 px-3 text-[var(--text-dim)]">Status</TableHead>
-              <TableHead className="h-9 px-3 text-[var(--text-dim)]">Direction</TableHead>
-              <TableHead className="h-9 px-3 text-right text-[var(--text-dim)]">PnL</TableHead>
-              <TableHead className="h-9 px-3 text-right text-[var(--text-dim)]">Entry BTC</TableHead>
-              <TableHead className="h-9 px-3 text-right text-[var(--text-dim)]">Exit BTC</TableHead>
-              <TableHead className="h-9 px-3 text-right text-[var(--text-dim)]">Price</TableHead>
-              <TableHead className="h-9 px-3 text-right text-[var(--text-dim)]">Edge</TableHead>
-              <TableHead className="h-9 px-3 text-right text-[var(--text-dim)]">Payoff</TableHead>
-            </TableRow>
-          </TableHeader>
+        <div className="scrollbar-thin overflow-x-auto">
+          <Table className="mono text-xs">
+            <TableHeader>
+              <TableRow className="border-b border-[rgba(30,45,61,0.5)] hover:bg-transparent">
+                <TableHead className="h-8 whitespace-nowrap px-3 text-[10px] font-medium uppercase tracking-wider text-[var(--text-dim)] sm:px-3">Time</TableHead>
+                <TableHead className="h-8 whitespace-nowrap px-3 text-[10px] font-medium uppercase tracking-wider text-[var(--text-dim)] sm:px-3">Status</TableHead>
+                <TableHead className="h-8 whitespace-nowrap px-3 text-[10px] font-medium uppercase tracking-wider text-[var(--text-dim)] sm:px-3">Dir</TableHead>
+                <TableHead className="h-8 whitespace-nowrap px-3 text-right text-[10px] font-medium uppercase tracking-wider text-[var(--text-dim)] sm:px-3">PnL</TableHead>
+                <TableHead className="hidden h-8 whitespace-nowrap px-3 text-right text-[10px] font-medium uppercase tracking-wider text-[var(--text-dim)] sm:table-cell sm:px-3">Entry BTC</TableHead>
+                <TableHead className="hidden h-8 whitespace-nowrap px-3 text-right text-[10px] font-medium uppercase tracking-wider text-[var(--text-dim)] sm:table-cell sm:px-3">Exit BTC</TableHead>
+                <TableHead className="h-8 whitespace-nowrap px-3 text-right text-[10px] font-medium uppercase tracking-wider text-[var(--text-dim)] sm:px-3">Price</TableHead>
+                <TableHead className="hidden h-8 whitespace-nowrap px-3 text-right text-[10px] font-medium uppercase tracking-wider text-[var(--text-dim)] md:table-cell sm:px-3">Edge</TableHead>
+                <TableHead className="hidden h-8 whitespace-nowrap px-3 text-right text-[10px] font-medium uppercase tracking-wider text-[var(--text-dim)] md:table-cell sm:px-3">Payoff</TableHead>
+              </TableRow>
+            </TableHeader>
 
             <TableBody>
               {pagedTrades.map((trade) => (
                 <TableRow key={buildTradeKey(trade)} className="trade-row border-b-0">
-                  <TableCell className="px-3 py-2 text-[var(--text-secondary)]" title={trade.time}>
+                  <TableCell className="whitespace-nowrap px-3 py-2 text-[var(--text-secondary)]" title={trade.time}>
                     {relativeTime(trade.time, now)}
                   </TableCell>
                   <TableCell className="px-3 py-2">{renderStatusBadge(trade)}</TableCell>
                   <TableCell className="px-3 py-2">{renderDirectionBadge(trade.direction)}</TableCell>
-                  <TableCell className="px-3 py-2 text-right">{renderPnl(trade)}</TableCell>
-                  <TableCell className="px-3 py-2 text-right text-[var(--text-secondary)]">
-                    {isSettlement(trade) ? formatBtc(trade.entryBTC) : '—'}
+                  <TableCell className="whitespace-nowrap px-3 py-2 text-right">{renderPnl(trade)}</TableCell>
+                  <TableCell className="hidden whitespace-nowrap px-3 py-2 text-right text-[var(--text-secondary)] sm:table-cell">
+                    {isSettlement(trade) ? formatBtc(trade.entryBTC) : '\u2014'}
                   </TableCell>
-                  <TableCell className="px-3 py-2 text-right text-[var(--text-secondary)]">
-                    {isSettlement(trade) ? formatBtc(trade.exitBTC) : '—'}
+                  <TableCell className="hidden whitespace-nowrap px-3 py-2 text-right text-[var(--text-secondary)] sm:table-cell">
+                    {isSettlement(trade) ? formatBtc(trade.exitBTC) : '\u2014'}
                   </TableCell>
-                  <TableCell className="px-3 py-2 text-right text-[var(--text-dim)]">
-                    {trade.price !== null ? trade.price.toFixed(3) : '—'}
+                  <TableCell className="whitespace-nowrap px-3 py-2 text-right text-[var(--text-dim)]">
+                    {trade.price !== null ? trade.price.toFixed(3) : '\u2014'}
                   </TableCell>
-                  <TableCell className="px-3 py-2 text-right text-[var(--text-dim)]">
-                    {trade.edge !== null ? `${trade.edge.toFixed(1)}%` : '—'}
+                  <TableCell className="hidden whitespace-nowrap px-3 py-2 text-right text-[var(--text-dim)] md:table-cell">
+                    {trade.edge !== null ? `${trade.edge.toFixed(1)}%` : '\u2014'}
                   </TableCell>
-                  <TableCell className="px-3 py-2 text-right text-[var(--text-dim)]">
-                    {trade.payoff ?? '—'}
+                  <TableCell className="hidden whitespace-nowrap px-3 py-2 text-right text-[var(--text-dim)] md:table-cell">
+                    {trade.payoff ?? '\u2014'}
                   </TableCell>
                 </TableRow>
               ))}
             </TableBody>
-        </Table>
+          </Table>
+        </div>
 
         {totalPages > 1 && (
-          <div className="flex items-center justify-between border-t border-[rgba(30,45,61,0.5)] px-4 py-2">
-            <span className="mono text-xs text-[var(--text-dim)]">
-              {filteredTrades.length} trades · Page {safePage + 1} of {totalPages}
+          <div className="flex items-center justify-between border-t border-[rgba(30,45,61,0.5)] px-3 py-2 sm:px-4">
+            <span className="mono text-[10px] text-[var(--text-dim)] sm:text-xs">
+              {filteredTrades.length} trades
+              <span className="hidden sm:inline"> · Page {safePage + 1}/{totalPages}</span>
             </span>
-            <div className="flex gap-1">
+            <div className="flex items-center gap-1">
               <Button
                 size="xs"
                 variant="ghost"
-                className="mono rounded-md px-3 py-1 text-xs"
+                className="mono size-7 rounded-md p-0 text-xs sm:h-7 sm:w-auto sm:px-3"
                 disabled={safePage === 0}
                 style={{ color: 'var(--text-dim)' }}
                 onClick={() => setPage(safePage - 1)}
               >
-                ← Prev
+                <ChevronLeft className="size-3.5 sm:hidden" />
+                <span className="hidden sm:inline">\u2190 Prev</span>
               </Button>
+              <span className="mono text-[10px] text-[var(--text-dim)] sm:hidden">
+                {safePage + 1}/{totalPages}
+              </span>
               <Button
                 size="xs"
                 variant="ghost"
-                className="mono rounded-md px-3 py-1 text-xs"
+                className="mono size-7 rounded-md p-0 text-xs sm:h-7 sm:w-auto sm:px-3"
                 disabled={safePage >= totalPages - 1}
                 style={{ color: 'var(--text-dim)' }}
                 onClick={() => setPage(safePage + 1)}
               >
-                Next →
+                <ChevronRight className="size-3.5 sm:hidden" />
+                <span className="hidden sm:inline">Next \u2192</span>
               </Button>
             </div>
           </div>
@@ -213,26 +222,22 @@ function FilterButton({ label, value, activeFilter, onClick }: FilterButtonProps
   const active = value === activeFilter
 
   return (
-    <Button
-      size="xs"
-      variant="ghost"
-      className="mono rounded-md px-3 py-1 text-xs"
-      style={{
-        color: active ? 'var(--accent)' : 'var(--text-dim)',
-        background: active ? 'var(--accent-dim)' : 'transparent',
-      }}
+    <button
+      type="button"
+      className="filter-chip mono"
+      data-active={active || undefined}
       onClick={() => onClick(value)}
     >
       {label}
-    </Button>
+    </button>
   )
 }
 
 function renderStatusBadge(trade: TradeRecord) {
   if (isEntry(trade)) {
     return (
-      <Badge className="inline-flex items-center gap-1 rounded-md border-0 bg-[rgba(255,165,2,0.15)] px-2 py-0.5 text-[11px] text-[var(--warn)]">
-        <Clock className="size-3" />
+      <Badge className="inline-flex items-center gap-1 rounded-md border-0 bg-[rgba(255,165,2,0.12)] px-1.5 py-0.5 text-[10px] text-[var(--warn)]">
+        <Clock className="size-2.5" />
         PENDING
       </Badge>
     )
@@ -241,13 +246,13 @@ function renderStatusBadge(trade: TradeRecord) {
   const win = trade.result === 'WIN'
   return (
     <Badge
-      className="inline-flex items-center gap-1 rounded-md border-0 px-2 py-0.5 text-[11px]"
+      className="inline-flex items-center gap-1 rounded-md border-0 px-1.5 py-0.5 text-[10px]"
       style={{
-        background: win ? 'rgba(0,212,170,0.15)' : 'rgba(255,71,87,0.15)',
+        background: win ? 'rgba(0,212,170,0.12)' : 'rgba(255,71,87,0.12)',
         color: win ? 'var(--win)' : 'var(--loss)',
       }}
     >
-      {win ? <CheckCircle className="size-3" /> : <XCircle className="size-3" />}
+      {win ? <CheckCircle className="size-2.5" /> : <XCircle className="size-2.5" />}
       {win ? 'WIN' : 'LOSS'}
     </Badge>
   )
@@ -257,13 +262,13 @@ function renderDirectionBadge(direction: 'UP' | 'DOWN') {
   const up = direction === 'UP'
   return (
     <Badge
-      className="inline-flex items-center gap-1 rounded-md border-0 px-2 py-0.5 text-[11px]"
+      className="inline-flex items-center gap-1 rounded-md border-0 px-1.5 py-0.5 text-[10px]"
       style={{
-        background: up ? 'rgba(0,212,170,0.15)' : 'rgba(255,71,87,0.15)',
+        background: up ? 'rgba(0,212,170,0.12)' : 'rgba(255,71,87,0.12)',
         color: up ? 'var(--win)' : 'var(--loss)',
       }}
     >
-      {up ? <TrendingUp className="size-3" /> : <TrendingDown className="size-3" />}
+      {up ? <TrendingUp className="size-2.5" /> : <TrendingDown className="size-2.5" />}
       {direction}
     </Badge>
   )
@@ -271,7 +276,7 @@ function renderDirectionBadge(direction: 'UP' | 'DOWN') {
 
 function renderPnl(trade: TradeRecord) {
   if (isEntry(trade)) {
-    return <span className="text-[var(--text-dim)]">—</span>
+    return <span className="text-[var(--text-dim)]">\u2014</span>
   }
 
   const win = trade.result === 'WIN'

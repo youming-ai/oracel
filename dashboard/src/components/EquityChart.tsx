@@ -4,6 +4,7 @@ import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YA
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import type { EquityPoint } from '@/lib/dashboard-types'
 import { formatCurrency } from '@/lib/format'
+import { TrendingUp } from 'lucide-react'
 
 interface EquityChartProps {
   equity: EquityPoint[]
@@ -18,12 +19,15 @@ export function EquityChart({ equity }: EquityChartProps) {
   }, [equity])
 
   return (
-    <Card className="glass gap-0 border-0 py-0 ring-0">
-      <CardHeader className="border-0 px-5 pt-5 pb-4">
-        <CardTitle className="text-sm font-semibold text-[var(--text-secondary)]">Equity Curve</CardTitle>
+    <Card className="hud-card gap-0 border-0 py-0 ring-0">
+      <CardHeader className="border-0 px-4 pt-4 pb-3 sm:px-5 sm:pt-5 sm:pb-4">
+        <CardTitle className="card-title-hud">
+          <TrendingUp className="size-3.5 text-[var(--accent)]" />
+          Equity Curve
+        </CardTitle>
       </CardHeader>
 
-      <CardContent className="h-[240px] px-4 pb-4 sm:px-5 sm:pb-5">
+      <CardContent className="h-[200px] px-2 pb-3 sm:h-[240px] sm:px-4 sm:pb-5">
         {chartData.length === 0 ? (
           <div className="mono flex h-full items-center justify-center text-sm text-[var(--text-dim)]">
             No settled trades yet
@@ -50,12 +54,13 @@ export function EquityChart({ equity }: EquityChartProps) {
                 cursor={{ stroke: 'rgba(0,212,170,0.35)', strokeWidth: 1 }}
                 formatter={(value) => formatCurrency(Number(value), 2)}
                 contentStyle={{
-                  background: 'rgba(17,24,39,0.95)',
-                  border: '1px solid var(--border)',
-                  borderRadius: '8px',
+                  background: 'rgba(10,14,23,0.95)',
+                  border: '1px solid rgba(0,212,170,0.2)',
+                  borderRadius: '6px',
                   color: 'var(--text-primary)',
                   fontFamily: '"Geist Pixel", monospace',
                   fontSize: '11px',
+                  boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
                 }}
                 labelStyle={{ color: 'var(--text-secondary)' }}
               />

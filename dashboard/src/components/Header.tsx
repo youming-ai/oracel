@@ -1,4 +1,4 @@
-import { RefreshCw } from 'lucide-react'
+import { Activity, Clock, Radio, Zap } from 'lucide-react'
 
 import { formatBtc, formatTime } from '@/lib/format'
 
@@ -9,29 +9,58 @@ interface HeaderProps {
 
 export function Header({ btcPrice, lastUpdated }: HeaderProps) {
   return (
-    <header className="hero-gradient border-b border-[var(--border)]">
-      <div className="mx-auto flex w-full max-w-7xl items-center justify-between px-6 py-5">
-        <div className="flex items-center gap-4">
-          <div className="text-2xl font-bold tracking-tight">
-            <span className="glow-accent text-[var(--accent)]">◆</span> Oracel
+    <header className="header-hud relative overflow-hidden">
+      {/* Scanline overlay */}
+      <div className="header-scanline" />
+
+      {/* Glowing bottom edge */}
+      <div className="header-glow-edge" />
+
+      <div className="relative z-10 mx-auto flex w-full max-w-7xl flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-6 sm:py-4">
+        {/* Left: Brand cluster */}
+        <div className="flex items-center gap-3 sm:gap-5">
+          {/* Logo mark */}
+          <div className="header-logo-mark">
+            <Zap className="size-4 text-[var(--bg-primary)]" strokeWidth={2.5} />
           </div>
 
-          <div className="flex items-center gap-2">
-            <div className="pulse-dot" />
-            <span className="mono text-xs text-[var(--text-secondary)]">LIVE</span>
+          <div>
+            <div className="header-brand">ORACEL</div>
+            <div className="mt-0.5 flex items-center gap-2">
+              <div className="header-status-chip">
+                <Radio className="size-2.5 animate-pulse" />
+                <span>LIVE</span>
+              </div>
+              <div className="header-divider hidden sm:block" />
+              <span className="mono hidden text-[10px] tracking-widest text-[var(--text-dim)] sm:inline">
+                POLYMARKET BOT v1
+              </span>
+            </div>
           </div>
         </div>
 
-        <div className="flex items-center gap-6">
-          <div className="text-right">
-            <div className="text-xs text-[var(--text-secondary)]">BTC/USDT</div>
-            <div className="mono font-semibold text-[var(--text-primary)]">{formatBtc(btcPrice)}</div>
+        {/* Right: Data strip */}
+        <div className="flex items-center gap-1">
+          {/* BTC Price module */}
+          <div className="header-data-module flex-1 sm:flex-none">
+            <div className="header-data-label">
+              <Activity className="size-2.5" />
+              BTC / USDT
+            </div>
+            <div className="header-data-value text-[var(--text-primary)]">
+              {formatBtc(btcPrice)}
+            </div>
           </div>
 
-          <div className="text-right">
-            <div className="text-xs text-[var(--text-secondary)]">Last Update</div>
-            <div className="mono flex items-center justify-end gap-1 text-sm text-[var(--text-secondary)]">
-              <RefreshCw className="size-3" />
+          <div className="header-module-sep" />
+
+          {/* Sync module */}
+          <div className="header-data-module flex-1 sm:flex-none">
+            <div className="header-data-label">
+              <Clock className="size-2.5" />
+              LAST SYNC
+            </div>
+            <div className="header-data-value text-[var(--text-secondary)]">
               {formatTime(lastUpdated)}
             </div>
           </div>
