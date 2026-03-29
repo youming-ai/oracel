@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -14,15 +14,6 @@ import {
 import type { TradeEntry, TradeRecord, TradeSettlement } from '@/lib/dashboard-types'
 import { formatBtc, formatCurrency } from '@/lib/format'
 import { CheckCircle, ChevronLeft, ChevronRight, Clock, List, TrendingDown, TrendingUp, XCircle } from 'lucide-react'
-
-function useNow(intervalMs = 1000): Date {
-  const [now, setNow] = useState(() => new Date())
-  useEffect(() => {
-    const id = setInterval(() => setNow(new Date()), intervalMs)
-    return () => clearInterval(id)
-  }, [intervalMs])
-  return now
-}
 
 /** Parse a time string into a Date. Supports ISO 8601 and legacy HH:MM:SS. */
 function parseTradeTime(timeStr: string): Date {
@@ -41,16 +32,10 @@ function parseTradeTime(timeStr: string): Date {
   return d
 }
 
-function relativeTime(timeStr: string, now: Date): string {
-  const then = parseTradeTime(timeStr)
-  const diffSec = Math.max(0, Math.floor((now.getTime() - then.getTime()) / 1000))
-  if (diffSec < 60) return `${diffSec}s ago`
-  const diffMin = Math.floor(diffSec / 60)
-  if (diffMin < 60) return `${diffMin}m ago`
-  const diffHr = Math.floor(diffMin / 60)
-  if (diffHr < 24) return `${diffHr}h ago`
-  const diffDay = Math.floor(diffHr / 24)
-  return `${diffDay}d ago`
+function formatTradeTime(timeStr: string): string {
+  const d = parseTradeTime(timeStr)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
 type TradeFilter = 'all' | 'WIN' | 'LOSS' | 'pending'
@@ -73,7 +58,6 @@ const PAGE_SIZE = 20
 export function TradesTable({ trades, pendingTrades }: TradesTableProps) {
   const [filter, setFilter] = useState<TradeFilter>('all')
   const [page, setPage] = useState(0)
-  const now = useNow()
 
   const settlements = useMemo(
     () => trades.filter(isSettlement),
@@ -145,7 +129,7 @@ export function TradesTable({ trades, pendingTrades }: TradesTableProps) {
               {pagedTrades.map((trade) => (
                 <TableRow key={buildTradeKey(trade)} className="trade-row border-b-0">
                   <TableCell className="whitespace-nowrap px-3 py-2 text-[var(--text-secondary)]" title={trade.time}>
-                    {relativeTime(trade.time, now)}
+                    {formatTradeTime(trade.time)}
                   </TableCell>
                   <TableCell className="px-3 py-2">{renderStatusBadge(trade)}</TableCell>
                   <TableCell className="px-3 py-2">{renderDirectionBadge(trade.direction)}</TableCell>
