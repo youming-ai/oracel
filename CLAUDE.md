@@ -87,7 +87,7 @@ React + Vite + Tailwind app in `dashboard/`. Reads `trades.csv` and `balance` fi
 
 ## Configuration
 
-- `config.json` — Main config (copy from `config.example.json`). Validated on startup.
+- `config.json` — Main config. Validated on startup.
 - `.env` — `PRIVATE_KEY` (live mode only), `ALCHEMY_KEY` (optional Polygon RPC)
 - Two modes: `paper` (simulated, default $100 balance) and `live` (real orders, on-chain balance sync)
 

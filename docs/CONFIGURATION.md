@@ -11,13 +11,7 @@ The Polymarket 5m Bot uses a JSON configuration file (`config.json`) for all run
 
 ## Creating Configuration
 
-Copy the example configuration:
-
-```bash
-cp config.example.json config.json
-```
-
-Then edit `config.json` with your settings.
+Edit `config.json` with your settings.
 
 ## Full Configuration Reference
 

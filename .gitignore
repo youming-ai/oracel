@@ -6,7 +6,6 @@ node_modules/
 
 # Runtime
 /logs/
-config.json
 .env
 
 # Editor
@@ -18,6 +17,7 @@ config.json
 # Tooling
 .worktrees/
 .sisyphus/
+.claude/
 
 # OS
 .DS_Store

@@ -52,22 +52,16 @@ cargo build --release
 
 ### 3. Create Configuration
 
-```bash
-# Copy example configuration
-cp config.example.json config.json
-
-# Edit with your settings
-nano config.json  # or vim, emacs, etc.
-```
+Edit `config.json` with your settings.
 
 ### 4. Setup Environment Variables
 
 ```bash
-# Copy example environment file
-cp .env.example .env
-
-# Edit with your keys
-nano .env
+# Create .env with your keys
+cat > .env <<EOF
+PRIVATE_KEY=your_private_key_here
+ALCHEMY_KEY=your_alchemy_key_here
+EOF
 ```
 
 **Required for live mode**:

@@ -400,6 +400,11 @@ impl Bot {
             None => return Ok(()),
         };
 
+        let momentum_pct = self
+            .price_source
+            .momentum_pct(self.config.strategy.momentum_window_secs as i64)
+            .await;
+
         let buf_len = self.price_source.buffer_len().await;
         if buf_len < 60 {
             let detail = format!("buffer={}/60", buf_len);
@@ -479,6 +484,7 @@ impl Bot {
             market_yes: poly_yes_dec,
             market_no: poly_no_dec,
             remaining_ms,
+            btc_momentum_pct: momentum_pct,
         };
 
         let decision = decider::decide(&decide_ctx, &account_read, &decider_cfg);

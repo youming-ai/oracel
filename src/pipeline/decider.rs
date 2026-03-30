@@ -30,6 +30,9 @@ pub struct DeciderConfig {
     pub max_entry_price: Decimal,
     pub min_ttl_for_entry_ms: u64,
     pub daily_loss_limit_usdc: Decimal,
+    pub momentum_threshold_pct: Decimal,
+    pub max_drawdown_pct: Decimal,
+    pub max_consecutive_losses: u32,
 }
 
 impl Default for DeciderConfig {
@@ -42,6 +45,9 @@ impl Default for DeciderConfig {
             max_entry_price: decimal("0.10"),
             min_ttl_for_entry_ms: 120_000,
             daily_loss_limit_usdc: decimal("0"),
+            momentum_threshold_pct: decimal("0.001"),
+            max_drawdown_pct: decimal("0"),
+            max_consecutive_losses: 0,
         }
     }
 }
@@ -64,6 +70,9 @@ impl From<&crate::config::Config> for DeciderConfig {
             max_entry_price: cfg.strategy.max_entry_price,
             min_ttl_for_entry_ms: cfg.strategy.min_ttl_for_entry_ms,
             daily_loss_limit_usdc: cfg.risk.daily_loss_limit_usdc,
+            momentum_threshold_pct: cfg.strategy.momentum_threshold_pct,
+            max_drawdown_pct: cfg.risk.max_drawdown_pct,
+            max_consecutive_losses: cfg.risk.max_consecutive_losses,
         }
     }
 }
@@ -129,6 +138,7 @@ pub struct DecideContext {
     pub market_yes: Option<Decimal>,
     pub market_no: Option<Decimal>,
     pub remaining_ms: i64,
+    pub btc_momentum_pct: Option<Decimal>,
 }
 
 pub fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderConfig) -> Decision {
@@ -143,6 +153,17 @@ pub fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderConfig) 
         ));
     }
 
+    if cfg.max_drawdown_pct > Decimal::ZERO && account.initial_balance > Decimal::ZERO {
+        let drawdown = (account.initial_balance - account.balance) / account.initial_balance;
+        if drawdown > cfg.max_drawdown_pct {
+            return Decision::Pass(format!("max_drawdown_{:.0}%", drawdown * decimal("100")));
+        }
+    }
+
+    if cfg.max_consecutive_losses > 0 && account.consecutive_losses >= cfg.max_consecutive_losses {
+        return Decision::Pass(format!("consecutive_losses_{}", account.consecutive_losses));
+    }
+
     let (yes, no) = match (ctx.market_yes, ctx.market_no) {
         (Some(y), Some(n)) if y > decimal("0.01") && n > decimal("0.01") => (y, n),
         _ => return Decision::Pass("no_market_data".into()),
@@ -153,7 +174,7 @@ pub fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderConfig) 
         return Decision::Pass("no_liquidity".into());
     }
 
-    if total < decimal("0.80") {
+    if total < decimal("0.90") {
         return Decision::Pass(format!(
             "wide_spread_{:.0}%",
             ((Decimal::ONE - total) * decimal("100")).round_dp(0)
@@ -172,6 +193,21 @@ pub fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderConfig) 
             (mkt_up * decimal("100")).round_dp(0)
         ));
     };
+
+    // Momentum filter: skip when BTC price movement confirms the extreme direction
+    if let Some(momentum) = ctx.btc_momentum_pct {
+        if cfg.momentum_threshold_pct > Decimal::ZERO {
+            let skip = match base_direction {
+                // Betting Down against bullish extreme — skip if BTC is rising
+                Direction::Down => momentum > cfg.momentum_threshold_pct,
+                // Betting Up against bearish extreme — skip if BTC is falling
+                Direction::Up => momentum < -cfg.momentum_threshold_pct,
+            };
+            if skip {
+                return Decision::Pass("btc_momentum_confirms".into());
+            }
+        }
+    }
 
     let edge = cfg.fair_value - cheap_price;
 
@@ -222,6 +258,7 @@ mod tests {
             market_yes: Some(d("0.97")),
             market_no: Some(d("0.03")),
             remaining_ms: 240_000,
+            btc_momentum_pct: None,
         }
     }
 
@@ -420,6 +457,123 @@ mod tests {
         match decision {
             Decision::Pass(reason) => assert_eq!(reason, "ttl_below_entry_floor_0"),
             Decision::Trade { .. } => panic!("expected pass due to ttl floor"),
+        }
+    }
+
+    #[test]
+    fn test_momentum_filter_skips_when_btc_confirms_bullish() {
+        let account = AccountState::new(d("1000"));
+        let cfg = DeciderConfig {
+            momentum_threshold_pct: d("0.001"),
+            ..DeciderConfig::default()
+        };
+        let mut ctx = default_ctx();
+        ctx.market_yes = Some(d("0.97"));
+        ctx.market_no = Some(d("0.03"));
+        // BTC went up 0.2% → confirms bullish extreme → skip contrarian (Down) bet
+        ctx.btc_momentum_pct = Some(d("0.002"));
+
+        let decision = decide(&ctx, &account, &cfg);
+
+        match decision {
+            Decision::Pass(reason) => assert_eq!(reason, "btc_momentum_confirms"),
+            Decision::Trade { .. } => panic!("expected pass due to momentum filter"),
+        }
+    }
+
+    #[test]
+    fn test_momentum_filter_allows_when_btc_contradicts_bullish() {
+        let account = AccountState::new(d("1000"));
+        let cfg = DeciderConfig {
+            momentum_threshold_pct: d("0.001"),
+            ..DeciderConfig::default()
+        };
+        let mut ctx = default_ctx();
+        ctx.market_yes = Some(d("0.97"));
+        ctx.market_no = Some(d("0.03"));
+        // BTC went down 0.1% → contradicts bullish extreme → allow contrarian bet
+        ctx.btc_momentum_pct = Some(d("-0.001"));
+
+        let decision = decide(&ctx, &account, &cfg);
+
+        match decision {
+            Decision::Trade { direction, .. } => assert_eq!(direction, Direction::Down),
+            Decision::Pass(reason) => panic!("expected trade but got pass: {}", reason),
+        }
+    }
+
+    #[test]
+    fn test_momentum_filter_skips_when_btc_confirms_bearish() {
+        let account = AccountState::new(d("1000"));
+        let cfg = DeciderConfig {
+            momentum_threshold_pct: d("0.001"),
+            ..DeciderConfig::default()
+        };
+        let mut ctx = default_ctx();
+        ctx.market_yes = Some(d("0.03"));
+        ctx.market_no = Some(d("0.97"));
+        // BTC went down 0.2% → confirms bearish extreme → skip contrarian (Up) bet
+        ctx.btc_momentum_pct = Some(d("-0.002"));
+
+        let decision = decide(&ctx, &account, &cfg);
+
+        match decision {
+            Decision::Pass(reason) => assert_eq!(reason, "btc_momentum_confirms"),
+            Decision::Trade { .. } => panic!("expected pass due to momentum filter"),
+        }
+    }
+
+    #[test]
+    fn test_max_drawdown_blocks_trading() {
+        let mut account = AccountState::new(d("1000"));
+        account.balance = d("750"); // 25% drawdown
+        let cfg = DeciderConfig {
+            max_drawdown_pct: d("0.20"), // 20% limit
+            ..DeciderConfig::default()
+        };
+        let ctx = default_ctx();
+
+        let decision = decide(&ctx, &account, &cfg);
+
+        match decision {
+            Decision::Pass(reason) => assert!(reason.starts_with("max_drawdown_")),
+            Decision::Trade { .. } => panic!("expected pass due to max drawdown"),
+        }
+    }
+
+    #[test]
+    fn test_max_drawdown_allows_when_within_limit() {
+        let mut account = AccountState::new(d("1000"));
+        account.balance = d("850"); // 15% drawdown, under 20% limit
+        let cfg = DeciderConfig {
+            max_drawdown_pct: d("0.20"),
+            ..DeciderConfig::default()
+        };
+        let ctx = default_ctx();
+
+        let decision = decide(&ctx, &account, &cfg);
+
+        match decision {
+            Decision::Trade { .. } => {}
+            Decision::Pass(reason) => panic!("expected trade but got pass: {}", reason),
+        }
+    }
+
+    #[test]
+    fn test_consecutive_losses_skip() {
+        let mut account = AccountState::new(d("1000"));
+        account.consecutive_losses = 3;
+        let cfg = DeciderConfig {
+            max_consecutive_losses: 3,
+            ..DeciderConfig::default()
+        };
+        let ctx = default_ctx();
+
+        let decision = decide(&ctx, &account, &cfg);
+
+        match decision {
+            Decision::Pass(reason) => assert_eq!(reason, "consecutive_losses_3"),
+            Decision::Trade { .. } => panic!("expected pass due to consecutive losses"),
         }
     }
 }
