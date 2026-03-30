@@ -111,9 +111,27 @@ impl Bot {
                 let bc = data::polymarket::BalanceChecker::new(wallet, rpc.clone())
                     .await
                     .map_err(|e| anyhow::anyhow!("[INIT] BalanceChecker creation failed: {}", e))?;
-                bc.balance()
+                let on_chain = bc
+                    .balance()
                     .await
-                    .map_err(|e| anyhow::anyhow!("[INIT] Balance query failed: {}", e))?
+                    .map_err(|e| anyhow::anyhow!("[INIT] Balance query failed: {}", e))?;
+                // On-chain balance may be zero if funds are locked in positions.
+                // Fall back to persisted balance file so we don't lose track of
+                // working capital across restarts.
+                if on_chain > Decimal::ZERO {
+                    on_chain
+                } else {
+                    let saved = Self::load_balance(&log_dir).await;
+                    if let Some(saved_bal) = saved {
+                        tracing::info!(
+                            "[INIT] On-chain balance is $0, restored ${:.2} from balance file",
+                            saved_bal
+                        );
+                        saved_bal
+                    } else {
+                        on_chain
+                    }
+                }
             } else {
                 anyhow::bail!("[INIT] Live mode requires redeemer for balance query")
             }

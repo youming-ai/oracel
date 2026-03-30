@@ -15,27 +15,17 @@ import type { TradeEntry, TradeRecord, TradeSettlement } from '@/lib/dashboard-t
 import { formatBtc, formatCurrency } from '@/lib/format'
 import { CheckCircle, ChevronLeft, ChevronRight, Clock, List, TrendingDown, TrendingUp, XCircle } from 'lucide-react'
 
-/** Parse a time string into a Date. Supports ISO 8601 and legacy HH:MM:SS. */
-function parseTradeTime(timeStr: string): Date {
+function formatTradeTime(timeStr: string): string {
+  // ISO 8601 (e.g. "2026-03-29T14:11:45Z") — convert to local time
   if (timeStr.includes('T') || timeStr.includes('-')) {
     const d = new Date(timeStr)
-    if (!Number.isNaN(d.getTime())) return d
+    if (!Number.isNaN(d.getTime())) {
+      const pad = (n: number) => String(n).padStart(2, '0')
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+    }
   }
-
-  const parts = timeStr.split(':').map(Number)
-  const [h = 0, m = 0, s = 0] = parts
-  if (parts.some(Number.isNaN) || h < 0 || h > 23 || m < 0 || m > 59 || s < 0 || s > 59) {
-    return new Date()
-  }
-  const d = new Date()
-  d.setUTCHours(h, m, s, 0)
-  return d
-}
-
-function formatTradeTime(timeStr: string): string {
-  const d = parseTradeTime(timeStr)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  // Legacy HH:MM:SS — no date info, show as-is
+  return timeStr
 }
 
 type TradeFilter = 'all' | 'WIN' | 'LOSS' | 'pending'
@@ -147,7 +137,7 @@ export function TradesTable({ trades, pendingTrades }: TradesTableProps) {
                     {trade.edge !== null ? `${trade.edge.toFixed(1)}%` : '\u2014'}
                   </TableCell>
                   <TableCell className="hidden whitespace-nowrap px-3 py-2 text-right text-[var(--text-dim)] md:table-cell">
-                    {trade.payoff ?? '\u2014'}
+                    {trade.payoff ? `${trade.payoff}x` : '\u2014'}
                   </TableCell>
                 </TableRow>
               ))}

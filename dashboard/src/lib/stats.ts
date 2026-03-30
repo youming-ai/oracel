@@ -1,12 +1,22 @@
 import type { DashboardStats, EquityPoint, HourlyStat, TradeEntry, TradeRecord, TradeSettlement } from '@/lib/dashboard-types'
 
 function getHourLabel(time: string): string {
-  const directMatch = time.match(/\b(\d{1,2}):\d{2}/)
-  if (directMatch) {
-    const hour = directMatch[1]
-    return hour ? hour.padStart(2, '0') : '00'
+  // For ISO timestamps, parse as Date to get local hour
+  if (time.includes('T') || time.includes('-')) {
+    const d = new Date(time)
+    if (!Number.isNaN(d.getTime())) {
+      return String(d.getHours()).padStart(2, '0')
+    }
   }
-
+  // Legacy HH:MM:SS — the hour is UTC, convert to local
+  const match = time.match(/^(\d{1,2}):\d{2}/)
+  if (match?.[1]) {
+    const utcHour = Number.parseInt(match[1], 10)
+    // Use a Date to convert UTC hour to local
+    const d = new Date()
+    d.setUTCHours(utcHour, 0, 0, 0)
+    return String(d.getHours()).padStart(2, '0')
+  }
   return '00'
 }
 

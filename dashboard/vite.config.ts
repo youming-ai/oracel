@@ -4,7 +4,18 @@ import path from 'node:path'
 import fs from 'node:fs'
 import tailwindcss from '@tailwindcss/vite'
 
-const BOT_MODE = process.env.BOT_MODE ?? 'paper'
+function detectBotMode(): string {
+  if (process.env.BOT_MODE) return process.env.BOT_MODE
+  try {
+    const configPath = path.resolve(__dirname, '../config.json')
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'))
+    return config?.trading?.mode ?? 'paper'
+  } catch {
+    return 'paper'
+  }
+}
+
+const BOT_MODE = detectBotMode()
 const LOGS_DIR = path.resolve(__dirname, `../logs/${BOT_MODE}`)
 
 function botData(): Plugin {

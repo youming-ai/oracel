@@ -52,7 +52,7 @@ export function Dashboard() {
         <StatsCards stats={stats} balance={balance} lineCount={trades.length} />
 
         <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          <EquityChart equity={stats.equity} />
+          <EquityChart equity={stats.equity} balance={balance} totalPnl={stats.totalPnl} />
           <PerformanceCard stats={stats} />
         </section>
 

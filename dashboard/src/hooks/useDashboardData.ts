@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import type { DashboardStats, TradeRecord } from '@/lib/dashboard-types'
+import type { TradeRecord } from '@/lib/dashboard-types'
 import { parseTrades } from '@/lib/csv-parser'
 import { computeStats } from '@/lib/stats'
 
 const REFRESH_INTERVAL_MS = 30_000
-const DEFAULT_STARTING_BALANCE = 100
 
 interface DashboardDataState {
   trades: TradeRecord[]
@@ -28,9 +27,44 @@ async function fetchBalanceFile(signal?: AbortSignal): Promise<number | null> {
   }
 }
 
-function balanceFromEquity(stats: DashboardStats): number {
-  const lastPoint = stats.equity.length > 0 ? stats.equity[stats.equity.length - 1] : null
-  return lastPoint ? DEFAULT_STARTING_BALANCE + lastPoint.cumulativePnl : 0
+function balanceFromTrades(trades: TradeRecord[]): number {
+  // Find the last entry that recorded a balance, then replay settlements after it.
+  //
+  // Accounting model:
+  //   entry.balance  = balance AFTER cost deduction  (bot does balance -= cost)
+  //   settlement adds payout to balance              (bot does balance += payout)
+  //   pnl = payout - cost, so payout = pnl + cost
+  //
+  // For LOSS: payout = 0, balance stays at entry.balance
+  // For WIN:  payout = pnl + cost, balance = entry.balance + payout
+  let lastEntryBalance: number | null = null
+  let lastEntryCost: number = 0
+  let lastEntryIndex = -1
+
+  for (let i = trades.length - 1; i >= 0; i -= 1) {
+    const t = trades[i]
+    if (t.type === 'entry' && t.balance != null) {
+      lastEntryBalance = t.balance
+      lastEntryCost = t.cost ?? 0
+      lastEntryIndex = i
+      break
+    }
+  }
+
+  if (lastEntryBalance == null) return 0
+
+  // Apply payouts (not PnL) from settlements after the last entry
+  let totalPayout = 0
+  for (let i = lastEntryIndex + 1; i < trades.length; i += 1) {
+    const t = trades[i]
+    if (t.type === 'settlement') {
+      // payout = pnl + cost; for LOSS pnl=-cost so payout=0
+      const payout = Math.max(0, t.pnl + lastEntryCost)
+      totalPayout += payout
+    }
+  }
+
+  return lastEntryBalance + totalPayout
 }
 
 export function useDashboardData() {
@@ -60,9 +94,11 @@ export function useDashboardData() {
       const csv = await response.text()
       const parsedTrades = parseTrades(csv)
 
-      const stats = computeStats(parsedTrades)
       const fileBalance = await fetchBalanceFile(controller.signal)
-      const parsedBalance = fileBalance ?? balanceFromEquity(stats)
+      const derivedBalance = balanceFromTrades(parsedTrades)
+      // Prefer balance file, but fall back to CSV-derived balance when file is
+      // missing or zero (zero usually means the bot restarted and lost state)
+      const parsedBalance = fileBalance && fileBalance > 0 ? fileBalance : derivedBalance
 
       if (!controller.signal.aborted) {
         setState({

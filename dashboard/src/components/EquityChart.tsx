@@ -8,15 +8,20 @@ import { TrendingUp } from 'lucide-react'
 
 interface EquityChartProps {
   equity: EquityPoint[]
+  balance: number
+  totalPnl: number
 }
 
-export function EquityChart({ equity }: EquityChartProps) {
+export function EquityChart({ equity, balance, totalPnl }: EquityChartProps) {
   const chartData = useMemo(() => {
+    // Derive starting balance: current balance minus total PnL
+    const startingBalance = balance - totalPnl
     return equity.map((point, index) => ({
       ...point,
+      balance: startingBalance + point.cumulativePnl,
       label: index + 1,
     }))
-  }, [equity])
+  }, [equity, balance, totalPnl])
 
   return (
     <Card className="hud-card gap-0 border-0 py-0 ring-0">
@@ -66,7 +71,7 @@ export function EquityChart({ equity }: EquityChartProps) {
               />
               <Area
                 type="monotone"
-                dataKey="cumulativePnl"
+                dataKey="balance"
                 stroke="var(--accent)"
                 strokeWidth={1.5}
                 fill="url(#equityFill)"
