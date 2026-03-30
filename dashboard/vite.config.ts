@@ -4,7 +4,7 @@ import path from 'node:path'
 import fs from 'node:fs'
 import tailwindcss from '@tailwindcss/vite'
 
-const BOT_MODE = process.env.BOT_MODE ?? 'live'
+const BOT_MODE = process.env.BOT_MODE ?? 'paper'
 const LOGS_DIR = path.resolve(__dirname, `../logs/${BOT_MODE}`)
 
 function botData(): Plugin {
@@ -33,6 +33,9 @@ function botData(): Plugin {
 export default defineConfig({
   base: './',
   plugins: [react(), tailwindcss(), botData()],
+  define: {
+    __BOT_MODE__: JSON.stringify(BOT_MODE),
+  },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

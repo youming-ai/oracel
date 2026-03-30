@@ -2,6 +2,8 @@ import { Activity, Clock, Radio, Zap } from 'lucide-react'
 
 import { formatBtc, formatTime } from '@/lib/format'
 
+declare const __BOT_MODE__: string
+
 interface HeaderProps {
   btcPrice: number | null
   lastUpdated: Date | null
@@ -29,7 +31,7 @@ export function Header({ btcPrice, lastUpdated }: HeaderProps) {
             <div className="mt-0.5 flex items-center gap-2">
               <div className="header-status-chip">
                 <Radio className="size-2.5 animate-pulse" />
-                <span>LIVE</span>
+                <span>{__BOT_MODE__.toUpperCase()}</span>
               </div>
               <div className="header-divider hidden sm:block" />
               <span className="mono hidden text-[10px] tracking-widest text-[var(--text-dim)] sm:inline">
