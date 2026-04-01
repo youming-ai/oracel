@@ -1,7 +1,7 @@
 //! Stage 3: Trade Decider
 //! Market sentiment arbitrage decider.
 //!
-//! Core logic: When market is extremely overconfident (≥95%), bet against it.
+//! Core logic: When market is extremely overconfident (≥80%), bet against it.
 //! Edge = fair_value - cheap_side_price (our fair value minus market's extreme price).
 //! Direction is determined by market price extremes.
 //! Risk controls: daily loss limit.
@@ -36,10 +36,10 @@ impl Default for DeciderConfig {
     fn default() -> Self {
         Self {
             position_size_usdc: decimal("1.0"),
-            extreme_threshold: decimal("0.95"),
+            extreme_threshold: decimal("0.80"),
             fair_value: decimal("0.50"),
             min_entry_price: decimal("0.02"),
-            max_entry_price: decimal("0.10"),
+            max_entry_price: decimal("0.20"),
             min_ttl_for_entry_ms: 120_000,
             daily_loss_limit_usdc: decimal("0"),
         }
@@ -199,7 +199,7 @@ mod tests {
 
     fn cfg_for_threshold_test() -> DeciderConfig {
         DeciderConfig {
-            extreme_threshold: d("0.95"),
+            extreme_threshold: d("0.80"),
             max_entry_price: d("0.50"),
             ..DeciderConfig::default()
         }
@@ -367,6 +367,7 @@ mod tests {
         // Use a lower threshold to get cheap_price above max_entry_price
         let cfg = DeciderConfig {
             extreme_threshold: d("0.85"),
+            max_entry_price: d("0.10"),
             ..DeciderConfig::default()
         };
         let mut ctx = default_ctx();
