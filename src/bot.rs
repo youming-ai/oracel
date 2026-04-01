@@ -72,7 +72,7 @@ impl Bot {
         {
             match AuthenticatedPolyClient::new(config.trading.private_key.expose_secret()).await {
                 Ok(c) => {
-                    tracing::info!("[INIT] Authenticated with Polymarket CLOB");
+                    tracing::debug!("[INIT] Authenticated with Polymarket CLOB");
                     Some(c)
                 }
                 Err(e) => {
@@ -89,7 +89,7 @@ impl Bot {
             && !config.trading.private_key.expose_secret().is_empty()
         {
             let rpc = data::polymarket::rpc_url(config.trading.mode);
-            tracing::info!("[INIT] CTF redeemer enabled for on-chain redemption");
+            tracing::debug!("[INIT] CTF redeemer enabled for on-chain redemption");
             Some(Arc::new(CtfRedeemer::new(
                 config.trading.private_key.expose_secret().to_owned(),
                 rpc,
@@ -123,7 +123,7 @@ impl Bot {
                 } else {
                     let saved = Self::load_balance(&log_dir).await;
                     if let Some(saved_bal) = saved {
-                        tracing::info!(
+                        tracing::debug!(
                             "[INIT] On-chain balance is $0, restored ${:.2} from balance file",
                             saved_bal
                         );
@@ -136,7 +136,7 @@ impl Bot {
                 anyhow::bail!("[INIT] Live mode requires redeemer for balance query")
             }
         };
-        tracing::info!("[INIT] Starting balance: ${:.2}", initial_balance);
+        tracing::debug!("[INIT] Starting balance: ${:.2}", initial_balance);
         Self::write_balance(&log_dir, initial_balance).await;
 
         let balance_checker = if config.trading.mode.is_live() {
@@ -146,7 +146,7 @@ impl Bot {
                         let rpc = data::polymarket::rpc_url(config.trading.mode);
                         match BalanceChecker::new(wallet, rpc).await {
                             Ok(checker) => {
-                                tracing::info!("[INIT] BalanceChecker connected");
+                                tracing::debug!("[INIT] BalanceChecker connected");
                                 Some(checker)
                             }
                             Err(e) => {
@@ -240,7 +240,7 @@ impl Bot {
     }
 
     pub(crate) async fn run(&mut self) -> Result<()> {
-        tracing::info!(
+        tracing::debug!(
             "[INIT] mode={} interval={}ms",
             self.config.trading.mode,
             self.config.polling.signal_interval_ms
@@ -514,7 +514,7 @@ impl Bot {
                     st.last_no_trade_reason = reason.clone();
                 }
                 if changed {
-                    tracing::info!(
+                    tracing::debug!(
                         "[SKIP] {} | BTC=${:.0}",
                         reason,
                         btc_price.to_f64().unwrap_or(0.0)
@@ -669,7 +669,7 @@ impl Bot {
     async fn refresh_market(&self) {
         match self.discovery.discover().await {
             Ok(active) => {
-                tracing::info!(
+                tracing::debug!(
                     "[MKT] {} ends {} cid={}",
                     active.market.slug,
                     active.end_date,

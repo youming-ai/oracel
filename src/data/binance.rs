@@ -64,7 +64,7 @@ impl BinanceClient {
         let stream_name = format!("{}@ticker", self.symbol.to_lowercase());
         let ws_url = format!("{}/{}", WS_URL, stream_name);
 
-        tracing::info!("[WS] connecting to Binance {}", ws_url);
+        tracing::debug!("[WS] connecting to Binance {}", ws_url);
         let mut backoff_secs: u64 = 1;
         const MAX_BACKOFF_SECS: u64 = 60;
 

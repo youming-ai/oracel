@@ -96,7 +96,7 @@ impl BotState {
     pub(crate) fn log_idle_change(&mut self, reason: &str, detail: &str) {
         if self.last_idle_reason != reason {
             self.last_idle_reason = reason.to_string();
-            tracing::info!("[IDLE] {} | {}", reason, detail);
+            tracing::debug!("[IDLE] {} | {}", reason, detail);
         }
     }
 }

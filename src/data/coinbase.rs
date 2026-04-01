@@ -59,7 +59,7 @@ impl CoinbaseClient {
     }
 
     pub async fn start_ticker_ws(self: Arc<Self>) -> Result<()> {
-        tracing::info!("[WS] connecting {}", WS_URL);
+        tracing::debug!("[WS] connecting {}", WS_URL);
         let mut backoff_secs: u64 = 1;
         const MAX_BACKOFF_SECS: u64 = 60;
 

@@ -43,7 +43,7 @@ pub(crate) fn start_market_refresher(
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         loop {
             if shutdown.load(Ordering::Acquire) {
-                tracing::info!("[TASK] market refresher shutting down");
+                tracing::debug!("[TASK] market refresher shutting down");
                 break;
             }
 
@@ -52,7 +52,7 @@ pub(crate) fn start_market_refresher(
                 Ok(active) => {
                     let current_yes = market_state.read().await.token_yes.clone();
                     if current_yes != active.token_id_yes.clone().into() {
-                        tracing::info!("[MKT] {} ends {}", active.market.slug, active.end_date);
+                        tracing::debug!("[MKT] {} ends {}", active.market.slug, active.end_date);
                         *market_state.write().await = MarketState {
                             token_yes: active.token_id_yes.into(),
                             token_no: active.token_id_no.into(),
@@ -83,7 +83,7 @@ pub(crate) fn start_status_printer(
         let mut interval = tokio::time::interval(Duration::from_millis(status_interval_ms));
         loop {
             if shutdown.load(Ordering::Acquire) {
-                tracing::info!("[TASK] status printer shutting down");
+                tracing::debug!("[TASK] status printer shutting down");
                 break;
             }
 
@@ -106,7 +106,7 @@ pub(crate) fn start_status_printer(
             };
 
             let pnl = acc.pnl();
-            tracing::info!(
+            tracing::debug!(
                 "[STATUS] {} | BTC=${:.0} | bal=${:.2} pnl={:+.2} | {}W/{}L streak={} | pending={} | ttl={}",
                 mode,
                 btc.to_f64().unwrap_or(0.0),
@@ -144,7 +144,7 @@ pub(crate) fn start_settlement_checker(
 
         loop {
             if shutdown.load(Ordering::Acquire) {
-                tracing::info!("[TASK] settlement checker shutting down");
+                tracing::debug!("[TASK] settlement checker shutting down");
                 break;
             }
 
@@ -227,7 +227,7 @@ pub(crate) fn start_settlement_checker(
                     acc.record_settlement(r);
                 }
 
-                tracing::info!(
+                tracing::debug!(
                     "[BAL] ${:.2} | {}W/{}L | settled={}",
                     acc.balance,
                     acc.total_wins,

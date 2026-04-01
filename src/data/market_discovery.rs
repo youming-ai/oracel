@@ -132,7 +132,11 @@ impl MarketDiscovery {
                                 serde_json::from_value::<GammaMarket>(market_json.clone())
                             {
                                 if let Ok(active) = Self::parse_active_market(&market) {
-                                    tracing::info!("[MKT] found {} ends {}", slug, active.end_date);
+                                    tracing::debug!(
+                                        "[MKT] found {} ends {}",
+                                        slug,
+                                        active.end_date
+                                    );
                                     return Ok(active);
                                 }
                             }

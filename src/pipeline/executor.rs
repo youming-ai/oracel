@@ -92,7 +92,7 @@ impl Executor {
                 if cost < Decimal::ONE {
                     filled_shares = (Decimal::ONE / price).ceil();
                     cost = filled_shares * price;
-                    tracing::info!(
+                    tracing::debug!(
                         "[EXEC] Bumped to {} shares (cost={:.2}) to meet $1 minimum",
                         filled_shares,
                         cost
@@ -112,7 +112,7 @@ impl Executor {
                 let order_id = if self.mode.is_live() {
                     match self.place_live_order(token_id, price, filled_shares).await {
                         Ok(id) => {
-                            tracing::info!(
+                            tracing::debug!(
                                 "[EXEC] filled id={} shares={} cost={:.2}",
                                 id.get(..8).unwrap_or(&id),
                                 filled_shares,
