@@ -52,18 +52,6 @@ mod defaults {
     pub fn slippage_tolerance() -> Decimal {
         dec("0.01")
     }
-    pub fn momentum_threshold_pct() -> Decimal {
-        dec("0.001")
-    }
-    pub fn momentum_window_secs() -> u64 {
-        120
-    }
-    pub fn max_drawdown_pct() -> Decimal {
-        dec("0")
-    }
-    pub fn max_consecutive_losses() -> u32 {
-        0
-    }
     pub fn symbol() -> String {
         "BTCUSDT".to_string()
     }
@@ -173,15 +161,6 @@ pub struct StrategyConfig {
     /// Minimum time-to-live for market to enter a trade (ms)
     #[serde(default = "defaults::min_ttl_for_entry_ms")]
     pub min_ttl_for_entry_ms: u64,
-    /// BTC momentum threshold to skip contrarian trade (0.001 = 0.1%)
-    #[serde(
-        default = "defaults::momentum_threshold_pct",
-        with = "rust_decimal::serde::float"
-    )]
-    pub momentum_threshold_pct: Decimal,
-    /// Lookback window for BTC momentum calculation (seconds)
-    #[serde(default = "defaults::momentum_window_secs")]
-    pub momentum_window_secs: u64,
 }
 
 // ─── Risk ───
@@ -198,15 +177,6 @@ pub struct RiskConfig {
         with = "rust_decimal::serde::float"
     )]
     pub daily_loss_limit_usdc: Decimal,
-    /// Maximum drawdown from initial balance (0 = disabled, e.g. 0.20 = 20%)
-    #[serde(
-        default = "defaults::max_drawdown_pct",
-        with = "rust_decimal::serde::float"
-    )]
-    pub max_drawdown_pct: Decimal,
-    /// Skip trading after N consecutive losses (0 = disabled)
-    #[serde(default = "defaults::max_consecutive_losses")]
-    pub max_consecutive_losses: u32,
 }
 
 // ─── Polling ───
@@ -329,8 +299,6 @@ impl Default for StrategyConfig {
             min_entry_price: defaults::min_entry_price(),
             max_entry_price: defaults::max_entry_price(),
             min_ttl_for_entry_ms: defaults::min_ttl_for_entry_ms(),
-            momentum_threshold_pct: defaults::momentum_threshold_pct(),
-            momentum_window_secs: defaults::momentum_window_secs(),
         }
     }
 }
@@ -341,8 +309,6 @@ impl Default for RiskConfig {
             max_fak_retries: defaults::max_fak_retries(),
             fak_backoff_ms: defaults::fak_backoff_ms(),
             daily_loss_limit_usdc: defaults::daily_loss_limit(),
-            max_drawdown_pct: defaults::max_drawdown_pct(),
-            max_consecutive_losses: defaults::max_consecutive_losses(),
         }
     }
 }
@@ -430,15 +396,6 @@ impl Config {
         }
         if self.strategy.min_ttl_for_entry_ms == 0 {
             anyhow::bail!("strategy.min_ttl_for_entry_ms must be > 0");
-        }
-        if self.strategy.momentum_threshold_pct < zero {
-            anyhow::bail!("strategy.momentum_threshold_pct must be >= 0");
-        }
-        if self.strategy.momentum_window_secs == 0 {
-            anyhow::bail!("strategy.momentum_window_secs must be > 0");
-        }
-        if !(self.risk.max_drawdown_pct >= zero && self.risk.max_drawdown_pct < one) {
-            anyhow::bail!("risk.max_drawdown_pct must be in [0, 1)");
         }
         if self.price_source.source.expects_dash_symbol() {
             if !is_valid_coinbase_symbol(&self.price_source.symbol) {
