@@ -1,6 +1,6 @@
 {
   "trading": {
-    "mode": "live"
+    "mode": "paper"
   },
   "market": {
     "stale_threshold_ms": 30000,
@@ -14,11 +14,11 @@
     "symbol": "BTCUSDT"
   },
   "strategy": {
-    "extreme_threshold": 0.90,
+    "extreme_threshold": 0.95,
     "fair_value": 0.5,
     "position_size_usdc": 1.0,
     "min_entry_price": 0.02,
-    "max_entry_price": 0.12,
+    "max_entry_price": 0.06,
     "min_ttl_for_entry_ms": 120000
   },
   "risk": {
