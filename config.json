@@ -14,11 +14,11 @@
     "symbol": "BTCUSDT"
   },
   "strategy": {
-    "extreme_threshold": 0.80,
+    "extreme_threshold": 0.90,
     "fair_value": 0.5,
     "position_size_usdc": 1.0,
     "min_entry_price": 0.02,
-    "max_entry_price": 0.20,
+    "max_entry_price": 0.12,
     "min_ttl_for_entry_ms": 120000
   },
   "risk": {
