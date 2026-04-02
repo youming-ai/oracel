@@ -350,18 +350,8 @@ impl Bot {
                     account.balance = on_chain_bal;
                     drop(account); // Release lock early
 
-                    // Debounced write - only write when balance changes significantly
-                    let should_write = {
-                        let state = self.state.read().await;
-                        state.balance_state.should_write(on_chain_bal)
-                    };
-
-                    if should_write {
-                        util::write_balance(&self.log_dir, on_chain_bal).await;
-                        let state = self.state.read().await;
-                        state.balance_state.record_write(on_chain_bal);
-                        tracing::debug!("[BALANCE] Wrote balance: ${:.2}", on_chain_bal);
-                    }
+                    util::write_balance(&self.log_dir, on_chain_bal).await;
+                    tracing::debug!("[BALANCE] Wrote balance: ${:.2}", on_chain_bal);
                 }
                 Err(e) => {
                     tracing::warn!("[BAL] Failed to query on-chain USDC balance: {}", e);
