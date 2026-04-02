@@ -15,35 +15,35 @@
   --font-display: "Chakra Petch", sans-serif;
 
   /* ── Shadcn / Tailwind tokens (canonical) ── */
-  --background: #0a0e17;
-  --foreground: #e8edf5;
-  --card: #1a2332;
-  --card-foreground: #e8edf5;
-  --popover: #1a2332;
-  --popover-foreground: #e8edf5;
-  --primary: #00d4aa;
-  --primary-foreground: #061b1b;
-  --secondary: #111827;
-  --secondary-foreground: #e8edf5;
-  --muted: #111827;
-  --muted-foreground: #7b8ca3;
-  --accent-foreground: #061b1b;
-  --destructive: #ff4757;
-  --input: #1e2d3d;
-  --ring: #00d4aa;
-  --chart-1: #00d4aa;
-  --chart-2: #ff4757;
-  --chart-3: #ffa502;
-  --chart-4: #2f7aa1;
-  --chart-5: #6d7481;
-  --sidebar: #111827;
-  --sidebar-foreground: #e8edf5;
-  --sidebar-primary: #00d4aa;
-  --sidebar-primary-foreground: #061b1b;
-  --sidebar-accent: #1a2332;
-  --sidebar-accent-foreground: #e8edf5;
-  --sidebar-border: #1e2d3d;
-  --sidebar-ring: #00d4aa;
+  --background: oklch(10% 0.02 260);
+  --foreground: oklch(94% 0.01 260);
+  --card: oklch(19% 0.02 250);
+  --card-foreground: oklch(94% 0.01 260);
+  --popover: oklch(19% 0.02 250);
+  --popover-foreground: oklch(94% 0.01 260);
+  --primary: oklch(77% 0.16 170);
+  --primary-foreground: oklch(12% 0.02 180);
+  --secondary: oklch(14% 0.02 260);
+  --secondary-foreground: oklch(94% 0.01 260);
+  --muted: oklch(14% 0.02 260);
+  --muted-foreground: oklch(62% 0.03 250);
+  --accent-foreground: oklch(12% 0.02 180);
+  --destructive: oklch(64% 0.24 20);
+  --input: oklch(23% 0.02 240);
+  --ring: oklch(77% 0.16 170);
+  --chart-1: oklch(77% 0.16 170);
+  --chart-2: oklch(64% 0.24 20);
+  --chart-3: oklch(78% 0.17 70);
+  --chart-4: oklch(52% 0.08 230);
+  --chart-5: oklch(53% 0.01 250);
+  --sidebar: oklch(14% 0.02 260);
+  --sidebar-foreground: oklch(94% 0.01 260);
+  --sidebar-primary: oklch(77% 0.16 170);
+  --sidebar-primary-foreground: oklch(12% 0.02 180);
+  --sidebar-accent: oklch(19% 0.02 250);
+  --sidebar-accent-foreground: oklch(94% 0.01 260);
+  --sidebar-border: oklch(23% 0.02 240);
+  --sidebar-ring: oklch(77% 0.16 170);
 
   /* ── Domain aliases (reference canonical tokens) ── */
   --bg-primary: var(--background);
@@ -51,30 +51,30 @@
   --bg-card: var(--card);
   --border: var(--input);
   --accent: var(--primary);
-  --accent-dim: rgba(0, 212, 170, 0.15);
   --win: var(--primary);
   --loss: var(--destructive);
   --warn: var(--chart-3);
   --text-primary: var(--foreground);
   --text-secondary: var(--muted-foreground);
-  --text-dim: #4a5568;
+  --text-dim: oklch(42% 0.02 250);
 
-  /* ── Accent alpha scale ── */
-  --accent-a3: rgba(0, 212, 170, 0.03);
-  --accent-a6: rgba(0, 212, 170, 0.06);
-  --accent-a10: rgba(0, 212, 170, 0.1);
-  --accent-a12: rgba(0, 212, 170, 0.12);
-  --accent-a18: rgba(0, 212, 170, 0.18);
-  --accent-a20: rgba(0, 212, 170, 0.2);
-  --accent-a25: rgba(0, 212, 170, 0.25);
-  --accent-a30: rgba(0, 212, 170, 0.3);
-  --accent-a35: rgba(0, 212, 170, 0.35);
-  --accent-a50: rgba(0, 212, 170, 0.5);
-  --accent-a80: rgba(0, 212, 170, 0.8);
-  --border-a15: rgba(30, 45, 61, 0.15);
-  --border-a35: rgba(30, 45, 61, 0.35);
-  --border-a50: rgba(30, 45, 61, 0.5);
-  --border-a60: rgba(30, 45, 61, 0.6);
+  /* ── Derived alpha scale (color-mix) ── */
+  --accent-dim: color-mix(in oklch, var(--primary) 15%, transparent);
+  --accent-a3: color-mix(in oklch, var(--primary) 3%, transparent);
+  --accent-a6: color-mix(in oklch, var(--primary) 6%, transparent);
+  --accent-a10: color-mix(in oklch, var(--primary) 10%, transparent);
+  --accent-a12: color-mix(in oklch, var(--primary) 12%, transparent);
+  --accent-a18: color-mix(in oklch, var(--primary) 18%, transparent);
+  --accent-a20: color-mix(in oklch, var(--primary) 20%, transparent);
+  --accent-a25: color-mix(in oklch, var(--primary) 25%, transparent);
+  --accent-a30: color-mix(in oklch, var(--primary) 30%, transparent);
+  --accent-a35: color-mix(in oklch, var(--primary) 35%, transparent);
+  --accent-a50: color-mix(in oklch, var(--primary) 50%, transparent);
+  --accent-a80: color-mix(in oklch, var(--primary) 80%, transparent);
+  --border-a15: color-mix(in oklch, var(--input) 15%, transparent);
+  --border-a35: color-mix(in oklch, var(--input) 35%, transparent);
+  --border-a50: color-mix(in oklch, var(--input) 50%, transparent);
+  --border-a60: color-mix(in oklch, var(--input) 60%, transparent);
 }
 
 @layer base {
