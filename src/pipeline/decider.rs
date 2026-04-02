@@ -147,21 +147,18 @@ pub fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderConfig) 
         _ => return Decision::Pass("no_market_data".into()),
     };
 
-    let total = yes + no;
-    if total <= Decimal::ZERO {
-        return Decision::Pass("no_liquidity".into());
-    }
-
-    let mkt_up = yes / total;
-
-    let (base_direction, cheap_price) = if mkt_up > cfg.extreme_threshold {
-        (Direction::Down, no / total)
-    } else if mkt_up < (Decimal::ONE - cfg.extreme_threshold) {
-        (Direction::Up, yes / total)
+    // Use raw Polymarket mid-prices directly (already probabilities in [0,1]).
+    // Normalization by (yes+no) is removed — it distorts values when yes+no≠1.0.
+    let (base_direction, cheap_price) = if yes > cfg.extreme_threshold {
+        // Market is extremely bullish → bet against (Down)
+        (Direction::Down, no)
+    } else if no > cfg.extreme_threshold {
+        // Market is extremely bearish → bet against (Up)
+        (Direction::Up, yes)
     } else {
         return Decision::Pass(format!(
             "not_extreme_{}%",
-            (mkt_up * decimal("100")).round_dp(0)
+            (yes * decimal("100")).round_dp(0)
         ));
     };
 
@@ -413,6 +410,61 @@ mod tests {
         match decision {
             Decision::Pass(reason) => assert_eq!(reason, "ttl_below_entry_floor_0"),
             Decision::Trade { .. } => panic!("expected pass due to ttl floor"),
+        }
+    }
+
+    #[test]
+    fn test_uses_raw_yes_price_not_normalized() {
+        // yes=0.95, no=0.06 → total=1.01 → normalized mkt_up=0.941 (WRONG)
+        // Raw yes=0.95 > 0.90 → should trigger Down trade
+        let account = AccountState::new(d("1000"));
+        let cfg = DeciderConfig {
+            max_entry_price: d("0.50"),
+            ..DeciderConfig::default()
+        };
+        let ctx = DecideContext {
+            market_yes: Some(d("0.95")),
+            market_no: Some(d("0.06")),
+            remaining_ms: 240_000,
+        };
+
+        let decision = decide(&ctx, &account, &cfg);
+        match decision {
+            Decision::Trade {
+                direction, edge, ..
+            } => {
+                assert_eq!(direction, Direction::Down);
+                // cheap side = no = 0.06, edge = 0.50 - 0.06 = 0.44
+                assert_eq!(edge, d("0.44"));
+            }
+            Decision::Pass(reason) => panic!("expected trade but got: {}", reason),
+        }
+    }
+
+    #[test]
+    fn test_extreme_bearish_uses_raw_no_price() {
+        // yes=0.03, no=0.96 → should trigger Up trade (raw no=0.96 > 0.90)
+        let account = AccountState::new(d("1000"));
+        let cfg = DeciderConfig {
+            max_entry_price: d("0.50"),
+            ..DeciderConfig::default()
+        };
+        let ctx = DecideContext {
+            market_yes: Some(d("0.03")),
+            market_no: Some(d("0.96")),
+            remaining_ms: 240_000,
+        };
+
+        let decision = decide(&ctx, &account, &cfg);
+        match decision {
+            Decision::Trade {
+                direction, edge, ..
+            } => {
+                assert_eq!(direction, Direction::Up);
+                // cheap side = yes = 0.03, edge = 0.50 - 0.03 = 0.47
+                assert_eq!(edge, d("0.47"));
+            }
+            Decision::Pass(reason) => panic!("expected trade but got: {}", reason),
         }
     }
 }
