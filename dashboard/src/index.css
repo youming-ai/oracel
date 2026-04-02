@@ -109,8 +109,8 @@
   .header-hud {
     background:
       radial-gradient(ellipse at 15% 50%, var(--accent-a6) 0%, transparent 50%),
-      radial-gradient(ellipse at 85% 50%, rgba(0, 100, 200, 0.04) 0%, transparent 50%),
-      linear-gradient(180deg, rgba(17, 24, 39, 0.95) 0%, rgba(10, 14, 23, 0.98) 100%);
+      radial-gradient(ellipse at 85% 50%, oklch(52% 0.15 250 / 0.04) 0%, transparent 50%),
+      linear-gradient(180deg, oklch(14% 0.02 260 / 0.95) 0%, oklch(10% 0.02 260 / 0.98) 100%);
     border-bottom: 1px solid var(--accent-a12);
   }
 
@@ -152,11 +152,11 @@
     justify-content: center;
     width: 34px;
     height: 34px;
-    background: linear-gradient(135deg, var(--accent), #00a88a);
+    background: linear-gradient(135deg, var(--accent), oklch(64% 0.12 170));
     border-radius: 8px;
     box-shadow:
       0 0 16px var(--accent-a30),
-      inset 0 1px 0 rgba(255, 255, 255, 0.15);
+      inset 0 1px 0 oklch(100% 0 0 / 0.15);
     flex-shrink: 0;
   }
 
@@ -195,7 +195,7 @@
     gap: 2px;
     padding: 6px 12px;
     border-radius: 6px;
-    background: rgba(17, 24, 39, 0.6);
+    background: oklch(14% 0.02 260 / 0.6);
     border: 1px solid var(--border-a50);
     min-width: 0;
     transition: border-color 0.2s ease;
@@ -253,7 +253,7 @@
 
   .hud-card {
     background:
-      linear-gradient(135deg, rgba(26, 35, 50, 0.85), rgba(17, 24, 39, 0.92));
+      linear-gradient(135deg, oklch(19% 0.02 250 / 0.85), oklch(14% 0.02 260 / 0.92));
     border: 1px solid var(--border-a60);
     border-radius: 10px;
     backdrop-filter: blur(8px);
@@ -283,7 +283,7 @@
 
   .hud-card:hover {
     border-color: var(--accent-a18);
-    box-shadow: 0 2px 20px rgba(0, 0, 0, 0.15);
+    box-shadow: 0 2px 20px oklch(0% 0 0 / 0.15);
   }
 
   .hud-card:hover::before {
