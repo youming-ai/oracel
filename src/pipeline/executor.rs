@@ -4,7 +4,7 @@
 use crate::config::{ExecutionConfig, TradingMode};
 use crate::data::polymarket::AuthenticatedPolyClient;
 use crate::pipeline::decider::Decision;
-use crate::pipeline::signal::Direction;
+use crate::pipeline::decider::Direction;
 use anyhow::Result;
 use rust_decimal::Decimal;
 

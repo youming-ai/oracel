@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::pipeline::signal::Direction;
+use crate::pipeline::decider::Direction;
 
 const WINDOW_SECS: i64 = 300;
 pub const SERIES_ID: &str = "btc-updown-5m";
@@ -267,7 +267,7 @@ fn parse_winner(market: &GammaMarket) -> Option<Direction> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::signal::Direction;
+    use crate::pipeline::decider::Direction;
 
     #[test]
     fn test_generate_slug() {

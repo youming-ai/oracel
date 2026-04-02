@@ -5,7 +5,7 @@ use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::pipeline::signal::Direction;
+use crate::pipeline::decider::Direction;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PendingPosition {

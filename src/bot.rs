@@ -19,11 +19,10 @@ use polymarket_5m_bot::{config, data, pipeline};
 use config::Config;
 use data::market_discovery::{DiscoveryConfig, MarketDiscovery};
 use data::polymarket::{AuthenticatedPolyClient, BalanceChecker, CtfRedeemer, PolymarketClient};
-use pipeline::decider::{self, AccountState, DeciderConfig};
+use pipeline::decider::{self, AccountState, DeciderConfig, Direction};
 use pipeline::executor::{ExecuteContext, Executor};
 use pipeline::price_source::PriceSource;
 use pipeline::settler::{PendingPosition, Settler};
-use pipeline::signal::Direction;
 
 use crate::state::{BotState, MarketState};
 use crate::tasks;
