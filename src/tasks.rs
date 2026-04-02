@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -13,26 +12,13 @@ use polymarket_5m_bot::data::polymarket::CtfRedeemer;
 use polymarket_5m_bot::pipeline::decider::AccountState;
 use polymarket_5m_bot::pipeline::price_source::PriceSource;
 use polymarket_5m_bot::pipeline::settler::Settler;
+use polymarket_5m_bot::trade_log::TradeLogHandle;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use tokio::sync::RwLock;
 use tokio::time::Duration;
 
 use crate::state::MarketState;
-
-async fn write_balance(log_dir: &str, bal: Decimal) {
-    let tmp = Path::new(log_dir).join("balance.tmp");
-    let dst = Path::new(log_dir).join("balance");
-    // Preserve full decimal precision to avoid accumulating rounding errors
-    let text = format!("{}", bal.normalize());
-    if let Err(e) = tokio::fs::write(&tmp, &text).await {
-        tracing::warn!("[STATE] Failed to write balance: {}", e);
-        return;
-    }
-    if let Err(e) = tokio::fs::rename(&tmp, &dst).await {
-        tracing::warn!("[STATE] Failed to rename balance file: {}", e);
-    }
-}
 
 pub(crate) fn start_market_refresher(
     discovery: Arc<MarketDiscovery>,
@@ -128,6 +114,7 @@ pub(crate) fn start_status_printer(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn start_settlement_checker(
     settler: Arc<RwLock<Settler>>,
     account: Arc<RwLock<AccountState>>,
@@ -135,6 +122,7 @@ pub(crate) fn start_settlement_checker(
     discovery: Arc<MarketDiscovery>,
     redeemer: Option<Arc<CtfRedeemer>>,
     log_dir: String,
+    trade_log: Option<TradeLogHandle>,
     shutdown: Arc<AtomicBool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -238,38 +226,29 @@ pub(crate) fn start_settlement_checker(
                 let bal = acc.balance;
                 drop(acc);
 
-                if let Some(btc_price) = settlement_btc_price {
-                    let mut log_lines = String::new();
+                if let (Some(ref tl), Some(btc_price)) = (&trade_log, settlement_btc_price) {
                     for r in &results {
-                        log_lines.push_str(&format!(
-                            "{},{},{},{:+.2},{:.0},{:.0}\n",
-                            Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
-                            if r.won { "WIN" } else { "LOSS" },
+                        tl.log_settlement(
+                            r.won,
                             r.direction.as_str(),
-                            r.pnl.round_dp(2),
+                            r.pnl,
                             r.entry_btc_price,
-                            btc_price.to_f64().unwrap_or(0.0),
-                        ));
-                    }
-                    let trades_path = Path::new(&log_dir).join("trades.csv");
-                    match tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-                        use std::io::Write;
-
-                        let mut file = std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(trades_path)?;
-                        file.write_all(log_lines.as_bytes())
-                    })
-                    .await
-                    {
-                        Ok(Ok(())) => {}
-                        Ok(Err(e)) => tracing::warn!("[LOG] trades.csv write failed: {}", e),
-                        Err(e) => tracing::warn!("[LOG] trades.csv task failed: {}", e),
+                            btc_price,
+                        )
+                        .await;
                     }
                 }
 
-                write_balance(&log_dir, bal).await;
+                {
+                    let tmp = std::path::Path::new(&log_dir).join("balance.tmp");
+                    let dst = std::path::Path::new(&log_dir).join("balance");
+                    let text = format!("{}", bal.normalize());
+                    if let Err(e) = tokio::fs::write(&tmp, &text).await {
+                        tracing::warn!("[STATE] Failed to write balance: {}", e);
+                    } else if let Err(e) = tokio::fs::rename(&tmp, &dst).await {
+                        tracing::warn!("[STATE] Failed to rename balance file: {}", e);
+                    }
+                }
 
                 for r in &results {
                     if r.won && !r.condition_id.is_empty() {
