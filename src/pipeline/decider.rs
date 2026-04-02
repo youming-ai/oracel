@@ -8,6 +8,7 @@
 
 use crate::util;
 use rust_decimal::Decimal;
+use std::collections::VecDeque;
 
 /// Trade direction — bet on price going up or down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -46,6 +47,15 @@ pub struct DeciderConfig {
     pub max_entry_price: Decimal,
     pub min_ttl_for_entry_ms: u64,
     pub daily_loss_limit_usdc: Decimal,
+    /// BTC trend lookback window in seconds (0 = disabled).
+    pub btc_trend_window_s: u64,
+    /// Minimum BTC price change (% as decimal) to consider a meaningful trend.
+    pub btc_trend_min_pct: Decimal,
+    /// Sliding window circuit breaker: number of recent trades to evaluate.
+    /// 0 = disabled.
+    pub circuit_breaker_window: u32,
+    /// Sliding window circuit breaker: minimum win rate to keep trading.
+    pub circuit_breaker_min_win_rate: Decimal,
 }
 
 impl Default for DeciderConfig {
@@ -58,6 +68,10 @@ impl Default for DeciderConfig {
             max_entry_price: util::decimal("0.12"),
             min_ttl_for_entry_ms: 120_000,
             daily_loss_limit_usdc: util::decimal("0"),
+            btc_trend_window_s: 30,
+            btc_trend_min_pct: util::decimal("0.05"),
+            circuit_breaker_window: 50,
+            circuit_breaker_min_win_rate: util::decimal("0.05"),
         }
     }
 }
@@ -65,6 +79,7 @@ impl Default for DeciderConfig {
 fn integer_suffix(value: Decimal) -> String {
     value.abs().trunc().to_string()
 }
+
 impl From<&crate::config::Config> for DeciderConfig {
     fn from(cfg: &crate::config::Config) -> Self {
         Self {
@@ -75,10 +90,13 @@ impl From<&crate::config::Config> for DeciderConfig {
             max_entry_price: cfg.strategy.max_entry_price,
             min_ttl_for_entry_ms: cfg.strategy.min_ttl_for_entry_ms,
             daily_loss_limit_usdc: cfg.risk.daily_loss_limit_usdc,
+            btc_trend_window_s: cfg.strategy.btc_trend_window_s,
+            btc_trend_min_pct: cfg.strategy.btc_trend_min_pct,
+            circuit_breaker_window: cfg.strategy.circuit_breaker_window,
+            circuit_breaker_min_win_rate: cfg.strategy.circuit_breaker_min_win_rate,
         }
     }
 }
-
 #[derive(Debug, Clone)]
 pub struct AccountState {
     pub balance: Decimal,
@@ -89,6 +107,9 @@ pub struct AccountState {
     pub total_losses: u32,
     pub daily_pnl: Decimal,
     pub daily_reset_date: String,
+    /// Ring buffer of recent trade outcomes (true = win, false = loss).
+    /// Used for sliding-window circuit breaker.
+    pub recent_results: VecDeque<bool>,
 }
 
 impl AccountState {
@@ -102,8 +123,11 @@ impl AccountState {
             total_losses: 0,
             daily_pnl: Decimal::ZERO,
             daily_reset_date: String::new(),
+            recent_results: VecDeque::new(),
         }
     }
+
+
 
     pub fn pnl(&self) -> Decimal {
         self.balance - self.initial_balance
@@ -126,6 +150,12 @@ impl AccountState {
             self.consecutive_wins = 0;
             self.total_losses += 1;
         }
+
+        self.recent_results.push_back(result.won);
+        // Keep the ring buffer bounded (cap at 200 to cover any circuit_breaker_window)
+        if self.recent_results.len() > 200 {
+            self.recent_results.pop_front();
+        }
     }
 
     pub fn reset_daily_if_needed(&mut self, today: &str) {
@@ -140,6 +170,9 @@ pub struct DecideContext {
     pub market_yes: Option<Decimal>,
     pub market_no: Option<Decimal>,
     pub remaining_ms: i64,
+    /// BTC price trend over the last N seconds, as a percentage change (positive = BTC rising).
+    /// `None` if trend data is unavailable.
+    pub btc_trend_pct: Option<Decimal>,
 }
 
 pub fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderConfig) -> Decision {
@@ -193,6 +226,39 @@ pub fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderConfig) 
         Decimal::new(99, 0)
     };
 
+    // --- BTC momentum confirmation ---
+    // Skip if BTC is trending against our direction.
+    if let Some(trend) = ctx.btc_trend_pct {
+        let threshold = cfg.btc_trend_min_pct;
+        match base_direction {
+            Direction::Down => {
+                if trend > threshold {
+                    let pct = (trend * util::decimal("100")).round_dp(1);
+                    return Decision::Pass(format!("btc_trend_against_down_{pct}%"));
+                }
+            }
+            Direction::Up => {
+                if trend < -threshold {
+                    let pct = (trend.abs() * util::decimal("100")).round_dp(1);
+                    return Decision::Pass(format!("btc_trend_against_up_{pct}%"));
+                }
+            }
+        }
+    }
+
+    // --- Sliding window win-rate circuit breaker ---
+    // If the last N trades have a win rate below the minimum, pause trading.
+    let window = &account.recent_results;
+    if window.len() >= cfg.circuit_breaker_window as usize {
+        let wins_in_window = window.iter().filter(|&&w| w).count() as u32;
+        let total_in_window = window.len() as u32;
+        let win_rate = Decimal::from(wins_in_window) / Decimal::from(total_in_window);
+        if win_rate < cfg.circuit_breaker_min_win_rate {
+            let pct = (win_rate * util::decimal("100")).round_dp(0);
+            return Decision::Pass(format!("circuit_breaker_wr_{pct}%"));
+        }
+    }
+
     Decision::Trade {
         direction: base_direction,
         size_usdc: cfg.position_size_usdc,
@@ -223,6 +289,7 @@ mod tests {
             market_yes: Some(d("0.97")),
             market_no: Some(d("0.03")),
             remaining_ms: 240_000,
+            btc_trend_pct: None,
         }
     }
 
@@ -438,6 +505,7 @@ mod tests {
             market_yes: Some(d("0.95")),
             market_no: Some(d("0.06")),
             remaining_ms: 240_000,
+            btc_trend_pct: None,
         };
 
         let decision = decide(&ctx, &account, &cfg);
@@ -465,6 +533,7 @@ mod tests {
             market_yes: Some(d("0.03")),
             market_no: Some(d("0.96")),
             remaining_ms: 240_000,
+            btc_trend_pct: None,
         };
 
         let decision = decide(&ctx, &account, &cfg);

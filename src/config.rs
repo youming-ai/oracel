@@ -37,6 +37,18 @@ mod defaults {
     pub fn min_ttl_for_entry_ms() -> u64 {
         120_000
     }
+    pub fn btc_trend_window_s() -> u64 {
+        30
+    }
+    pub fn btc_trend_min_pct() -> Decimal {
+        dec("0.05")
+    }
+    pub fn circuit_breaker_window() -> u32 {
+        50
+    }
+    pub fn circuit_breaker_min_win_rate() -> Decimal {
+        dec("0.05")
+    }
     pub fn daily_loss_limit() -> Decimal {
         dec("0")
     }
@@ -161,6 +173,27 @@ pub struct StrategyConfig {
     /// Minimum time-to-live for market to enter a trade (ms)
     #[serde(default = "defaults::min_ttl_for_entry_ms")]
     pub min_ttl_for_entry_ms: u64,
+    /// BTC trend lookback window in seconds for momentum confirmation.
+    /// 0 = disabled.
+    #[serde(default = "defaults::btc_trend_window_s")]
+    pub btc_trend_window_s: u64,
+    /// Minimum BTC price change (%, as decimal e.g. 0.05 = 0.05%) to consider
+    /// a meaningful trend. Trades against the trend are skipped.
+    #[serde(
+        default = "defaults::btc_trend_min_pct",
+        with = "rust_decimal::serde::float"
+    )]
+    pub btc_trend_min_pct: Decimal,
+    /// Sliding-window circuit breaker: number of recent trades to evaluate.
+    /// 0 = disabled.
+    #[serde(default = "defaults::circuit_breaker_window")]
+    pub circuit_breaker_window: u32,
+    /// Sliding-window circuit breaker: minimum win rate to keep trading.
+    #[serde(
+        default = "defaults::circuit_breaker_min_win_rate",
+        with = "rust_decimal::serde::float"
+    )]
+    pub circuit_breaker_min_win_rate: Decimal,
 }
 
 // ─── Risk ───
@@ -299,6 +332,10 @@ impl Default for StrategyConfig {
             min_entry_price: defaults::min_entry_price(),
             max_entry_price: defaults::max_entry_price(),
             min_ttl_for_entry_ms: defaults::min_ttl_for_entry_ms(),
+            btc_trend_window_s: defaults::btc_trend_window_s(),
+            btc_trend_min_pct: defaults::btc_trend_min_pct(),
+            circuit_breaker_window: defaults::circuit_breaker_window(),
+            circuit_breaker_min_win_rate: defaults::circuit_breaker_min_win_rate(),
         }
     }
 }

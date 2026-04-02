@@ -99,6 +99,27 @@ impl PriceSource {
         self.buffer.read().await.len()
     }
 
+    /// Compute the BTC price trend as a percentage change over the last `window_s` seconds.
+    /// Returns `None` if insufficient data is available.
+    /// Positive = BTC rising, negative = BTC falling.
+    pub async fn trend_pct(&self, window_s: u64) -> Option<Decimal> {
+        let buf = self.buffer.read().await;
+        if buf.is_empty() {
+            return None;
+        }
+        let latest = buf.back()?;
+        let cutoff_ms = latest.timestamp_ms - (window_s as i64 * 1000);
+        // Find the earliest tick that is at or after the cutoff
+        let old = buf
+            .iter()
+            .find(|t| t.timestamp_ms >= cutoff_ms)
+            .or_else(|| buf.front())?;
+        if old.price == Decimal::ZERO {
+            return None;
+        }
+        Some((latest.price - old.price) / old.price * Decimal::from(100))
+    }
+
     pub async fn start(&self, shutdown: Arc<AtomicBool>) -> PriceSourceHandles {
         if self.started.swap(true, Ordering::SeqCst) {
             tracing::warn!("[PRICE] PriceSource already started, skipping");

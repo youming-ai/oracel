@@ -444,6 +444,10 @@ impl Bot {
             market_yes: poly_yes_dec,
             market_no: poly_no_dec,
             remaining_ms,
+            btc_trend_pct: self
+                .price_source
+                .trend_pct(decider_cfg.btc_trend_window_s)
+                .await,
         };
 
         let decision = decider::decide(&decide_ctx, &account_read, &decider_cfg);
