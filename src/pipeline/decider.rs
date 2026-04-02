@@ -7,6 +7,7 @@
 //! Risk controls: daily loss limit.
 
 use crate::pipeline::signal::Direction;
+use crate::util;
 use rust_decimal::Decimal;
 
 #[derive(Debug, Clone)]
@@ -35,19 +36,15 @@ pub struct DeciderConfig {
 impl Default for DeciderConfig {
     fn default() -> Self {
         Self {
-            position_size_usdc: decimal("1.0"),
-            extreme_threshold: decimal("0.90"),
-            fair_value: decimal("0.50"),
-            min_entry_price: decimal("0.02"),
-            max_entry_price: decimal("0.12"),
+            position_size_usdc: util::decimal("1.0"),
+            extreme_threshold: util::decimal("0.90"),
+            fair_value: util::decimal("0.50"),
+            min_entry_price: util::decimal("0.02"),
+            max_entry_price: util::decimal("0.12"),
             min_ttl_for_entry_ms: 120_000,
-            daily_loss_limit_usdc: decimal("0"),
+            daily_loss_limit_usdc: util::decimal("0"),
         }
     }
-}
-
-fn decimal(value: &'static str) -> Decimal {
-    Decimal::from_str_exact(value).expect(value)
 }
 
 fn integer_suffix(value: Decimal) -> String {
@@ -143,7 +140,7 @@ pub fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderConfig) 
     }
 
     let (yes, no) = match (ctx.market_yes, ctx.market_no) {
-        (Some(y), Some(n)) if y > decimal("0.01") && n > decimal("0.01") => (y, n),
+        (Some(y), Some(n)) if y > util::decimal("0.01") && n > util::decimal("0.01") => (y, n),
         _ => return Decision::Pass("no_market_data".into()),
     };
 
@@ -158,14 +155,14 @@ pub fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderConfig) 
     } else {
         return Decision::Pass(format!(
             "not_extreme_{}%",
-            (yes * decimal("100")).round_dp(0)
+            (yes * util::decimal("100")).round_dp(0)
         ));
     };
 
     let edge = cfg.fair_value - cheap_price;
 
     if cheap_price < cfg.min_entry_price || cheap_price > cfg.max_entry_price {
-        let cents = integer_suffix(cheap_price * decimal("100"));
+        let cents = integer_suffix(cheap_price * util::decimal("100"));
         return Decision::Pass(format!("price_out_of_range_{cents}"));
     }
 

@@ -27,12 +27,9 @@ use pipeline::signal::Direction;
 
 use crate::state::{BotState, MarketState};
 use crate::tasks;
+use polymarket_5m_bot::util;
 
 const PRICE_BUFFER_MAX: usize = 1000;
-
-fn decimal(value: &'static str) -> Decimal {
-    Decimal::from_str_exact(value).expect(value)
-}
 
 pub(crate) struct Bot {
     config: Config,
@@ -99,7 +96,7 @@ impl Bot {
         let initial_balance = if config.trading.mode.is_paper() {
             Self::load_balance(&log_dir)
                 .await
-                .unwrap_or_else(|| decimal("100"))
+                .unwrap_or_else(|| util::decimal("100"))
         } else {
             let rpc = data::polymarket::rpc_url(config.trading.mode);
             if let Some(ref r) = redeemer {
@@ -135,7 +132,7 @@ impl Bot {
             }
         };
         tracing::debug!("[INIT] Starting balance: ${:.2}", initial_balance);
-        Self::write_balance(&log_dir, initial_balance).await;
+        util::write_balance(&log_dir, initial_balance).await;
 
         let balance_checker = if config.trading.mode.is_live() {
             if let Some(ref r) = redeemer {
@@ -203,20 +200,6 @@ impl Bot {
             .await
             .ok()?;
         content.trim().parse().ok()
-    }
-
-    async fn write_balance(log_dir: &str, bal: Decimal) {
-        let tmp = Path::new(log_dir).join("balance.tmp");
-        let dst = Path::new(log_dir).join("balance");
-        // Preserve full decimal precision to avoid accumulating rounding errors
-        let text = format!("{}", bal.normalize());
-        if let Err(e) = tokio::fs::write(&tmp, &text).await {
-            tracing::warn!("[STATE] Failed to write balance: {}", e);
-            return;
-        }
-        if let Err(e) = tokio::fs::rename(&tmp, &dst).await {
-            tracing::warn!("[STATE] Failed to rename balance file: {}", e);
-        }
     }
 
     pub(crate) async fn run(&mut self) -> Result<()> {
@@ -374,7 +357,7 @@ impl Bot {
                     };
 
                     if should_write {
-                        Self::write_balance(&self.log_dir, on_chain_bal).await;
+                        util::write_balance(&self.log_dir, on_chain_bal).await;
                         let state = self.state.read().await;
                         state.balance_state.record_write(on_chain_bal);
                         tracing::debug!("[BALANCE] Wrote balance: ${:.2}", on_chain_bal);
@@ -551,7 +534,7 @@ impl Bot {
                     "[TRADE] {} @ {:.3} edge={:.0}% payoff={:.1}x BTC=${:.0}",
                     direction.as_str(),
                     cheap_price,
-                    (*edge * decimal("100")).round_dp(0),
+                    (*edge * util::decimal("100")).round_dp(0),
                     payoff_ratio,
                     btc_price.to_f64().unwrap_or(0.0),
                 );
@@ -607,7 +590,7 @@ impl Bot {
                     });
 
                     let bal = self.account.read().await.balance;
-                    Self::write_balance(&self.log_dir, bal).await;
+                    util::write_balance(&self.log_dir, bal).await;
 
                     // Write to buffered trade log
                     if let Some(ref tl) = self.trade_log {
@@ -616,7 +599,7 @@ impl Bot {
                             &order.order_id,
                             order.entry_price,
                             order.cost,
-                            (*edge * decimal("100")).round_dp(1),
+                            (*edge * util::decimal("100")).round_dp(1),
                             bal,
                             remaining_ms,
                             poly_yes_dec,

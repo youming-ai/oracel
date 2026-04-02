@@ -94,33 +94,12 @@ impl PriceSource {
         self.buffer.read().await.back().map(|t| t.timestamp_ms)
     }
 
+    #[inline]
     pub async fn buffer_len(&self) -> usize {
         self.buffer.read().await.len()
     }
 
-    /// Compute price momentum as percentage change over the given time window.
-    /// Positive = price went up, negative = price went down.
-    /// Returns None if buffer has insufficient data.
-    pub async fn momentum_pct(&self, window_secs: i64) -> Option<Decimal> {
-        let buf = self.buffer.read().await;
-        if buf.len() < 2 {
-            return None;
-        }
-        let latest = buf.back()?;
-        let cutoff_ms = latest.timestamp_ms - window_secs * 1000;
-
-        // Find earliest tick at or past the cutoff (buffer is time-ordered)
-        let idx = buf.iter().position(|t| t.timestamp_ms >= cutoff_ms)?;
-        let old = &buf[idx];
-
-        if old.price <= Decimal::ZERO {
-            return None;
-        }
-
-        Some((latest.price - old.price) / old.price)
-    }
-
-    pub async fn start(self: Arc<Self>, shutdown: Arc<AtomicBool>) -> PriceSourceHandles {
+    pub async fn start(&self, shutdown: Arc<AtomicBool>) -> PriceSourceHandles {
         if self.started.swap(true, Ordering::SeqCst) {
             tracing::warn!("[PRICE] PriceSource already started, skipping");
             return PriceSourceHandles {
@@ -142,7 +121,7 @@ impl PriceSource {
                     self.max,
                     client.subscribe(),
                     "Binance",
-                    shutdown.clone(),
+                    shutdown,
                 );
                 PriceSourceHandles {
                     ws_handle,
