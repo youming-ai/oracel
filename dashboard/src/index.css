@@ -343,59 +343,6 @@ body {
   border-color: var(--accent-a20);
 }
 
-/* ── Legacy (kept for compatibility) ── */
-
-.hero-gradient {
-  background:
-    radial-gradient(ellipse at 20% 0%, var(--accent-a10) 0%, transparent 60%),
-    radial-gradient(ellipse at 80% 0%, rgba(0, 100, 200, 0.05) 0%, transparent 60%);
-}
-
-.glass {
-  background: linear-gradient(135deg, rgba(26, 35, 50, 0.9), rgba(17, 24, 39, 0.95));
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  backdrop-filter: blur(10px);
-  transition: border-color 0.25s ease;
-}
-
-.glass:hover {
-  border-color: var(--accent-a30);
-}
-
-.stat-card {
-  position: relative;
-  overflow: hidden;
-}
-
-.stat-card::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: linear-gradient(90deg, transparent, var(--accent), transparent);
-  opacity: 0;
-  transition: opacity 0.3s;
-}
-
-.stat-card:hover::before {
-  opacity: 1;
-}
-
-.glow-accent {
-  text-shadow: 0 0 20px var(--accent-a50);
-}
-
-.pulse-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 9999px;
-  background: var(--accent);
-  animation: pulse 2s infinite;
-}
-
 /* ── Table rows ── */
 
 .trade-row {
@@ -434,22 +381,3 @@ body {
   border-radius: 4px;
 }
 
-/* ── Animations ── */
-
-@keyframes pulse {
-  0%,
-  100% {
-    opacity: 1;
-    box-shadow: 0 0 0 0 var(--accent-a40);
-  }
-  50% {
-    opacity: 0.7;
-    box-shadow: 0 0 0 6px transparent;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .pulse-dot {
-    animation: none;
-  }
-}
