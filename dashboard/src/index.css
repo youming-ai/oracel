@@ -14,35 +14,7 @@
   --font-sans: "Inter", sans-serif;
   --font-display: "Chakra Petch", sans-serif;
 
-  --bg-primary: #0a0e17;
-  --bg-secondary: #111827;
-  --bg-card: #1a2332;
-  --border: #1e2d3d;
-  --accent: #00d4aa;
-  --accent-dim: rgba(0, 212, 170, 0.15);
-  --accent-a3: rgba(0, 212, 170, 0.03);
-  --accent-a6: rgba(0, 212, 170, 0.06);
-  --accent-a10: rgba(0, 212, 170, 0.1);
-  --accent-a12: rgba(0, 212, 170, 0.12);
-  --accent-a18: rgba(0, 212, 170, 0.18);
-  --accent-a20: rgba(0, 212, 170, 0.2);
-  --accent-a25: rgba(0, 212, 170, 0.25);
-  --accent-a30: rgba(0, 212, 170, 0.3);
-  --accent-a35: rgba(0, 212, 170, 0.35);
-  --accent-a40: rgba(0, 212, 170, 0.4);
-  --accent-a50: rgba(0, 212, 170, 0.5);
-  --accent-a80: rgba(0, 212, 170, 0.8);
-  --border-a15: rgba(30, 45, 61, 0.15);
-  --border-a35: rgba(30, 45, 61, 0.35);
-  --border-a50: rgba(30, 45, 61, 0.5);
-  --border-a60: rgba(30, 45, 61, 0.6);
-  --win: #00d4aa;
-  --loss: #ff4757;
-  --warn: #ffa502;
-  --text-primary: #e8edf5;
-  --text-secondary: #7b8ca3;
-  --text-dim: #4a5568;
-
+  /* ── Shadcn / Tailwind tokens (canonical) ── */
   --background: #0a0e17;
   --foreground: #e8edf5;
   --card: #1a2332;
@@ -72,6 +44,38 @@
   --sidebar-accent-foreground: #e8edf5;
   --sidebar-border: #1e2d3d;
   --sidebar-ring: #00d4aa;
+
+  /* ── Domain aliases (reference canonical tokens) ── */
+  --bg-primary: var(--background);
+  --bg-secondary: var(--secondary);
+  --bg-card: var(--card);
+  --border: var(--input);
+  --accent: var(--primary);
+  --accent-dim: rgba(0, 212, 170, 0.15);
+  --win: var(--primary);
+  --loss: var(--destructive);
+  --warn: var(--chart-3);
+  --text-primary: var(--foreground);
+  --text-secondary: var(--muted-foreground);
+  --text-dim: #4a5568;
+
+  /* ── Accent alpha scale ── */
+  --accent-a3: rgba(0, 212, 170, 0.03);
+  --accent-a6: rgba(0, 212, 170, 0.06);
+  --accent-a10: rgba(0, 212, 170, 0.1);
+  --accent-a12: rgba(0, 212, 170, 0.12);
+  --accent-a18: rgba(0, 212, 170, 0.18);
+  --accent-a20: rgba(0, 212, 170, 0.2);
+  --accent-a25: rgba(0, 212, 170, 0.25);
+  --accent-a30: rgba(0, 212, 170, 0.3);
+  --accent-a35: rgba(0, 212, 170, 0.35);
+  --accent-a40: rgba(0, 212, 170, 0.4);
+  --accent-a50: rgba(0, 212, 170, 0.5);
+  --accent-a80: rgba(0, 212, 170, 0.8);
+  --border-a15: rgba(30, 45, 61, 0.15);
+  --border-a35: rgba(30, 45, 61, 0.35);
+  --border-a50: rgba(30, 45, 61, 0.5);
+  --border-a60: rgba(30, 45, 61, 0.6);
 }
 
 * {
