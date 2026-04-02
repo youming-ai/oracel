@@ -408,3 +408,9 @@ body {
     box-shadow: 0 0 0 6px rgba(0, 212, 170, 0);
   }
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse-dot {
+    animation: none;
+  }
+}
