@@ -10,5 +10,11 @@
   "risk": {
     "fak_backoff_ms": 1000,
     "daily_loss_limit_usdc": 50.0
+  },
+  "time_windows": {
+    "window1_start": 0,
+    "window1_end": 12,
+    "window2_start": 12,
+    "window2_end": 24
   }
 }

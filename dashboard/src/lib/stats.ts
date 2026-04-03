@@ -1,4 +1,4 @@
-import type { DashboardStats, EquityPoint, HourlyStat, TradeEntry, TradeRecord, TradeSettlement } from '@/lib/dashboard-types'
+import type { DashboardStats, EquityPoint, HourlyStat, TimeWindow, TimeWindowStats, TradeEntry, TradeRecord, TradeSettlement } from '@/lib/dashboard-types'
 
 function getHourLabel(time: string): string {
   // For ISO timestamps, parse as Date to get local hour
@@ -38,7 +38,44 @@ function findPendingEntries(trades: TradeRecord[]): TradeEntry[] {
   return pendingEntries.reverse()
 }
 
-export function computeStats(trades: TradeRecord[]): DashboardStats {
+function isHourInWindow(hour: number, window: TimeWindow): boolean {
+  if (window.start < window.end) {
+    return hour >= window.start && hour < window.end
+  }
+  // Wraps around midnight, e.g. 22-06
+  return hour >= window.start || hour < window.end
+}
+
+function computeTimeWindowStats(
+
+  settlements: TradeSettlement[],
+  windows: TimeWindow[],
+): TimeWindowStats[] {
+  return windows.map((window) => {
+    const inWindow = settlements.filter((s) => {
+      const d = new Date(s.time)
+      if (Number.isNaN(d.getTime())) return false
+      const hour = d.getUTCHours()
+      return isHourInWindow(hour, window)
+    })
+
+    const wins = inWindow.filter((t) => t.result === 'WIN')
+    const losses = inWindow.filter((t) => t.result === 'LOSS')
+    const pnl = inWindow.reduce((sum, t) => sum + t.pnl, 0)
+
+    return {
+      window,
+      trades: inWindow.length,
+      wins: wins.length,
+      losses: losses.length,
+      winRate: inWindow.length > 0 ? (wins.length / inWindow.length) * 100 : 0,
+      pnl,
+      avgPnl: inWindow.length > 0 ? pnl / inWindow.length : 0,
+    }
+  })
+}
+
+export function computeStats(trades: TradeRecord[], timeWindows?: TimeWindow[]): DashboardStats {
   const settlements = trades.filter((trade): trade is TradeSettlement => trade.type === 'settlement')
   const wins = settlements.filter((trade) => trade.result === 'WIN')
   const losses = settlements.filter((trade) => trade.result === 'LOSS')
@@ -162,5 +199,8 @@ export function computeStats(trades: TradeRecord[]): DashboardStats {
     lastBTC: lastSettlement?.exitBTC ?? null,
     winRate,
     profitFactor,
+    timeWindows: timeWindows && timeWindows.length > 0
+      ? computeTimeWindowStats(settlements, timeWindows)
+      : [],
   }
 }

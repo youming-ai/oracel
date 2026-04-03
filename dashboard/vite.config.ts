@@ -23,10 +23,10 @@ function botData(): Plugin {
     name: 'bot-data-proxy',
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
-        if (req.url === '/trades.csv' || req.url === '/balance') {
+        if (req.url === '/trades.csv' || req.url === '/balance' || req.url === '/time_windows.json') {
           const filePath = path.join(LOGS_DIR, req.url)
           if (fs.existsSync(filePath)) {
-            res.setHeader('Content-Type', req.url.endsWith('.csv') ? 'text/csv' : 'text/plain')
+            res.setHeader('Content-Type', req.url.endsWith('.json') ? 'application/json' : 'text/plain')
             res.setHeader('Cache-Control', 'no-store')
             fs.createReadStream(filePath).pipe(res)
             return

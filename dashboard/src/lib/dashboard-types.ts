@@ -70,4 +70,21 @@ export interface DashboardStats {
   lastBTC: number | null
   winRate: number
   profitFactor: number
+  timeWindows: TimeWindowStats[]
+}
+
+export interface TimeWindow {
+  start: number
+  end: number
+  label: string
+}
+
+export interface TimeWindowStats {
+  window: TimeWindow
+  trades: number
+  wins: number
+  losses: number
+  winRate: number
+  pnl: number
+  avgPnl: number
 }

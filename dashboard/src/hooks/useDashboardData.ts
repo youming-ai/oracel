@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import type { TradeRecord } from '@/lib/dashboard-types'
+import type { TradeRecord, TimeWindow } from '@/lib/dashboard-types'
 import { parseTrades } from '@/lib/csv-parser'
 import { computeStats } from '@/lib/stats'
 
@@ -12,6 +12,7 @@ interface DashboardDataState {
   loading: boolean
   error: string | null
   lastUpdated: Date | null
+  timeWindows: TimeWindow[]
 }
 
 async function fetchBalanceFile(signal?: AbortSignal): Promise<number | null> {
@@ -67,6 +68,21 @@ function balanceFromTrades(trades: TradeRecord[]): number {
   return lastEntryBalance + totalPayout
 }
 
+async function fetchTimeWindows(signal?: AbortSignal): Promise<TimeWindow[]> {
+  try {
+    const response = await fetch('time_windows.json', { cache: 'no-store', signal })
+    if (!response.ok) return []
+
+    const data = await response.json()
+    const windows: TimeWindow[] = []
+    if (data.window1) windows.push(data.window1)
+    if (data.window2) windows.push(data.window2)
+    return windows
+  } catch {
+    return []
+  }
+}
+
 export function useDashboardData() {
   const [state, setState] = useState<DashboardDataState>({
     trades: [],
@@ -74,6 +90,7 @@ export function useDashboardData() {
     loading: true,
     error: null,
     lastUpdated: null,
+    timeWindows: [],
   })
 
   const abortRef = useRef<AbortController | null>(null)
@@ -94,7 +111,10 @@ export function useDashboardData() {
       const csv = await response.text()
       const parsedTrades = parseTrades(csv)
 
-      const fileBalance = await fetchBalanceFile(controller.signal)
+      const [fileBalance, fetchedTimeWindows] = await Promise.all([
+        fetchBalanceFile(controller.signal),
+        fetchTimeWindows(controller.signal),
+      ])
       const derivedBalance = balanceFromTrades(parsedTrades)
       // Prefer balance file, but fall back to CSV-derived balance when file is
       // missing or zero (zero usually means the bot restarted and lost state)
@@ -107,6 +127,7 @@ export function useDashboardData() {
           loading: false,
           error: null,
           lastUpdated: new Date(),
+          timeWindows: fetchedTimeWindows,
         })
       }
     } catch (error) {
@@ -132,7 +153,7 @@ export function useDashboardData() {
     }
   }, [loadData])
 
-  const stats = useMemo(() => computeStats(state.trades), [state.trades])
+  const stats = useMemo(() => computeStats(state.trades, state.timeWindows), [state.trades, state.timeWindows])
 
   return {
     trades: state.trades,

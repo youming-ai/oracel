@@ -6,6 +6,7 @@ import { Header } from '@/components/Header'
 import { HourlyChart } from '@/components/HourlyChart'
 import { PerformanceCard } from '@/components/PerformanceCard'
 import { StatsCards } from '@/components/StatsCards'
+import { TimeWindowMonitor } from '@/components/TimeWindowMonitor'
 import { TradesTable } from '@/components/TradesTable'
 import { Button } from '@/components/ui/button'
 import { useDashboardData } from '@/hooks/useDashboardData'
@@ -60,6 +61,10 @@ export function Dashboard() {
           <DirectionChart data={stats.directionStats} />
           <HourlyChart data={stats.hourlySeries} />
         </section>
+
+        {stats.timeWindows.length > 0 && (
+          <TimeWindowMonitor data={stats.timeWindows} />
+        )}
 
         <TradesTable trades={trades} pendingTrades={stats.pending} />
       </main>

@@ -70,6 +70,18 @@ mod defaults {
     pub fn private_key() -> SecretString {
         SecretString::new(String::new().into())
     }
+    pub fn window1_start() -> u32 {
+        0
+    }
+    pub fn window1_end() -> u32 {
+        12
+    }
+    pub fn window2_start() -> u32 {
+        12
+    }
+    pub fn window2_end() -> u32 {
+        24
+    }
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +100,11 @@ pub struct Config {
     pub price_source: PriceSourceConfig,
     #[serde(default)]
     pub execution: ExecutionConfig,
+    /// Two time windows for trade log monitoring (UTC hours, 0-24).
+    /// Each window is a half-open interval [start_hour, end_hour).
+    /// Supports wrap-around (e.g. start=22, end=6 means 22:00-06:00 UTC).
+    #[serde(default)]
+    pub time_windows: TimeWindowsConfig,
 }
 
 // ─── Trading ───
@@ -271,6 +288,27 @@ fn is_valid_binance_symbol(symbol: &str) -> bool {
         && !symbol.contains('-')
 }
 
+// ─── Time Windows ───
+
+/// Configuration for two monitoring time windows.
+/// Each window is a half-open interval [start_hour, end_hour) in UTC (0-24).
+/// Supports wrap-around midnight (e.g. start=22, end=6 means 22:00-06:00 UTC).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeWindowsConfig {
+    /// First monitoring window.
+    /// Defaults to [0, 12) — first half of the day.
+    #[serde(default = "defaults::window1_start")]
+    pub window1_start: u32,
+    #[serde(default = "defaults::window1_end")]
+    pub window1_end: u32,
+    /// Second monitoring window.
+    /// Defaults to [12, 24) — second half of the day.
+    #[serde(default = "defaults::window2_start")]
+    pub window2_start: u32,
+    #[serde(default = "defaults::window2_end")]
+    pub window2_end: u32,
+}
+
 // ─── Defaults ───
 
 impl Default for TradingConfig {
@@ -352,6 +390,17 @@ impl Default for PriceSourceConfig {
     }
 }
 
+impl Default for TimeWindowsConfig {
+    fn default() -> Self {
+        Self {
+            window1_start: defaults::window1_start(),
+            window1_end: defaults::window1_end(),
+            window2_start: defaults::window2_start(),
+            window2_end: defaults::window2_end(),
+        }
+    }
+}
+
 impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let content = fs::read_to_string(path)?;
@@ -415,6 +464,26 @@ impl Config {
                 "price_source.symbol must match Binance format like BTCUSDT (got {})",
                 self.price_source.symbol
             );
+        }
+
+        // Validate time windows (start == end is valid — means 24h full-day window)
+        let tw = &self.time_windows;
+        if tw.window1_start > 24 || tw.window1_end > 24 {
+            anyhow::bail!(
+                "time_windows.window1 hours must be in 0-24 range (got start={}, end={})",
+                tw.window1_start,
+                tw.window1_end
+            );
+        }
+        if tw.window2_start > 24 || tw.window2_end > 24 {
+            anyhow::bail!(
+                "time_windows.window2 hours must be in 0-24 range (got start={}, end={})",
+                tw.window2_start,
+                tw.window2_end
+            );
+        }
+        if tw.window1_start == tw.window1_end && tw.window2_start == tw.window2_end {
+            anyhow::bail!("time_windows: at least one window must have non-zero duration");
         }
 
         Ok(())
@@ -523,5 +592,62 @@ mod tests {
 
         let err = cfg.validate().expect_err("expected validation failure");
         assert!(err.to_string().contains("max_entry_price"));
+    }
+
+    #[test]
+    fn test_time_windows_accepts_defaults() {
+        let cfg = Config::default();
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.time_windows.window1_start, 0);
+        assert_eq!(cfg.time_windows.window1_end, 12);
+        assert_eq!(cfg.time_windows.window2_start, 12);
+        assert_eq!(cfg.time_windows.window2_end, 24);
+    }
+
+    #[test]
+    fn test_time_windows_rejects_hour_above_24() {
+        let mut cfg = Config::default();
+        cfg.time_windows.window1_start = 25;
+        let err = cfg.validate().expect_err("expected validation failure");
+        assert!(err.to_string().contains("window1"));
+    }
+
+    #[test]
+    fn test_time_windows_rejects_both_zero_duration() {
+        let mut cfg = Config::default();
+        cfg.time_windows.window1_start = 8;
+        cfg.time_windows.window1_end = 8;
+        cfg.time_windows.window2_start = 16;
+        cfg.time_windows.window2_end = 16;
+        let err = cfg.validate().expect_err("expected validation failure");
+        assert!(err.to_string().contains("non-zero duration"));
+    }
+
+    #[test]
+    fn test_time_windows_allows_wrap_around() {
+        let mut cfg = Config::default();
+        cfg.time_windows.window1_start = 22;
+        cfg.time_windows.window1_end = 6;
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_time_windows_allows_one_zero_duration_window() {
+        let mut cfg = Config::default();
+        cfg.time_windows.window1_start = 10;
+        cfg.time_windows.window1_end = 10;
+        // window2 still has non-zero duration
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_time_windows_serde_roundtrip() {
+        let json =
+            r#"{"window1_start": 6, "window1_end": 18, "window2_start": 18, "window2_end": 6}"#;
+        let tw: TimeWindowsConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(tw.window1_start, 6);
+        assert_eq!(tw.window1_end, 18);
+        assert_eq!(tw.window2_start, 18);
+        assert_eq!(tw.window2_end, 6);
     }
 }

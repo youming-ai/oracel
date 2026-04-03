@@ -55,6 +55,30 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
+    // Write time windows config for dashboard consumption (atomic write)
+    {
+        let tw_tmp = std::path::Path::new(&log_dir).join("time_windows.json.tmp");
+        let tw_dst = std::path::Path::new(&log_dir).join("time_windows.json");
+        let tw_json = serde_json::json!({
+            "window1": {
+                "start": config.time_windows.window1_start,
+                "end": config.time_windows.window1_end,
+                "label": format!("{:02}:00-{:02}:00 UTC", config.time_windows.window1_start, config.time_windows.window1_end)
+            },
+            "window2": {
+                "start": config.time_windows.window2_start,
+                "end": config.time_windows.window2_end,
+                "label": format!("{:02}:00-{:02}:00 UTC", config.time_windows.window2_start, config.time_windows.window2_end)
+            }
+        });
+        let content = serde_json::to_string_pretty(&tw_json).unwrap();
+        if let Err(e) = tokio::fs::write(&tw_tmp, &content).await {
+            eprintln!("[INIT] Failed to write time_windows.json: {}", e);
+        } else if let Err(e) = tokio::fs::rename(&tw_tmp, &tw_dst).await {
+            eprintln!("[INIT] Failed to rename time_windows.json: {}", e);
+        }
+    }
+
     let file_appender = tracing_appender::rolling::daily(&log_dir, "bot.log");
     let (file_writer, _guard) = tracing_appender::non_blocking(file_appender);
 

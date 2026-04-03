@@ -127,8 +127,6 @@ impl AccountState {
         }
     }
 
-
-
     pub fn pnl(&self) -> Decimal {
         self.balance - self.initial_balance
     }
