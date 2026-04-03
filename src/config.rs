@@ -76,10 +76,13 @@ mod defaults {
 pub struct Config {
     #[serde(default)]
     pub trading: TradingConfig,
+    #[serde(default)]
     pub market: MarketConfig,
+    #[serde(default)]
     pub polyclob: PolymarketConfig,
     pub strategy: StrategyConfig,
     pub risk: RiskConfig,
+    #[serde(default)]
     pub polling: PollingConfig,
     #[serde(default)]
     pub price_source: PriceSourceConfig,
@@ -241,14 +244,6 @@ pub enum PriceSourceType {
     #[default]
     Binance,
     BinanceWs,
-    Coinbase,
-    CoinbaseWs,
-}
-
-impl PriceSourceType {
-    pub fn expects_dash_symbol(self) -> bool {
-        matches!(self, Self::Coinbase | Self::CoinbaseWs)
-    }
 }
 
 impl std::fmt::Display for PriceSourceType {
@@ -256,8 +251,6 @@ impl std::fmt::Display for PriceSourceType {
         match self {
             Self::Binance => write!(f, "binance"),
             Self::BinanceWs => write!(f, "binance_ws"),
-            Self::Coinbase => write!(f, "coinbase"),
-            Self::CoinbaseWs => write!(f, "coinbase_ws"),
         }
     }
 }
@@ -276,23 +269,6 @@ fn is_valid_binance_symbol(symbol: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
         && !symbol.contains('-')
-}
-
-fn is_valid_coinbase_symbol(symbol: &str) -> bool {
-    let mut parts = symbol.split('-');
-    match (parts.next(), parts.next(), parts.next()) {
-        (Some(base), Some(quote), None) => {
-            !base.is_empty()
-                && !quote.is_empty()
-                && base
-                    .bytes()
-                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
-                && quote
-                    .bytes()
-                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
-        }
-        _ => false,
-    }
 }
 
 // ─── Defaults ───
@@ -434,18 +410,9 @@ impl Config {
         if self.strategy.min_ttl_for_entry_ms == 0 {
             anyhow::bail!("strategy.min_ttl_for_entry_ms must be > 0");
         }
-        if self.price_source.source.expects_dash_symbol() {
-            if !is_valid_coinbase_symbol(&self.price_source.symbol) {
-                anyhow::bail!(
-                    "price_source.symbol must match Coinbase format like BTC-USD when source={} (got {})",
-                    self.price_source.source,
-                    self.price_source.symbol
-                );
-            }
-        } else if !is_valid_binance_symbol(&self.price_source.symbol) {
+        if !is_valid_binance_symbol(&self.price_source.symbol) {
             anyhow::bail!(
-                "price_source.symbol must match Binance format like BTCUSDT when source={} (got {})",
-                self.price_source.source,
+                "price_source.symbol must match Binance format like BTCUSDT (got {})",
                 self.price_source.symbol
             );
         }
@@ -507,30 +474,11 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_rejects_coinbase_symbol_in_binance_format() {
+    fn test_validate_rejects_binance_symbol_with_dash() {
         let mut cfg = Config::default();
-        cfg.price_source.source = PriceSourceType::Coinbase;
-        cfg.price_source.symbol = "BTCUSDT".to_string();
-
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_rejects_binance_symbol_in_coinbase_format() {
-        let mut cfg = Config::default();
-        cfg.price_source.source = PriceSourceType::Binance;
         cfg.price_source.symbol = "BTC-USD".to_string();
 
         assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_accepts_coinbase_symbol_format() {
-        let mut cfg = Config::default();
-        cfg.price_source.source = PriceSourceType::Coinbase;
-        cfg.price_source.symbol = "BTC-USD".to_string();
-
-        assert!(cfg.validate().is_ok());
     }
 
     #[test]

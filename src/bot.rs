@@ -50,7 +50,6 @@ pub(crate) struct Bot {
 impl Bot {
     pub(crate) async fn new(config: Config, log_dir: String) -> Result<Self> {
         let price_source = Arc::new(PriceSource::new(
-            config.price_source.source,
             &config.price_source.symbol,
             PRICE_BUFFER_MAX,
         ));

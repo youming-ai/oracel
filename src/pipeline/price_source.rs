@@ -11,9 +11,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
 
-use crate::config::PriceSourceType;
 use crate::data::binance::BinanceClient;
-use crate::data::coinbase::CoinbaseClient;
 
 use rust_decimal::Decimal;
 
@@ -33,24 +31,14 @@ impl From<crate::data::binance::TickerUpdate> for TickerUpdate {
     }
 }
 
-impl From<crate::data::coinbase::TickerUpdate> for TickerUpdate {
-    fn from(t: crate::data::coinbase::TickerUpdate) -> Self {
-        Self {
-            price: t.price,
-            timestamp_ms: t.timestamp_ms,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 struct PriceTick {
     price: Decimal,
     timestamp_ms: i64,
 }
 
-pub enum PriceClient {
-    Binance(Arc<BinanceClient>),
-    Coinbase(Arc<CoinbaseClient>),
+pub struct PriceClient {
+    inner: Arc<BinanceClient>,
 }
 
 pub struct PriceSource {
@@ -66,14 +54,9 @@ pub struct PriceSourceHandles {
 }
 
 impl PriceSource {
-    pub fn new(source_type: PriceSourceType, symbol: &str, max: usize) -> Self {
-        let client = match source_type {
-            PriceSourceType::Binance | PriceSourceType::BinanceWs => {
-                PriceClient::Binance(Arc::new(BinanceClient::new(symbol)))
-            }
-            PriceSourceType::Coinbase | PriceSourceType::CoinbaseWs => {
-                PriceClient::Coinbase(Arc::new(CoinbaseClient::new(symbol)))
-            }
+    pub fn new(symbol: &str, max: usize) -> Self {
+        let client = PriceClient {
+            inner: Arc::new(BinanceClient::new(symbol)),
         };
 
         Self {
@@ -129,45 +112,23 @@ impl PriceSource {
             };
         }
 
-        match &self.client {
-            PriceClient::Binance(client) => {
-                let ws_client = client.clone();
-                let ws_handle = tokio::spawn(async move {
-                    if let Err(e) = ws_client.start_ticker_ws().await {
-                        tracing::error!("[WS] Binance WS stopped: {}", e);
-                    }
-                });
-                let receiver_handle = Self::spawn_receiver(
-                    self.buffer.clone(),
-                    self.max,
-                    client.subscribe(),
-                    "Binance",
-                    shutdown,
-                );
-                PriceSourceHandles {
-                    ws_handle,
-                    receiver_handle,
-                }
+        let client = &self.client;
+        let ws_client = client.inner.clone();
+        let ws_handle = tokio::spawn(async move {
+            if let Err(e) = ws_client.start_ticker_ws().await {
+                tracing::error!("[WS] Binance WS stopped: {}", e);
             }
-            PriceClient::Coinbase(client) => {
-                let ws_client = client.clone();
-                let ws_handle = tokio::spawn(async move {
-                    if let Err(e) = ws_client.start_ticker_ws().await {
-                        tracing::error!("[WS] Coinbase WS stopped: {}", e);
-                    }
-                });
-                let receiver_handle = Self::spawn_receiver(
-                    self.buffer.clone(),
-                    self.max,
-                    client.subscribe(),
-                    "Coinbase",
-                    shutdown,
-                );
-                PriceSourceHandles {
-                    ws_handle,
-                    receiver_handle,
-                }
-            }
+        });
+        let receiver_handle = Self::spawn_receiver(
+            self.buffer.clone(),
+            self.max,
+            client.inner.subscribe(),
+            "Binance",
+            shutdown,
+        );
+        PriceSourceHandles {
+            ws_handle,
+            receiver_handle,
         }
     }
 
