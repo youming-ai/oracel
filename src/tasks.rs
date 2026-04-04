@@ -24,9 +24,10 @@ pub(crate) fn start_market_refresher(
     discovery: Arc<MarketDiscovery>,
     market_state: Arc<RwLock<MarketState>>,
     shutdown: Arc<AtomicBool>,
+    refresh_secs: u64,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        let mut interval = tokio::time::interval(Duration::from_secs(refresh_secs));
         loop {
             if shutdown.load(Ordering::Acquire) {
                 tracing::debug!("[TASK] market refresher shutting down");
@@ -124,9 +125,12 @@ pub(crate) fn start_settlement_checker(
     log_dir: String,
     trade_log: Option<TradeLogHandle>,
     shutdown: Arc<AtomicBool>,
+    settlement_check_secs: u64,
+    redeem_max_retries: u32,
+    resolution_price_threshold: f64,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(15));
+        let mut interval = tokio::time::interval(Duration::from_secs(settlement_check_secs));
         let mut redeem_queue: Vec<(String, String, u32)> = Vec::new();
         let mut pending_retries: HashMap<String, u32> = HashMap::new();
 
@@ -166,7 +170,7 @@ pub(crate) fn start_settlement_checker(
                     }
                 };
 
-                match infer_resolution_state(&market) {
+                match infer_resolution_state(&market, resolution_price_threshold) {
                     Some(ResolutionState::Resolved(winner)) => {
                         tracing::info!(
                             "[SETTLE] {} resolved -> {} won",
@@ -188,7 +192,7 @@ pub(crate) fn start_settlement_checker(
                             tracing::warn!(
                                 "[SETTLE] {} still pending after {}s",
                                 pos.market_slug,
-                                *retries * 15,
+                                *retries as u64 * settlement_check_secs,
                             );
                         }
                     }
@@ -255,7 +259,7 @@ pub(crate) fn start_settlement_checker(
                         redeem_queue.push((
                             r.condition_id.clone(),
                             r.direction.as_str().to_string(),
-                            10,
+                            redeem_max_retries,
                         ));
                     }
                 }

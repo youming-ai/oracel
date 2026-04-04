@@ -33,7 +33,7 @@ async fn main() -> Result<()> {
 
     load_dotenv();
 
-    let config_path = Path::new("config.json");
+    let config_path = Path::new("config.toml");
     let config = if config_path.exists() {
         Config::load(config_path).unwrap_or_else(|e| {
             eprintln!("[INIT] Failed to load config: {}, using defaults", e);
@@ -103,7 +103,7 @@ async fn main() -> Result<()> {
 
     if config.trading.mode.is_live() && config.is_default_non_trading() {
         tracing::warn!(
-            "[INIT] Running live mode with default config values; review config.json before trading"
+            "[INIT] Running live mode with default config values; review config.toml before trading"
         );
     }
 

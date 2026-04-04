@@ -5,77 +5,69 @@
 The Polymarket 5m Bot follows a pipeline architecture with clear separation of concerns:
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Data Sources                             │
-├──────────────┬──────────────┬───────────────────────────────┤
-│   Binance    │   Coinbase   │      Polymarket Gamma API     │
-│  WebSocket   │  WebSocket   │         (REST API)            │
-└──────┬───────┴──────┬───────┴───────────────┬───────────────┘
-       │              │                       │
-       └──────────────┼───────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│                  Data Sources                        │
+├──────────────────┬───────────────────────────────────┤
+│     Binance      │        Polymarket Gamma API       │
+│   WebSocket      │            (REST API)             │
+└────────┬─────────┴──────────────┬────────────────────┘
+         │                        │
+         └────────────┬───────────┘
                       │
-┌─────────────────────▼─────────────────────────────────────┐
-│                   Pipeline                                │
-│  ┌──────────────┬──────────────┬──────────────┬──────────┐│
-│  │ PriceSource  │    Signal    │   Decider    │ Executor ││
-│  │   (Stage 1)  │   (Stage 2)  │  (Stage 3)   │(Stage 4) ││
-│  └──────────────┴──────────────┴──────────────┴──────────┘│
-│                           │                               │
-│                      ┌────▼────┐                          │
-│                      │ Settler │                          │
-│                      │(Stage 5)│                          │
-│                      └─────────┘                          │
-└───────────────────────────────────────────────────────────┘
-                      │
-       ┌──────────────┼──────────────┐
-       │              │              │
-┌──────▼──────┐ ┌────▼─────┐ ┌─────▼──────┐
-│  Paper Mode │ │ Live Mode│
-│  (Simulated)│ │(Real CLOB)│
-└─────────────┘ └──────────┘
+┌─────────────────────▼─────────────────────────────────┐
+│                    Pipeline                            │
+│  ┌──────────────┬──────────────┬───────────────────┐  │
+│  │ PriceSource  │   Decider    │     Executor      │  │
+│  │  (Stage 1)   │  (Stage 2)   │    (Stage 3)      │  │
+│  └──────────────┴──────────────┴───────────────────┘  │
+│                        │                               │
+│                   ┌────▼────┐                          │
+│                   │ Settler │                          │
+│                   │(Stage 4)│                          │
+│                   └─────────┘                          │
+└──────────────────────────────────────────────────────┘
+                       │
+        ┌──────────────┼──────────────┐
+        │                             │
+┌───────▼──────┐              ┌───────▼──────┐
+│  Paper Mode  │              │  Live Mode   │
+│  (Simulated) │              │ (Real CLOB)  │
+└──────────────┘              └──────────────┘
 ```
 
 ## Pipeline Stages
 
 ### Stage 1: PriceSource
-**Purpose**: Real-time BTC price ingestion from multiple exchanges
+**Purpose**: Real-time BTC price ingestion from Binance
 
 **Key Responsibilities**:
 - WebSocket connection management with automatic reconnection
 - Price buffer maintenance (rolling window of last N ticks)
 - Exchange timestamp tracking for accurate staleness detection
-- Multi-exchange support (Binance, Coinbase) via enum dispatch
 
 **Performance Characteristics**:
 - Lock-free read path for latest price queries
-- Zero-allocation hot path for price updates
 - <1ms ingestion latency target
 
-### Stage 2: Signal
-**Purpose**: Market opportunity detection
+### Stage 2: Decider
+**Purpose**: Signal detection and trade decision logic (combined)
 
 **Key Responsibilities**:
 - Fetch Polymarket CLOB quotes (yes/no mid prices)
 - Calculate market bias and detect extreme sentiment
-- Filter out non-extreme markets (pre-filter before expensive decision logic)
-- Validate market data quality (non-zero prices, sufficient liquidity)
-
-**Decision Logic**:
-```rust
-if market_bias > extreme_threshold (0.95) → Signal::Down
-if market_bias < 1 - extreme_threshold (0.05) → Signal::Up
-else → no signal (balanced market)
-```
-
-### Stage 3: Decider
-**Purpose**: Trade decision logic
-
-**Key Responsibilities**:
-- One-trade-per-window enforcement
+- Direction determination (Up/Down) based on market extreme
+- Entry price range validation
 - Balance check (reject if ≤ 0)
 - Edge calculation: `edge = fair_value - cheap_side_price`
 - Position sizing calculation
-- Market data validation
+- Daily loss limit enforcement
+
+**Decision Logic**:
+```rust
+if market_bias > extreme_threshold (0.95) → Direction::Down
+if market_bias < 1 - extreme_threshold (0.05) → Direction::Up
+else → no signal (balanced market)
+```
 
 **Decision Pipeline**:
 ```
@@ -90,7 +82,7 @@ decide()
 └── TRADE: Calculate position size
 ```
 
-### Stage 4: Executor
+### Stage 3: Executor
 **Purpose**: Order execution (paper or live)
 
 **Key Responsibilities**:
@@ -100,7 +92,7 @@ decide()
 - Order ID safe handling (prevent slicing panics)
 - FAK retry logic on failure
 
-### Stage 5: Settler
+### Stage 4: Settler
 **Purpose**: Position settlement and PnL calculation
 
 **Key Responsibilities**:
@@ -133,15 +125,14 @@ decide()
 │ 2. Check Price Staleness (<30s old)     │
 │ 3. Check Market Readiness               │
 │ 4. Check Time-to-Live (≥30s remaining)  │
-│ 5. Signal Detection (extreme market?)   │
 └─────────────────────────────────────────┘
      │
      ▼
 ┌─────────────────────────────────────────┐
-│           Decision Pipeline             │
+│         Decider (Signal + Filters)      │
 │ - Market data valid?                    │
 │ - Spread check?                         │
-│ - Extreme market?                       │
+│ - Extreme market? → direction           │
 │ - Entry price in range?                 │
 │ - TTL sufficient for entry?             │
 │ - Balance > 0?                          │
@@ -169,21 +160,22 @@ src/
 ├── tasks.rs                 # Background tasks: settlement, market refresh, status, balance
 ├── lib.rs                   # Library re-exports (config, data, pipeline)
 ├── cli.rs                   # CLI tools binary (polybot-tools)
+├── trade_log.rs             # Async trade log writer (CSV)
+├── util.rs                  # Shared utilities
 │
 ├── data/                    # External data source clients
 │   ├── mod.rs               # Data module exports
-│   ├── binance.rs          # Binance WebSocket client
-│   ├── coinbase.rs         # Coinbase WebSocket client
-│   ├── market_discovery.rs # Gamma API integration
-│   └── polymarket.rs       # Polymarket CLOB client + RPC URL selection
+│   ├── binance.rs           # Binance WebSocket client
+│   ├── market_discovery.rs  # Gamma API integration
+│   └── polymarket.rs        # Polymarket CLOB client + RPC URL selection
 │
 └── pipeline/               # Trading pipeline stages
     ├── mod.rs              # Pipeline module exports
     ├── price_source.rs     # Stage 1: Price ingestion
-    ├── signal.rs           # Stage 2: Signal detection
-    ├── decider.rs          # Stage 3: Decision logic
-    ├── executor.rs         # Stage 4: Order execution
-    └── settler.rs          # Stage 5: Settlement
+    ├── decider.rs          # Stage 2: Signal detection + decision logic
+    ├── executor.rs         # Stage 3: Order execution
+    ├── settler.rs          # Stage 4: Settlement
+    └── test_helpers.rs     # Test utilities
 ```
 
 ## Concurrency Model
@@ -191,7 +183,7 @@ src/
 ### Async Task Structure
 ```
 Main Task
-├── PriceSource Task (per exchange)
+├── PriceSource Task
 │   └── WebSocket Client Task (reconnect loop)
 │   └── Price Consumer Task (buffer updates)
 ├── Settlement Checker Task (15s interval)
@@ -240,8 +232,7 @@ struct Bot {
 
 ### Hot Path Optimizations
 1. **Lock-free reads**: Latest price accessed via read lock (no contention)
-2. **Zero-allocation**: Price updates use pre-allocated buffer
-3. **Enum dispatch**: Avoid trait object overhead for price clients
+2. **Enum dispatch**: Avoid trait object overhead for price clients
 
 ### Memory Management
 - Fixed-size price buffer (circular queue, 1000 ticks default)

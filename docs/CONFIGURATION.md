@@ -2,76 +2,106 @@
 
 ## Overview
 
-The Polymarket 5m Bot uses a JSON configuration file (`config.json`) for all runtime settings. On startup, it attempts to load this file; if loading/parsing fails, it logs the error and falls back to defaults, then validates the resulting config before trading.
+The Polymarket 5m Bot uses a TOML configuration file (`config.toml`) for all runtime settings. On startup, it attempts to load this file; if loading/parsing fails, it logs the error and falls back to defaults, then validates the resulting config before trading. If `config.toml` doesn't exist, a default one is auto-generated.
 
 ## Configuration File Location
 
-- **Development**: `./config.json` (repository root)
-- **Production**: Same location, but typically symlinked or mounted
-
-## Creating Configuration
-
-Edit `config.json` with your settings.
+- **Development**: `./config.toml` (repository root)
+- **Production**: Same location, typically symlinked or mounted
 
 ## Full Configuration Reference
 
-```json
-{
-  "trading": {
-    "mode": "paper"
-  },
-  "market": {
-    "stale_threshold_ms": 30000,
-    "min_ttl_ms": 30000
-  },
-  "polyclob": {
-    "gamma_api_url": "https://gamma-api.polymarket.com"
-  },
-  "price_source": {
-    "source": "binance",
-    "symbol": "BTCUSDT"
-  },
-  "strategy": {
-    "extreme_threshold": 0.95,
-    "fair_value": 0.5,
-    "position_size_usdc": 1.0,
-    "min_entry_price": 0.02,
-    "max_entry_price": 0.06,
-    "min_ttl_for_entry_ms": 120000
-  },
-  "risk": {
-    "max_fak_retries": 3,
-    "fak_backoff_ms": 3000,
-    "daily_loss_limit_usdc": 0.0
-  },
-  "polling": {
-    "signal_interval_ms": 1000,
-    "status_interval_ms": 10000
-  },
-  "execution": {
-    "slippage_tolerance": 0.01
-  }
-}
+```toml
+[trading]
+mode = "paper"                      # "paper" or "live"
+paper_starting_balance = 100.0      # paper mode starting balance
+
+[market]
+stale_threshold_ms = 30000          # max BTC price age before skipping (ms)
+min_ttl_ms = 30000                  # min remaining market TTL to enter (ms)
+
+[polyclob]
+gamma_api_url = "https://gamma-api.polymarket.com"
+
+[strategy]
+extreme_threshold = 0.95            # trade when yes/no ≥95% or ≤5%
+fair_value = 0.5
+position_size_usdc = 1.0            # per-trade size (min $1 enforced)
+min_entry_price = 0.05              # reject candidates below
+max_entry_price = 0.15              # reject candidates above
+min_ttl_for_entry_ms = 90000        # min market TTL to enter (ms)
+btc_trend_window_s = 30             # BTC trend lookback (s). 0=off
+btc_trend_min_pct = 0.05            # min BTC % change for trend signal
+circuit_breaker_window = 50         # sliding-window trade count. 0=off
+circuit_breaker_min_win_rate = 0.05 # min win rate to keep trading
+
+[risk]
+max_fak_retries = 3                 # FAK retries per market window
+fak_backoff_ms = 1000               # backoff after FAK rejection (ms)
+daily_loss_limit_usdc = 50.0        # daily loss cap. 0=off
+
+[polling]
+signal_interval_ms = 1000           # main tick interval (ms)
+status_interval_ms = 10000          # status log interval (ms)
+market_refresh_secs = 60            # market discovery refresh (s)
+settlement_check_secs = 15          # settlement poll interval (s)
+
+[price_source]
+source = "binance"                  # "binance" or "binance_ws"
+symbol = "BTCUSDT"
+buffer_max = 1000                   # max price ticks retained
+buffer_min_ticks = 60               # min ticks before trading starts
+
+[execution]
+slippage_tolerance = 0.01           # 1% slippage on top of mid-price
+
+[timeouts]
+gamma_http_secs = 10
+ws_connect_secs = 10
+ws_max_backoff_secs = 60            # doubles on each retry
+clob_price_secs = 10
+clob_auth_secs = 15
+clob_order_secs = 15
+rpc_connect_secs = 30
+rpc_redeem_secs = 30
+balance_query_secs = 10
+
+[redeem]
+max_retries = 10
+delay_secs = 5                      # between redemption txns (s)
+concurrency = 5                     # CLI scan parallelism
+
+[misc]
+trade_log_flush_secs = 30
+shutdown_timeout_secs = 5           # graceful shutdown wait (s)
+market_search_windows = 5           # future 5m windows to search
+resolution_price_threshold = 0.999  # winning resolution threshold
+
+[time_windows]
+window1_start = 0
+window1_end = 12
+window2_start = 12
+window2_end = 24
 ```
 
 ## Section-by-Section Guide
 
 ### Trading Configuration
 
-```json
-"trading": {
-  "mode": "paper"  // or "live"
-}
+```toml
+[trading]
+mode = "paper"
+paper_starting_balance = 100.0
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `mode` | string | `"paper"` | Trading mode: `"paper"` for simulation, `"live"` for real trading |
+| `paper_starting_balance` | float | `100.0` | Starting balance for paper mode (ignored in live mode) |
 
 **Paper Mode**:
 - Simulated trading with no real orders
 - Uses local UUIDs as order IDs
-- Starts with $100 simulated balance
 - No private key required
 
 **Live Mode**:
@@ -84,115 +114,47 @@ Edit `config.json` with your settings.
 
 ### Market Configuration
 
-```json
-"market": {
-  "stale_threshold_ms": 30000,
-  "min_ttl_ms": 30000
-}
+```toml
+[market]
+stale_threshold_ms = 30000
+min_ttl_ms = 30000
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `stale_threshold_ms` | integer | `30000` | Max age of BTC price data before considered stale (milliseconds) |
-| `min_ttl_ms` | integer | `30000` | Minimum remaining time before market expiry to place a trade (milliseconds) |
-
-The stale threshold ensures you don't trade on old price data. The minimum TTL prevents placing trades too close to settlement when prices may be volatile.
-
----
-
-### Polymarket CLOB Configuration
-
-```json
-"polyclob": {
-  "gamma_api_url": "https://gamma-api.polymarket.com"
-}
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `gamma_api_url` | string | `"https://gamma-api.polymarket.com"` | Gamma API base URL for market discovery and resolution |
-
-**Note**: This is different from the CLOB API URL, which is configured internally.
-
----
-
-### Price Source Configuration
-
-```json
-"price_source": {
-  "source": "binance",
-  "symbol": "BTCUSDT"
-}
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `source` | enum | `"binance"` | Price feed source: `"binance"`, `"binance_ws"`, `"coinbase"`, or `"coinbase_ws"` |
-| `symbol` | string | `"BTCUSDT"` | Trading pair symbol (format depends on source) |
-
-#### Source Options
-
-| Source | Description | Symbol Format | Example |
-|--------|-------------|---------------|---------|
-| `binance` | Binance WebSocket (default) | No dash, uppercase | `BTCUSDT`, `ETHUSDT` |
-| `binance_ws` | Binance WebSocket (explicit) | Same as above | `BTCUSDT` |
-| `coinbase` | Coinbase WebSocket | With dash, uppercase | `BTC-USD`, `ETH-USD` |
-| `coinbase_ws` | Coinbase WebSocket (explicit) | Same as above | `BTC-USD` |
-
-**Symbol Format Validation**:
-- The bot validates symbol format on startup
-- Using wrong format for source causes startup error
-
-#### Common Symbol Examples
-
-**Binance**:
-- `BTCUSDT` - Bitcoin / Tether
-- `ETHUSDT` - Ethereum / Tether
-- `SOLUSDT` - Solana / Tether
-
-**Coinbase**:
-- `BTC-USD` - Bitcoin / USD
-- `ETH-USD` - Ethereum / USD
-- `SOL-USD` - Solana / USD
+| `stale_threshold_ms` | integer | `30000` | Max age of BTC price data before considered stale (ms) |
+| `min_ttl_ms` | integer | `30000` | Minimum remaining time before market expiry to place a trade (ms) |
 
 ---
 
 ### Strategy Configuration
 
-```json
-"strategy": {
-  "extreme_threshold": 0.95,
-  "fair_value": 0.5,
-  "position_size_usdc": 1.0,
-  "min_entry_price": 0.02,
-  "max_entry_price": 0.06,
-  "min_ttl_for_entry_ms": 120000
-}
+```toml
+[strategy]
+extreme_threshold = 0.95
+fair_value = 0.5
+position_size_usdc = 1.0
+min_entry_price = 0.05
+max_entry_price = 0.15
+min_ttl_for_entry_ms = 90000
+btc_trend_window_s = 30
+btc_trend_min_pct = 0.05
+circuit_breaker_window = 50
+circuit_breaker_min_win_rate = 0.05
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `extreme_threshold` | float | `0.95` | Market bias threshold to consider sentiment extreme (0.0-1.0) |
+| `extreme_threshold` | float | `0.95` | Market bias threshold for extreme sentiment (0.0-1.0) |
 | `fair_value` | float | `0.50` | Fair-value assumption for binary outcome (0.0-1.0) |
-| `position_size_usdc` | float | `1.0` | Configured target size per trade in USDC; runtime enforces a $1 minimum order |
-| `min_entry_price` | float | `0.02` | Lower bound for candidate entry quote; candidates below this price are rejected |
-| `max_entry_price` | float | `0.06` | Upper bound for candidate entry quote; candidates above this price are rejected |
-| `min_ttl_for_entry_ms` | integer | `120000` | Strategy-level TTL floor; candidate must have at least this much time remaining to enter |
-
-#### Extreme Threshold
-
-Determines when market sentiment is considered extreme:
-
-```
-if market_bias > 0.95 → Extremely bullish → Buy DOWN
-if market_bias < 0.05 → Extremely bearish → Buy UP
-otherwise → No trade
-```
-
-**Examples**:
-- `0.95` (default): Trade when market is ≥95% or ≤5%
-- `0.90`: More aggressive, trade at >90% or <10%
-- `0.97`: More conservative, trade at >97% or <3%
+| `position_size_usdc` | float | `1.0` | Target size per trade in USDC; runtime enforces $1 minimum |
+| `min_entry_price` | float | `0.05` | Lower bound for candidate entry quote |
+| `max_entry_price` | float | `0.15` | Upper bound for candidate entry quote |
+| `min_ttl_for_entry_ms` | integer | `90000` | Minimum TTL remaining to enter a trade (ms) |
+| `btc_trend_window_s` | integer | `30` | BTC trend lookback window (seconds). 0 = disabled |
+| `btc_trend_min_pct` | float | `0.05` | Minimum BTC price change (% as decimal) for trend signal |
+| `circuit_breaker_window` | integer | `50` | Sliding-window trade count. 0 = disabled |
+| `circuit_breaker_min_win_rate` | float | `0.05` | Minimum win rate to keep trading |
 
 #### Position Size
 
@@ -207,117 +169,86 @@ if actual_cost < 1.0:
     actual_cost = shares * entry_price
 ```
 
-Because shares are floored to whole numbers, `actual_cost` can be below configured
-`position_size_usdc`; when the $1 minimum bump triggers, it can also exceed configured
-`position_size_usdc`.
-
 **Zero-share guard**: Orders resulting in 0 shares are rejected to prevent phantom trades.
 
 ---
 
 ### Risk Configuration
 
-```json
-"risk": {
-  "max_fak_retries": 3,
-  "fak_backoff_ms": 3000,
-  "daily_loss_limit_usdc": 0.0
-}
+```toml
+[risk]
+max_fak_retries = 3
+fak_backoff_ms = 1000
+daily_loss_limit_usdc = 50.0
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `max_fak_retries` | integer | `3` | Maximum FAK order rejections before giving up on market window |
-| `fak_backoff_ms` | integer | `3000` | Milliseconds to wait after FAK rejection before retrying |
-| `daily_loss_limit_usdc` | float | `0.0` | Daily loss cap in USDC; when daily PnL drops below `-daily_loss_limit_usdc`, new trades are blocked for the day (`0` disables the gate) |
-
-The FAK retry mechanism handles temporary liquidity issues when placing orders on the CLOB. After a rejection, the bot waits `fak_backoff_ms` before attempting another trade. The daily loss gate checks current `daily_pnl` before candidate evaluation.
+| `max_fak_retries` | integer | `3` | Maximum FAK order rejections per market window |
+| `fak_backoff_ms` | integer | `1000` | Backoff after FAK rejection (ms) |
+| `daily_loss_limit_usdc` | float | `50.0` | Daily loss cap in USDC. 0 = disabled |
 
 ---
 
-### Execution Configuration
+### Price Source Configuration
 
-```json
-"execution": {
-  "slippage_tolerance": 0.01
-}
+```toml
+[price_source]
+source = "binance"
+symbol = "BTCUSDT"
+buffer_max = 1000
+buffer_min_ticks = 60
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `slippage_tolerance` | float | `0.01` | Buy-price adjustment applied in both paper and live execution: `buy_price = mid_price * (1 + slippage_tolerance)` (capped at `0.99`) |
-
-Both execution paths use the same slippage-adjusted price; in paper mode it affects simulated fills/cost, and in live mode it affects submitted FAK limit orders. Setting `0` disables this adjustment.
+| `source` | enum | `"binance"` | Price feed: `"binance"` or `"binance_ws"` |
+| `symbol` | string | `"BTCUSDT"` | Trading pair symbol |
+| `buffer_max` | integer | `1000` | Maximum price ticks retained in buffer |
+| `buffer_min_ticks` | integer | `60` | Minimum buffer ticks before trading starts |
 
 ---
 
-### Polling Configuration
+### Time Windows Configuration
 
-```json
-"polling": {
-  "signal_interval_ms": 1000,
-  "status_interval_ms": 10000
-}
+```toml
+[time_windows]
+window1_start = 0
+window1_end = 12
+window2_start = 12
+window2_end = 24
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `signal_interval_ms` | integer | `1000` | Main signal loop interval in milliseconds |
-| `status_interval_ms` | integer | `10000` | Status log printing interval in milliseconds |
-
-This controls how often the bot checks for trading opportunities. Default 1000ms = 1 second.
-
-**Note**: Other intervals are fixed:
-- Settlement check: 15 seconds
-- Market refresh: 60 seconds
+Two monitoring windows for the trade log dashboard (UTC hours, 0-24). Each window is a half-open interval `[start, end)`. Supports wrap-around (e.g., start=22, end=6).
 
 ---
 
 ## Configuration Validation
 
-The bot validates the effective configuration on startup. Validation failures terminate startup with descriptive errors; config file load/parse failures first fall back to defaults, and those defaults are then validated.
+The bot validates the effective configuration on startup. Validation failures terminate startup with descriptive errors.
 
 ### Validation Rules
 
-| Field | Validation | Error Message |
-|-------|------------|---------------|
-| `signal_interval_ms` | > 0 | `polling.signal_interval_ms must be > 0` |
-| `extreme_threshold` | 0 < value < 1 | `strategy.extreme_threshold must be in (0, 1)` |
-| `extreme_threshold` | > fair_value | `strategy.extreme_threshold (X) must be > fair_value (Y)` |
-| `fair_value` | 0 < value < 1 | `strategy.fair_value must be in (0, 1)` |
-| `position_size_usdc` | > 0 | `strategy.position_size_usdc must be > 0` |
-| `min_entry_price`, `max_entry_price` | `0 < min_entry_price < max_entry_price < 1` | `strategy min/max entry price must satisfy 0 < min < max < 1` |
-| `min_ttl_for_entry_ms` | > 0 | `strategy.min_ttl_for_entry_ms must be > 0` |
-| `symbol` | Source-specific format | `price_source.symbol must match...` |
-
-### Example Validation Errors
-
-```bash
-# Invalid symbol format for source
-Error: price_source.symbol must match Coinbase format like BTC-USD when source=coinbase (got BTCUSDT)
-
-# Extreme threshold out of range
-Error: strategy.extreme_threshold must be in (0, 1)
-
-# Zero polling interval
-Error: polling.signal_interval_ms must be > 0
-
-# Extreme threshold <= fair_value
-Error: strategy.extreme_threshold (0.40) must be > fair_value (0.50)
-```
+| Field | Validation |
+|-------|------------|
+| `signal_interval_ms` | > 0 |
+| `extreme_threshold` | 0 < value < 1, and > fair_value |
+| `fair_value` | 0 < value < 1 |
+| `position_size_usdc` | > 0 |
+| `min_entry_price`, `max_entry_price` | 0 < min < max < 1 |
+| `min_ttl_for_entry_ms` | > 0 |
+| `symbol` | Binance format (uppercase, no dash) |
 
 ---
 
 ## Environment Variables
 
-Some settings are loaded from environment variables (not stored in config.json):
-
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `PRIVATE_KEY` | Live mode only | Wallet private key for CLOB authentication |
+| `PRIVATE_KEY` | Live mode | Wallet private key for CLOB authentication |
 | `ALCHEMY_KEY` | Optional | Alchemy API key for Polygon RPC |
 
-**Note**: Create a `.env` file in the repository root:
+Create a `.env` file in the repository root:
 
 ```bash
 # .env
@@ -327,90 +258,12 @@ ALCHEMY_KEY=...
 
 ---
 
-## Configuration Examples
-
-### Conservative Trading
-
-```json
-{
-  "trading": { "mode": "paper" },
-  "strategy": {
-    "extreme_threshold": 0.97,
-    "fair_value": 0.50,
-    "position_size_usdc": 1.0
-  }
-}
-```
-
-**Characteristics**:
-- Higher extreme threshold (more selective)
-- Same position size
-
-### Aggressive Trading
-
-```json
-{
-  "trading": { "mode": "paper" },
-  "strategy": {
-    "extreme_threshold": 0.90,
-    "fair_value": 0.50,
-    "position_size_usdc": 2.0
-  }
-}
-```
-
-**Characteristics**:
-- Lower extreme threshold (more trades)
-- Larger position size
-
-### Production Live Trading
-
-```json
-{
-  "trading": { "mode": "live" },
-  "market": {
-    "stale_threshold_ms": 30000,
-    "min_ttl_ms": 30000
-  },
-  "price_source": {
-    "source": "binance",
-    "symbol": "BTCUSDT"
-  },
-  "strategy": {
-    "extreme_threshold": 0.95,
-    "fair_value": 0.50,
-    "position_size_usdc": 5.0
-  },
-  "risk": {
-    "max_fak_retries": 3,
-    "fak_backoff_ms": 3000
-  }
-}
-```
-
-**Characteristics**:
-- Live mode (real trades)
-- Balanced settings
-- Larger position size for production
-
----
-
 ## Runtime Configuration Updates
 
 Configuration is loaded once at startup. To apply changes:
 
 1. Stop the bot (Ctrl+C or SIGTERM)
-2. Edit `config.json`
+2. Edit `config.toml`
 3. Restart the bot
 
 The bot does not support hot-reloading configuration.
-
----
-
-## Configuration Best Practices
-
-1. **Start with paper mode** - Test thoroughly before live trading
-2. **Set reasonable position sizes** - Start small ($1-5 per trade)
-3. **Match symbol to source** - Use correct format for your price source
-4. **Validate before starting** - Run `cargo run` to check configuration
-5. **Keep backups** - Version control your config.json or keep backups

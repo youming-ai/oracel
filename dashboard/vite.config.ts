@@ -7,6 +7,14 @@ import tailwindcss from '@tailwindcss/vite'
 function detectBotMode(): string {
   if (process.env.BOT_MODE) return process.env.BOT_MODE
   try {
+    // Try TOML config first
+    const tomlPath = path.resolve(__dirname, '../config.toml')
+    if (fs.existsSync(tomlPath)) {
+      const content = fs.readFileSync(tomlPath, 'utf-8')
+      const match = content.match(/^mode\s*=\s*"(\w+)"/m)
+      if (match) return match[1]
+    }
+    // Fallback to JSON config
     const configPath = path.resolve(__dirname, '../config.json')
     const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'))
     return config?.trading?.mode ?? 'paper'

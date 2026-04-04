@@ -1,0 +1,74 @@
+# Polymarket 5m Bot Configuration
+# Durations in milliseconds unless noted (secs suffix).
+
+[trading]
+mode = "paper"                      # "paper" or "live"
+paper_starting_balance = 100.0      # paper mode starting balance
+
+[market]
+stale_threshold_ms = 30000          # max BTC price age before skipping (ms)
+min_ttl_ms = 30000                  # min remaining market TTL to enter (ms)
+
+[polyclob]
+gamma_api_url = "https://gamma-api.polymarket.com"
+
+[strategy]
+extreme_threshold = 0.95            # trade when yes/no ≥95% or ≤5%
+fair_value = 0.5
+position_size_usdc = 1.0            # per-trade size (min $1 enforced)
+min_entry_price = 0.05              # reject candidates below
+max_entry_price = 0.15              # reject candidates above
+min_ttl_for_entry_ms = 90000        # min market TTL to enter (ms)
+btc_trend_window_s = 30             # BTC trend lookback (s). 0=off
+btc_trend_min_pct = 0.05            # min BTC % change for trend signal
+circuit_breaker_window = 50         # sliding-window trade count. 0=off
+circuit_breaker_min_win_rate = 0.05 # min win rate to keep trading
+
+[risk]
+max_fak_retries = 3                 # FAK retries per market window
+fak_backoff_ms = 1000               # backoff after FAK rejection (ms)
+daily_loss_limit_usdc = 50.0        # daily loss cap. 0=off
+
+[polling]
+signal_interval_ms = 1000           # main tick interval (ms)
+status_interval_ms = 10000          # status log interval (ms)
+market_refresh_secs = 60            # market discovery refresh (s)
+settlement_check_secs = 15          # settlement poll interval (s)
+
+[price_source]
+source = "binance"                  # "binance" or "binance_ws"
+symbol = "BTCUSDT"
+buffer_max = 1000                   # max price ticks retained
+buffer_min_ticks = 60               # min ticks before trading starts
+
+[execution]
+slippage_tolerance = 0.01           # 1% slippage on top of mid-price
+
+[timeouts]
+gamma_http_secs = 10
+ws_connect_secs = 10
+ws_max_backoff_secs = 60            # doubles on each retry
+clob_price_secs = 10
+clob_auth_secs = 15
+clob_order_secs = 15
+rpc_connect_secs = 30
+rpc_redeem_secs = 30
+balance_query_secs = 10
+
+[redeem]
+max_retries = 10
+delay_secs = 5                      # between redemption txns (s)
+concurrency = 5                     # CLI scan parallelism
+
+[misc]
+trade_log_flush_secs = 30
+shutdown_timeout_secs = 5           # graceful shutdown wait (s)
+market_search_windows = 5           # future 5m windows to search
+resolution_price_threshold = 0.999  # winning resolution threshold
+
+# Dashboard monitoring windows (UTC hours, half-open [start, end), wrap-around).
+[time_windows]
+window1_start = 0
+window1_end = 12
+window2_start = 12
+window2_end = 24

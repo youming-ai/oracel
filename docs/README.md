@@ -4,7 +4,7 @@
 
 1. **[Trading Strategy](STRATEGY.md)** - Understand the trading approach
 2. **[Architecture Overview](ARCHITECTURE.md)** - System design and data flow
-3. **[Configuration Guide](CONFIGURATION.md)** - Set up your bot
+3. **[Configuration Guide](CONFIGURATION.md)** - Set up your bot (`config.toml`)
 4. **[Deployment Guide](DEPLOYMENT.md)** - Deploy to production
 
 ## Reference

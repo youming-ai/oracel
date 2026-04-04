@@ -60,18 +60,19 @@ pub struct DeciderConfig {
 
 impl Default for DeciderConfig {
     fn default() -> Self {
+        use crate::config::defaults as d;
         Self {
-            position_size_usdc: util::decimal("1.0"),
-            extreme_threshold: util::decimal("0.90"),
-            fair_value: util::decimal("0.50"),
-            min_entry_price: util::decimal("0.02"),
-            max_entry_price: util::decimal("0.12"),
-            min_ttl_for_entry_ms: 120_000,
-            daily_loss_limit_usdc: util::decimal("0"),
-            btc_trend_window_s: 30,
-            btc_trend_min_pct: util::decimal("0.05"),
-            circuit_breaker_window: 50,
-            circuit_breaker_min_win_rate: util::decimal("0.05"),
+            position_size_usdc: d::position_size_usdc(),
+            extreme_threshold: d::extreme_threshold(),
+            fair_value: d::fair_value(),
+            min_entry_price: d::min_entry_price(),
+            max_entry_price: d::max_entry_price(),
+            min_ttl_for_entry_ms: d::min_ttl_for_entry_ms(),
+            daily_loss_limit_usdc: d::daily_loss_limit(),
+            btc_trend_window_s: d::btc_trend_window_s(),
+            btc_trend_min_pct: d::btc_trend_min_pct(),
+            circuit_breaker_window: d::circuit_breaker_window(),
+            circuit_breaker_min_win_rate: d::circuit_breaker_min_win_rate(),
         }
     }
 }

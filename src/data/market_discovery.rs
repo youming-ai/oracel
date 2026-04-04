@@ -57,6 +57,9 @@ pub struct ActiveMarket {
 #[derive(Debug, Clone)]
 pub struct DiscoveryConfig {
     pub gamma_api_url: String,
+    pub gamma_http_timeout: std::time::Duration,
+    pub market_search_windows: u32,
+    pub resolution_price_threshold: f64,
 }
 
 // ─── Market Discovery ───
@@ -69,7 +72,7 @@ pub struct MarketDiscovery {
 impl MarketDiscovery {
     pub fn new(config: DiscoveryConfig) -> Self {
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
+            .timeout(config.gamma_http_timeout)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self { config, client }
@@ -94,8 +97,8 @@ impl MarketDiscovery {
         let window_ts = Self::current_window_ts();
 
         // Search nearby windows (current + next few)
-        for offset in 0..5 {
-            let ts = window_ts + offset * WINDOW_SECS;
+        for offset in 0..self.config.market_search_windows {
+            let ts = window_ts + (offset as i64) * WINDOW_SECS;
             let slug = Self::generate_slug(SERIES_ID, ts);
 
             let url = format!("{}/events?slug={}&limit=1", base, slug);
@@ -221,7 +224,7 @@ fn parse_json_string_array(value: &Option<String>) -> Option<Vec<String>> {
     serde_json::from_str::<Vec<String>>(raw).ok()
 }
 
-pub fn infer_resolution_state(market: &GammaMarket) -> Option<ResolutionState> {
+pub fn infer_resolution_state(market: &GammaMarket, resolution_price_threshold: f64) -> Option<ResolutionState> {
     let status = match market.uma_resolution_status.as_deref() {
         Some(s) => s.to_ascii_lowercase(),
         None => return Some(ResolutionState::Pending), // not yet published, wait silently
@@ -237,11 +240,11 @@ pub fn infer_resolution_state(market: &GammaMarket) -> Option<ResolutionState> {
     // Market is resolved and closed — try to determine winner.
     // If winner can't be parsed, return Pending rather than None so the
     // settler doesn't log "resolution unclear" on every check cycle.
-    let winner = parse_winner(market);
+    let winner = parse_winner(market, resolution_price_threshold);
     Some(winner.map_or(ResolutionState::Pending, ResolutionState::Resolved))
 }
 
-fn parse_winner(market: &GammaMarket) -> Option<Direction> {
+fn parse_winner(market: &GammaMarket, threshold: f64) -> Option<Direction> {
     let outcomes = parse_json_string_array(&market.outcomes)?;
     let prices = parse_json_string_array(&market.outcome_prices)?;
     if outcomes.len() != prices.len() {
@@ -250,7 +253,7 @@ fn parse_winner(market: &GammaMarket) -> Option<Direction> {
     for (outcome, price) in outcomes.iter().zip(prices.iter()) {
         let parsed = price.parse::<f64>().ok()?;
         let normalized = outcome.to_ascii_lowercase();
-        if parsed >= 0.999 {
+        if parsed >= threshold {
             if normalized == "yes" || normalized == "up" {
                 return Some(Direction::Up);
             }
@@ -299,7 +302,7 @@ mod tests {
         };
 
         assert_eq!(
-            infer_resolution_state(&market),
+            infer_resolution_state(&market, 0.99),
             Some(ResolutionState::Resolved(Direction::Up))
         );
     }
@@ -318,7 +321,7 @@ mod tests {
         };
 
         assert_eq!(
-            infer_resolution_state(&market),
+            infer_resolution_state(&market, 0.99),
             Some(ResolutionState::Resolved(Direction::Down))
         );
     }
@@ -337,7 +340,7 @@ mod tests {
         };
 
         assert_eq!(
-            infer_resolution_state(&market),
+            infer_resolution_state(&market, 0.99),
             Some(ResolutionState::Resolved(Direction::Up))
         );
     }
@@ -356,7 +359,7 @@ mod tests {
         };
 
         assert_eq!(
-            infer_resolution_state(&market),
+            infer_resolution_state(&market, 0.99),
             Some(ResolutionState::Resolved(Direction::Down))
         );
     }
@@ -375,7 +378,7 @@ mod tests {
         };
 
         assert_eq!(
-            infer_resolution_state(&market),
+            infer_resolution_state(&market, 0.99),
             Some(ResolutionState::Pending)
         );
     }
@@ -395,7 +398,7 @@ mod tests {
 
         // Should be Pending (wait for data), not None (log error)
         assert_eq!(
-            infer_resolution_state(&market),
+            infer_resolution_state(&market, 0.99),
             Some(ResolutionState::Pending)
         );
     }

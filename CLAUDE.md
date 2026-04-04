@@ -41,24 +41,23 @@ bun run lint                   # eslint
 
 ## Architecture
 
-### 5-Stage Trading Pipeline
+### 4-Stage Trading Pipeline
 
 The bot runs a linear pipeline each tick (`bot.rs:tick()`):
 
-1. **Price Source** (`pipeline/price_source.rs`) — WebSocket price buffer from Binance or Coinbase
-2. **Signal** (`pipeline/signal.rs`) — Direction enum (Up/Down)
-3. **Decider** (`pipeline/decider.rs`) — Evaluates market extremeness, entry price range, TTL, balance, daily loss limit → outputs `Trade` or `Pass`
-4. **Executor** (`pipeline/executor.rs`) — Places FAK (Fill-And-Kill) limit orders, paper-simulated or live via CLOB
-5. **Settler** (`pipeline/settler.rs`) — Tracks pending positions, resolves outcomes via Gamma API
+1. **Price Source** (`pipeline/price_source.rs`) — WebSocket price buffer from Binance
+2. **Decider** (`pipeline/decider.rs`) — Detects extreme market sentiment → determines direction (Up/Down), evaluates entry price range, TTL, balance, daily loss limit → outputs `Trade` or `Pass`
+3. **Executor** (`pipeline/executor.rs`) — Places FAK (Fill-And-Kill) limit orders, paper-simulated or live via CLOB
+4. **Settler** (`pipeline/settler.rs`) — Tracks pending positions, resolves outcomes via Gamma API
 
 ### Core Components
 
 - `bot.rs` — Bot struct, main event loop (`run()`), per-tick logic (`tick()`), market refresh
 - `state.rs` — In-memory bot/market state
 - `tasks.rs` — Background async tasks: settlement checking (15s), market refresh (60s), status printing, balance persistence
-- `config.rs` — Typed config with validation, loaded from `config.json`
+- `config.rs` — Typed config with validation, loaded from `config.toml`
 - `data/` — External data clients:
-  - `binance.rs` / `coinbase.rs` — WebSocket price feeds with auto-reconnect and exponential backoff
+  - `binance.rs` — WebSocket price feed with auto-reconnect and exponential backoff
   - `market_discovery.rs` — Gamma API market slug generation (`btc-updown-5m-{timestamp}`) and resolution inference
   - `polymarket.rs` — CLOB client (unauthenticated price fetching + authenticated order placement), on-chain balance checker, CTF position redeemer
 
@@ -87,15 +86,17 @@ React + Vite + Tailwind app in `dashboard/`. Reads `trades.csv` and `balance` fi
 
 ## Configuration
 
-- `config.json` — Main config. Validated on startup.
+- `config.toml` — Main config. Validated on startup. Auto-generated with defaults if missing.
 - `.env` — `PRIVATE_KEY` (live mode only), `ALCHEMY_KEY` (optional Polygon RPC)
 - Two modes: `paper` (simulated, default $100 balance) and `live` (real orders, on-chain balance sync)
+- `time_windows` section configures two monitoring windows for the dashboard (UTC hours, supports wrap-around)
 
 ## Logs & State Files
 
 ```
 logs/{paper,live}/
-  bot.log       # rolling daily log
-  trades.csv    # trade entries & settlements
-  balance       # current balance snapshot (atomic writes)
+  bot.log             # rolling daily log
+  trades.csv          # trade entries & settlements
+  balance             # current balance snapshot (atomic writes)
+  time_windows.json   # dashboard monitoring windows config
 ```

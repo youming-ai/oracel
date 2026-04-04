@@ -28,8 +28,6 @@ use crate::state::{BotState, MarketState};
 use crate::tasks;
 use polymarket_5m_bot::util;
 
-const PRICE_BUFFER_MAX: usize = 1000;
-
 pub(crate) struct Bot {
     config: Config,
     log_dir: String,
@@ -51,12 +49,15 @@ impl Bot {
     pub(crate) async fn new(config: Config, log_dir: String) -> Result<Self> {
         let price_source = Arc::new(PriceSource::new(
             &config.price_source.symbol,
-            PRICE_BUFFER_MAX,
+            config.price_source.buffer_max,
         ));
         let polymarket = Arc::new(PolymarketClient::new()?);
 
         let discovery_cfg = DiscoveryConfig {
             gamma_api_url: config.polyclob.gamma_api_url.clone(),
+            gamma_http_timeout: std::time::Duration::from_secs(config.timeouts.gamma_http_secs),
+            market_search_windows: config.misc.market_search_windows,
+            resolution_price_threshold: config.misc.resolution_price_threshold,
         };
         let discovery = Arc::new(MarketDiscovery::new(discovery_cfg));
 
@@ -94,7 +95,7 @@ impl Bot {
         let initial_balance = if config.trading.mode.is_paper() {
             Self::load_balance(&log_dir)
                 .await
-                .unwrap_or_else(|| util::decimal("100"))
+                .unwrap_or_else(|| config.trading.paper_starting_balance)
         } else {
             let rpc = data::polymarket::rpc_url(config.trading.mode);
             if let Some(ref r) = redeemer {
@@ -243,11 +244,15 @@ impl Bot {
             self.log_dir.clone(),
             trade_log_handle,
             self.shutdown.clone(),
+            self.config.polling.settlement_check_secs,
+            self.config.redeem.max_retries,
+            self.config.misc.resolution_price_threshold,
         );
         let mut refresher_handle = tasks::start_market_refresher(
             self.discovery.clone(),
             self.market_state.clone(),
             self.shutdown.clone(),
+            self.config.polling.market_refresh_secs,
         );
         let mut status_handle = tasks::start_status_printer(
             self.price_source.clone(),
@@ -265,7 +270,7 @@ impl Bot {
         let mut tick = interval(Duration::from_millis(
             self.config.polling.signal_interval_ms,
         ));
-        let mut flush_tick = interval(Duration::from_secs(30)); // Flush trade log every 30s
+        let mut flush_tick = interval(Duration::from_secs(self.config.misc.trade_log_flush_secs));
 
         loop {
             tokio::select! {
@@ -315,7 +320,7 @@ impl Bot {
         price_handles.ws_handle.abort();
         price_handles.receiver_handle.abort();
 
-        let _ = tokio::time::timeout(Duration::from_secs(5), async {
+        let _ = tokio::time::timeout(Duration::from_secs(self.config.misc.shutdown_timeout_secs), async {
             if !settlement_done {
                 let _ = settlement_handle.await;
             }
@@ -365,8 +370,8 @@ impl Bot {
         };
 
         let buf_len = self.price_source.buffer_len().await;
-        if buf_len < 60 {
-            let detail = format!("buffer={}/60", buf_len);
+        if buf_len < self.config.price_source.buffer_min_ticks {
+            let detail = format!("buffer={}/{}", buf_len, self.config.price_source.buffer_min_ticks);
             self.state
                 .write()
                 .await

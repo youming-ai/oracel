@@ -21,21 +21,17 @@ Example: market prices YES at 0.88, NO at 0.12
   → buy DOWN at 0.12, payout $1 per share if correct
 ```
 
-## 2. Price Sources
+## 2. Price Source
 
-The bot supports multiple price feeds via WebSocket:
+The bot uses a Binance WebSocket feed for BTC/USDT prices:
 
 - **Binance** (default): `BTCUSDT` via `wss://stream.binance.com:9443/ws`
-- **Coinbase**: `BTC-USD` via Coinbase Advanced Trade WebSocket
 
-Configuration in `config.json`:
-```json
-{
-  "price_source": {
-    "source": "binance",
-    "symbol": "BTCUSDT"
-  }
-}
+Configuration in `config.toml`:
+```toml
+[price_source]
+source = "binance"
+symbol = "BTCUSDT"
 ```
 
 The bot maintains a rolling buffer of price ticks. WebSocket connections automatically reconnect on disconnection.
@@ -125,6 +121,7 @@ The bot implements basic risk controls:
 | One trade per window | At most one trade per 5-minute settlement window | Hard limit |
 | Zero balance guard | Reject trades when balance ≤ 0 | Hard block |
 | Daily loss limit gate | If `daily_loss_limit_usdc > 0` and `daily_pnl < -daily_loss_limit_usdc`, skip new trades | Hard block (`0` disables) |
+| Circuit breaker | Sliding-window win rate check over last N trades | Blocks trading if win rate below threshold (`0` disables) |
 | FAK retries | Retry failed FAK orders up to `max_fak_retries` times with `fak_backoff_ms` delay | Automatic retry |
 
 **Note**: The bot focuses on capturing opportunities in the brief 5-minute window. Balance is the primary protection mechanism.

@@ -1,4 +1,4 @@
-//! Bot configuration
+//! Bot configuration — loaded from `config.toml`.
 
 use rust_decimal::Decimal;
 use secrecy::SecretString;
@@ -10,15 +10,28 @@ fn dec(s: &'static str) -> Decimal {
     Decimal::from_str_exact(s).expect(s)
 }
 
-mod defaults {
+pub(crate) mod defaults {
     use super::*;
 
+    // ─── Trading ───
+    pub fn paper_starting_balance() -> Decimal {
+        dec("100")
+    }
+
+    // ─── Market ───
     pub fn stale_threshold_ms() -> i64 {
         30_000
     }
     pub fn min_ttl_ms() -> i64 {
         30_000
     }
+
+    // ─── Polymarket CLOB ───
+    pub fn gamma_api_url() -> String {
+        "https://gamma-api.polymarket.com".to_string()
+    }
+
+    // ─── Strategy ───
     pub fn extreme_threshold() -> Decimal {
         dec("0.90")
     }
@@ -49,6 +62,8 @@ mod defaults {
     pub fn circuit_breaker_min_win_rate() -> Decimal {
         dec("0.05")
     }
+
+    // ─── Risk ───
     pub fn daily_loss_limit() -> Decimal {
         dec("0")
     }
@@ -58,18 +73,92 @@ mod defaults {
     pub fn fak_backoff_ms() -> u64 {
         3_000
     }
+
+    // ─── Polling ───
+    pub fn signal_interval_ms() -> u64 {
+        1_000
+    }
     pub fn status_interval_ms() -> u64 {
         10_000
     }
+    pub fn market_refresh_secs() -> u64 {
+        60
+    }
+    pub fn settlement_check_secs() -> u64 {
+        15
+    }
+
+    // ─── Execution ───
     pub fn slippage_tolerance() -> Decimal {
         dec("0.01")
     }
+
+    // ─── Price Source ───
     pub fn symbol() -> String {
         "BTCUSDT".to_string()
     }
-    pub fn private_key() -> SecretString {
-        SecretString::new(String::new().into())
+    pub fn price_buffer_max() -> usize {
+        1000
     }
+    pub fn price_buffer_min_ticks() -> usize {
+        60
+    }
+
+    // ─── Timeouts ───
+    pub fn gamma_http_timeout_secs() -> u64 {
+        10
+    }
+    pub fn ws_connect_timeout_secs() -> u64 {
+        10
+    }
+    pub fn ws_max_backoff_secs() -> u64 {
+        60
+    }
+    pub fn clob_price_timeout_secs() -> u64 {
+        10
+    }
+    pub fn clob_auth_timeout_secs() -> u64 {
+        15
+    }
+    pub fn clob_order_timeout_secs() -> u64 {
+        15
+    }
+    pub fn rpc_connect_timeout_secs() -> u64 {
+        30
+    }
+    pub fn rpc_redeem_timeout_secs() -> u64 {
+        30
+    }
+    pub fn balance_query_timeout_secs() -> u64 {
+        10
+    }
+
+    // ─── Redeem ───
+    pub fn redeem_max_retries() -> u32 {
+        10
+    }
+    pub fn redeem_delay_secs() -> u64 {
+        5
+    }
+    pub fn redeem_concurrency() -> usize {
+        5
+    }
+
+    // ─── Misc ───
+    pub fn trade_log_flush_secs() -> u64 {
+        30
+    }
+    pub fn shutdown_timeout_secs() -> u64 {
+        5
+    }
+    pub fn market_search_windows() -> u32 {
+        5
+    }
+    pub fn resolution_price_threshold() -> f64 {
+        0.999
+    }
+
+    // ─── Time Windows ───
     pub fn window1_start() -> u32 {
         0
     }
@@ -82,7 +171,13 @@ mod defaults {
     pub fn window2_end() -> u32 {
         24
     }
+
+    pub fn private_key() -> SecretString {
+        SecretString::new(String::new().into())
+    }
 }
+
+// ─── Top-level Config ───
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -92,7 +187,9 @@ pub struct Config {
     pub market: MarketConfig,
     #[serde(default)]
     pub polyclob: PolymarketConfig,
+    #[serde(default)]
     pub strategy: StrategyConfig,
+    #[serde(default)]
     pub risk: RiskConfig,
     #[serde(default)]
     pub polling: PollingConfig,
@@ -100,6 +197,12 @@ pub struct Config {
     pub price_source: PriceSourceConfig,
     #[serde(default)]
     pub execution: ExecutionConfig,
+    #[serde(default)]
+    pub timeouts: TimeoutConfig,
+    #[serde(default)]
+    pub redeem: RedeemConfig,
+    #[serde(default)]
+    pub misc: MiscConfig,
     /// Two time windows for trade log monitoring (UTC hours, 0-24).
     /// Each window is a half-open interval [start_hour, end_hour).
     /// Supports wrap-around (e.g. start=22, end=6 means 22:00-06:00 UTC).
@@ -140,7 +243,13 @@ impl std::fmt::Display for TradingMode {
 pub struct TradingConfig {
     #[serde(default)]
     pub mode: TradingMode,
-    /// Loaded from PRIVATE_KEY env var (not stored in config.json)
+    /// Starting balance for paper mode.
+    #[serde(
+        default = "defaults::paper_starting_balance",
+        with = "rust_decimal::serde::float"
+    )]
+    pub paper_starting_balance: Decimal,
+    /// Loaded from PRIVATE_KEY env var (not stored in config)
     #[serde(skip, default = "defaults::private_key")]
     pub private_key: SecretString,
 }
@@ -159,6 +268,7 @@ pub struct MarketConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolymarketConfig {
+    #[serde(default = "defaults::gamma_api_url")]
     pub gamma_api_url: String,
 }
 
@@ -236,9 +346,16 @@ pub struct RiskConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PollingConfig {
+    #[serde(default = "defaults::signal_interval_ms")]
     pub signal_interval_ms: u64,
     #[serde(default = "defaults::status_interval_ms")]
     pub status_interval_ms: u64,
+    /// Market discovery refresh interval in seconds.
+    #[serde(default = "defaults::market_refresh_secs")]
+    pub market_refresh_secs: u64,
+    /// Settlement check interval in seconds.
+    #[serde(default = "defaults::settlement_check_secs")]
+    pub settlement_check_secs: u64,
 }
 
 // ─── Execution ───
@@ -278,14 +395,78 @@ pub struct PriceSourceConfig {
     pub source: PriceSourceType,
     #[serde(default = "defaults::symbol")]
     pub symbol: String,
+    /// Maximum number of price ticks retained in the buffer.
+    #[serde(default = "defaults::price_buffer_max")]
+    pub buffer_max: usize,
+    /// Minimum buffer ticks required before the bot starts trading.
+    #[serde(default = "defaults::price_buffer_min_ticks")]
+    pub buffer_min_ticks: usize,
 }
 
-fn is_valid_binance_symbol(symbol: &str) -> bool {
-    !symbol.is_empty()
-        && symbol
-            .bytes()
-            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
-        && !symbol.contains('-')
+// ─── Timeouts ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeoutConfig {
+    /// Gamma API HTTP request timeout (seconds).
+    #[serde(default = "defaults::gamma_http_timeout_secs")]
+    pub gamma_http_secs: u64,
+    /// WebSocket connect timeout (seconds).
+    #[serde(default = "defaults::ws_connect_timeout_secs")]
+    pub ws_connect_secs: u64,
+    /// WebSocket reconnect max backoff (seconds).
+    #[serde(default = "defaults::ws_max_backoff_secs")]
+    pub ws_max_backoff_secs: u64,
+    /// CLOB price query timeout (seconds).
+    #[serde(default = "defaults::clob_price_timeout_secs")]
+    pub clob_price_secs: u64,
+    /// CLOB authentication timeout (seconds).
+    #[serde(default = "defaults::clob_auth_timeout_secs")]
+    pub clob_auth_secs: u64,
+    /// CLOB order post timeout (seconds).
+    #[serde(default = "defaults::clob_order_timeout_secs")]
+    pub clob_order_secs: u64,
+    /// RPC connect timeout for balance/redeem queries (seconds).
+    #[serde(default = "defaults::rpc_connect_timeout_secs")]
+    pub rpc_connect_secs: u64,
+    /// RPC redeem transaction timeout (seconds).
+    #[serde(default = "defaults::rpc_redeem_timeout_secs")]
+    pub rpc_redeem_secs: u64,
+    /// USDC balanceOf query timeout (seconds).
+    #[serde(default = "defaults::balance_query_timeout_secs")]
+    pub balance_query_secs: u64,
+}
+
+// ─── Redeem ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedeemConfig {
+    /// Maximum retry attempts for on-chain redemption.
+    #[serde(default = "defaults::redeem_max_retries")]
+    pub max_retries: u32,
+    /// Delay between successive redemption transactions (seconds).
+    #[serde(default = "defaults::redeem_delay_secs")]
+    pub delay_secs: u64,
+    /// Concurrency limit for redeemable position scanning.
+    #[serde(default = "defaults::redeem_concurrency")]
+    pub concurrency: usize,
+}
+
+// ─── Misc ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MiscConfig {
+    /// Trade log flush interval (seconds).
+    #[serde(default = "defaults::trade_log_flush_secs")]
+    pub trade_log_flush_secs: u64,
+    /// Graceful shutdown timeout (seconds).
+    #[serde(default = "defaults::shutdown_timeout_secs")]
+    pub shutdown_timeout_secs: u64,
+    /// Number of future 5-minute windows to search during market discovery.
+    #[serde(default = "defaults::market_search_windows")]
+    pub market_search_windows: u32,
+    /// Outcome price threshold to determine a winning resolution (0.0-1.0).
+    #[serde(default = "defaults::resolution_price_threshold")]
+    pub resolution_price_threshold: f64,
 }
 
 // ─── Time Windows ───
@@ -309,12 +490,21 @@ pub struct TimeWindowsConfig {
     pub window2_end: u32,
 }
 
+fn is_valid_binance_symbol(symbol: &str) -> bool {
+    !symbol.is_empty()
+        && symbol
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+        && !symbol.contains('-')
+}
+
 // ─── Defaults ───
 
 impl Default for TradingConfig {
     fn default() -> Self {
         Self {
             mode: TradingMode::default(),
+            paper_starting_balance: defaults::paper_starting_balance(),
             private_key: defaults::private_key(),
         }
     }
@@ -332,7 +522,7 @@ impl Default for MarketConfig {
 impl Default for PolymarketConfig {
     fn default() -> Self {
         Self {
-            gamma_api_url: "https://gamma-api.polymarket.com".to_string(),
+            gamma_api_url: defaults::gamma_api_url(),
         }
     }
 }
@@ -375,8 +565,10 @@ impl Default for ExecutionConfig {
 impl Default for PollingConfig {
     fn default() -> Self {
         Self {
-            signal_interval_ms: 1000,
+            signal_interval_ms: defaults::signal_interval_ms(),
             status_interval_ms: defaults::status_interval_ms(),
+            market_refresh_secs: defaults::market_refresh_secs(),
+            settlement_check_secs: defaults::settlement_check_secs(),
         }
     }
 }
@@ -386,6 +578,45 @@ impl Default for PriceSourceConfig {
         Self {
             source: PriceSourceType::Binance,
             symbol: defaults::symbol(),
+            buffer_max: defaults::price_buffer_max(),
+            buffer_min_ticks: defaults::price_buffer_min_ticks(),
+        }
+    }
+}
+
+impl Default for TimeoutConfig {
+    fn default() -> Self {
+        Self {
+            gamma_http_secs: defaults::gamma_http_timeout_secs(),
+            ws_connect_secs: defaults::ws_connect_timeout_secs(),
+            ws_max_backoff_secs: defaults::ws_max_backoff_secs(),
+            clob_price_secs: defaults::clob_price_timeout_secs(),
+            clob_auth_secs: defaults::clob_auth_timeout_secs(),
+            clob_order_secs: defaults::clob_order_timeout_secs(),
+            rpc_connect_secs: defaults::rpc_connect_timeout_secs(),
+            rpc_redeem_secs: defaults::rpc_redeem_timeout_secs(),
+            balance_query_secs: defaults::balance_query_timeout_secs(),
+        }
+    }
+}
+
+impl Default for RedeemConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: defaults::redeem_max_retries(),
+            delay_secs: defaults::redeem_delay_secs(),
+            concurrency: defaults::redeem_concurrency(),
+        }
+    }
+}
+
+impl Default for MiscConfig {
+    fn default() -> Self {
+        Self {
+            trade_log_flush_secs: defaults::trade_log_flush_secs(),
+            shutdown_timeout_secs: defaults::shutdown_timeout_secs(),
+            market_search_windows: defaults::market_search_windows(),
+            resolution_price_threshold: defaults::resolution_price_threshold(),
         }
     }
 }
@@ -404,8 +635,8 @@ impl Default for TimeWindowsConfig {
 impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let content = fs::read_to_string(path)?;
-        let mut config: Config = serde_json::from_str(&content)?;
-        // Load secrets from env (not stored in config.json)
+        let mut config: Config = toml::from_str(&content)?;
+        // Load secrets from env (not stored in config)
         if let Ok(pk) = std::env::var("PRIVATE_KEY") {
             config.trading.private_key = SecretString::new(pk.into());
         }
@@ -413,7 +644,7 @@ impl Config {
     }
 
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
-        let content = serde_json::to_string_pretty(self)?;
+        let content = toml::to_string_pretty(self)?;
         fs::write(path, content)?;
         Ok(())
     }
@@ -459,11 +690,39 @@ impl Config {
         if self.strategy.min_ttl_for_entry_ms == 0 {
             anyhow::bail!("strategy.min_ttl_for_entry_ms must be > 0");
         }
+        if self.strategy.circuit_breaker_window > 0
+            && self.strategy.circuit_breaker_min_win_rate > one
+        {
+            anyhow::bail!("strategy.circuit_breaker_min_win_rate must be in [0, 1]");
+        }
+        // Ring buffer cap in decider is 200; window must not exceed it.
+        const RECENT_RESULTS_CAP: u32 = 200;
+        if self.strategy.circuit_breaker_window > RECENT_RESULTS_CAP {
+            anyhow::bail!(
+                "strategy.circuit_breaker_window ({}) must be <= {} (ring buffer cap)",
+                self.strategy.circuit_breaker_window,
+                RECENT_RESULTS_CAP
+            );
+        }
         if !is_valid_binance_symbol(&self.price_source.symbol) {
             anyhow::bail!(
                 "price_source.symbol must match Binance format like BTCUSDT (got {})",
                 self.price_source.symbol
             );
+        }
+        if self.price_source.buffer_max == 0 {
+            anyhow::bail!("price_source.buffer_max must be > 0");
+        }
+        if self.price_source.buffer_min_ticks > self.price_source.buffer_max {
+            anyhow::bail!(
+                "price_source.buffer_min_ticks ({}) must be <= buffer_max ({})",
+                self.price_source.buffer_min_ticks,
+                self.price_source.buffer_max
+            );
+        }
+        if self.misc.resolution_price_threshold <= 0.0 || self.misc.resolution_price_threshold > 1.0
+        {
+            anyhow::bail!("misc.resolution_price_threshold must be in (0, 1]");
         }
 
         // Validate time windows (start == end is valid — means 24h full-day window)
@@ -519,12 +778,12 @@ mod tests {
 
     #[test]
     fn test_trading_mode_serde_roundtrip() {
-        let json = r#"{"mode":"live"}"#;
-        let cfg: TradingConfig = serde_json::from_str(json).unwrap();
+        let toml_str = r#"mode = "live""#;
+        let cfg: TradingConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.mode, TradingMode::Live);
 
-        let json = r#"{"mode":"paper"}"#;
-        let cfg: TradingConfig = serde_json::from_str(json).unwrap();
+        let toml_str = r#"mode = "paper""#;
+        let cfg: TradingConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.mode, TradingMode::Paper);
     }
 
@@ -595,6 +854,13 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_rejects_buffer_min_exceeds_max() {
+        let mut cfg = Config::default();
+        cfg.price_source.buffer_min_ticks = 2000;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
     fn test_time_windows_accepts_defaults() {
         let cfg = Config::default();
         assert!(cfg.validate().is_ok());
@@ -641,13 +907,25 @@ mod tests {
     }
 
     #[test]
-    fn test_time_windows_serde_roundtrip() {
-        let json =
-            r#"{"window1_start": 6, "window1_end": 18, "window2_start": 18, "window2_end": 6}"#;
-        let tw: TimeWindowsConfig = serde_json::from_str(json).unwrap();
+    fn test_time_windows_toml_roundtrip() {
+        let toml_str = r#"
+window1_start = 6
+window1_end = 18
+window2_start = 18
+window2_end = 6
+"#;
+        let tw: TimeWindowsConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(tw.window1_start, 6);
         assert_eq!(tw.window1_end, 18);
         assert_eq!(tw.window2_start, 18);
         assert_eq!(tw.window2_end, 6);
+    }
+
+    #[test]
+    fn test_full_config_toml_roundtrip() {
+        let cfg = Config::default();
+        let toml_str = toml::to_string_pretty(&cfg).unwrap();
+        let parsed: Config = toml::from_str(&toml_str).unwrap();
+        assert!(parsed.validate().is_ok());
     }
 }

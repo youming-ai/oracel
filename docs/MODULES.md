@@ -12,7 +12,7 @@
 
 ### `src/config.rs`
 
-Central configuration management with validation. All default values are consolidated in a `defaults` submodule for a single source of truth.
+Central configuration management with validation. Loaded from `config.toml`. All default values are consolidated in a `defaults` submodule for a single source of truth.
 
 #### Key Structures
 
@@ -27,21 +27,20 @@ pub struct Config {
     pub polling: PollingConfig,
     pub price_source: PriceSourceConfig,
     pub execution: ExecutionConfig,
-}
-```
-
-**`RiskConfig`** - Risk management settings
-```rust
-pub struct RiskConfig {
-    pub max_fak_retries: u32,            // Maximum FAK order retries
+    pub timeouts: TimeoutsConfig,
+    pub redeem: RedeemConfig,
+    pub misc: MiscConfig,
+    pub time_windows: TimeWindowsConfig,
 }
 ```
 
 **`PriceSourceConfig`** - Exchange configuration
 ```rust
 pub struct PriceSourceConfig {
-    pub source: PriceSourceType,    // Binance, Coinbase, etc.
-    pub symbol: String,             // Trading pair (BTCUSDT, BTC-USD)
+    pub source: PriceSourceType,    // Binance
+    pub symbol: String,             // Trading pair (BTCUSDT)
+    pub buffer_max: usize,          // Max buffer size
+    pub buffer_min_ticks: usize,    // Min ticks before trading
 }
 ```
 
@@ -55,25 +54,19 @@ The `validate()` method performs startup checks:
 | Extreme threshold | 0 < value < 1 | `strategy.extreme_threshold must be in (0, 1)` |
 | Fair value | 0 < value < 1 | `strategy.fair_value must be in (0, 1)` |
 | Position size | > 0 | `strategy.position_size_usdc must be > 0` |
-| Symbol format | Exchange-specific | `price_source.symbol must match...` |
+| Symbol format | Binance format | `price_source.symbol must match...` |
 
 #### Symbol Format Validation
 
 **Binance Format** (`BTCUSDT`, `ETHUSDT`):
 - Uppercase letters and numbers only
 - No dashes or special characters
-- Minimum 1 character
-
-**Coinbase Format** (`BTC-USD`, `ETH-USD`):
-- Exactly one dash separator
-- Base and quote currencies must be alphanumeric
-- Both sides must be non-empty
 
 #### Usage Example
 
 ```rust
-// Load from file
-let config = Config::load(Path::new("config.json"))?;
+// Load from file (auto-generated with defaults if missing)
+let config = Config::load(Path::new("config.toml"))?;
 
 // Validate before use
 config.validate()?;
@@ -142,7 +135,6 @@ Binance ticker stream message:
 Initial backoff: 1 second
 Max backoff: 60 seconds
 Backoff multiplier: 2x
-Jitter: None (deterministic)
 ```
 
 #### Usage Example
@@ -162,55 +154,6 @@ tokio::spawn(async move {
 while let Ok(ticker) = rx.recv().await {
     println!("Price: {} at {}", ticker.price, ticker.timestamp_ms);
 }
-```
-
----
-
-### `src/data/coinbase.rs`
-
-Coinbase Advanced Trade WebSocket client.
-
-#### Key Structures
-
-**`CoinbaseClient`** - WebSocket client
-```rust
-pub struct CoinbaseClient {
-    product_id: String,
-    price_tx: broadcast::Sender<TickerUpdate>,
-}
-```
-
-#### WebSocket Message Format
-
-Coinbase ticker message:
-```json
-{
-  "channel": "ticker",
-  "events": [{
-    "tickers": [{
-      "product_id": "BTC-USD",
-      "price": "50000.00"
-    }]
-  }]
-}
-```
-
-#### Differences from Binance
-
-| Aspect | Binance | Coinbase |
-|--------|---------|----------|
-| Symbol format | BTCUSDT | BTC-USD |
-| Timestamp field | "E" (event time) | Not provided (uses local time) |
-| Stream name | `{symbol}@ticker` | `ticker` channel |
-| Price field | "c" (close) | "price" |
-
-#### Usage Example
-
-```rust
-let client = Arc::new(CoinbaseClient::new("BTC-USD"));
-let mut rx = client.subscribe();
-
-// Usage identical to Binance
 ```
 
 ---
@@ -283,8 +226,8 @@ let discovery = MarketDiscovery::new(DiscoveryConfig {
 
 // Find active market
 if let Some(market) = discovery.discover().await? {
-    println!("Trading: {} settling at {}", 
-        market.market_slug, 
+    println!("Trading: {} settling at {}",
+        market.market_slug,
         market.settlement_time
     );
 }
@@ -379,7 +322,7 @@ let order = auth.place_fak_order(
 
 ### `src/pipeline/price_source.rs`
 
-Unified price source abstraction for multi-exchange support.
+Price source abstraction for Binance WebSocket feeds.
 
 #### Key Structures
 
@@ -397,7 +340,6 @@ pub struct PriceSource {
 ```rust
 pub enum PriceClient {
     Binance(Arc<BinanceClient>),
-    Coinbase(Arc<CoinbaseClient>),
 }
 ```
 
@@ -452,105 +394,11 @@ if h.back().map(|last| ticker.timestamp_ms >= last.timestamp_ms).unwrap_or(true)
 }
 ```
 
-#### Usage Example
-
-```rust
-let price_source = Arc::new(PriceSource::new(
-    PriceSourceType::Binance,
-    "BTCUSDT",
-    1000,  // buffer size
-));
-
-// Start WebSocket
-price_source.clone().start().await;
-
-// Query prices
-if let Some(price) = price_source.latest().await {
-    println!("Current BTC: ${}", price);
-}
-
-let history = price_source.buffer_len().await;
-println!("Buffer: {} ticks", history);
-```
-
----
-
-### `src/pipeline/signal.rs`
-
-Signal detection module for extreme market sentiment.
-
-#### Key Structures
-
-**`Signal`** - Detected market signal
-```rust
-pub enum Signal {
-    Up,    // Market extremely bearish, buy UP
-    Down,  // Market extremely bullish, buy DOWN
-}
-```
-
-**`SignalComputer`** - Signal computation logic
-```rust
-pub struct SignalComputer {
-    extreme_threshold: Decimal,
-    fair_value: Decimal,
-}
-```
-
-#### Signal Detection Algorithm
-
-```rust
-fn compute_signal(&self, yes_price: Decimal, no_price: Decimal) -> Option<Signal> {
-    let total = yes_price + no_price;
-    let mkt_up = yes_price / total;
-    
-    if mkt_up > self.extreme_threshold {
-        Some(Signal::Down)  // Market bullish → buy cheap DOWN
-    } else if mkt_up < (Decimal::ONE - self.extreme_threshold) {
-        Some(Signal::Up)    // Market bearish → buy cheap UP
-    } else {
-        None  // Balanced
-    }
-}
-```
-
-#### Pre-Filter Checks
-
-Before signal computation:
-1. Price buffer has ≥60 samples
-2. Latest tick is <30 seconds old
-3. Market tokens discovered
-4. ≥30 seconds until settlement
-5. Market data available (yes/no prices > 0.01)
-
-#### Usage Example
-
-```rust
-let computer = SignalComputer::new(
-    decimal("0.95"),  // extreme_threshold
-    decimal("0.50"),  // fair_value
-);
-
-let signal = computer.compute_signal(
-    decimal("0.85"),  // yes price
-    decimal("0.15"),  // no price
-);
-
-match signal {
-    Some(Signal::Up) => println!("Signal: Buy UP"),
-    Some(Signal::Down) => println!("Signal: Buy DOWN"),
-    None => println!("No signal (balanced market)"),
-}
-
-// The decider wraps signal into a Decision:
-// Decision::Trade { direction, size_usdc, edge, payoff_ratio } or Decision::Pass(reason)
-```
-
 ---
 
 ### `src/pipeline/decider.rs`
 
-Trade decision logic and risk management.
+Signal detection, trade decision logic, and risk management. The signal computation is integrated directly into the decider — there is no separate signal module.
 
 #### Key Structures
 
@@ -594,6 +442,14 @@ pub enum Decision {
 }
 ```
 
+**`Direction`** - Trade direction
+```rust
+pub enum Direction {
+    Up,    // Market extremely bearish, buy UP
+    Down,  // Market extremely bullish, buy DOWN
+}
+```
+
 #### Decision Pipeline
 
 ```
@@ -606,48 +462,6 @@ decide()
 ├── 6. Balance > 0? → Pass("insufficient_balance")
 ├── 7. Daily loss limit? → Pass("daily_loss_limit")
 └── TRADE: Calculate position size
-```
-
-#### Position Sizing
-
-```rust
-fn calculate_position_size(position_size_usdc: Decimal, entry_price: Decimal) -> Decimal {
-    // Calculate shares from fixed position size
-    let shares = (position_size_usdc / entry_price).floor();
-    
-    // Zero-share guard
-    if shares > Decimal::ZERO {
-        shares
-    } else {
-        Decimal::ZERO  // Reject order
-    }
-}
-```
-
-#### Usage Example
-
-```rust
-let account = AccountState::new(decimal("1000"));
-let cfg = DeciderConfig::default();
-
-let decision = decide(
-    &DecideContext {
-        market_yes: Some(decimal("0.85")),
-        market_no: Some(decimal("0.15")),
-        remaining_ms: 120000,
-    },
-    &account,
-    &cfg,
-);
-
-match decision {
-    Decision::Trade { direction, size_usdc, edge } => {
-        println!("Trade: {:?} ${} (edge: {})", direction, size_usdc, edge);
-    }
-    Decision::Pass(reason) => {
-        println!("No trade: {}", reason);
-    }
-}
 ```
 
 ---
@@ -677,94 +491,15 @@ pub struct ExecuteContext<'a> {
     pub settlement_time_ms: i64,
     pub btc_price: Decimal,
 }
-
-**`PaperOrder`** - Simulated order result
-```rust
-pub struct PaperOrder {
-    pub order_id: String,
-    pub filled_shares: Decimal,
-    pub cost: Decimal,
-}
 ```
 
 #### Execution Modes
 
-**Paper Mode**:
-```rust
-fn execute_paper(&self, ctx: &ExecuteContext<'_>) -> Option<PaperOrder> {
-    // Generate UUID
-    let order_id = Uuid::new_v4().to_string();
-    
-    // Calculate shares
-    let shares = calculate_shares(ctx);
-    if shares == 0 {
-        return None;  // Zero-share guard
-    }
-    
-    Some(PaperOrder { order_id, filled_shares: shares, cost })
-}
-```
+**Paper Mode**: Generates UUID order ID, calculates shares, returns `PaperOrder`.
 
-**Live Mode**:
-```rust
-async fn execute_live(&self, ctx: &ExecuteContext<'_>) -> Option<LiveOrder> {
-    // Get authenticated client
-    let client = self.auth_client.as_ref()?;
-    
-    // Calculate shares
-    let shares = calculate_shares(ctx);
-    if shares == 0 {
-        return None;
-    }
-    
-    // Place FAK order
-    let response = client.place_fak_order(
-        &token_id,
-        OrderSide::Buy,
-        &shares.to_string(),
-        &price.to_string(),
-    ).await.ok()?;
-    
-    Some(LiveOrder { ... })
-}
-```
+**Live Mode**: Places FAK order via CLOB, returns `LiveOrder`.
 
-#### Zero-Share Guard
-
-```rust
-fn calculate_shares(size_usdc: Decimal, price: Decimal) -> Option<Decimal> {
-    let shares = (size_usdc / price).floor();
-    if shares > Decimal::ZERO {
-        Some(shares)
-    } else {
-        tracing::warn!("Zero shares calculated, rejecting order");
-        None
-    }
-}
-```
-
-#### Usage Example
-
-```rust
-let executor = Executor::new(TradingMode::Paper, None);
-
-let ctx = ExecuteContext {
-    decision: &decision,
-    token_yes: &market.token_yes,
-    token_no: &market.token_no,
-    poly_yes: Some(decimal("0.15")),
-    poly_no: Some(decimal("0.85")),
-    settlement_time_ms,
-    btc_price: 50000.0,
-};
-
-if let Some(order) = executor.execute(&ctx).await {
-    println!("Executed: {} shares for ${}", 
-        order.filled_shares, 
-        order.cost
-    );
-}
-```
+Both modes apply zero-share guard (reject if shares == 0).
 
 ---
 
@@ -809,86 +544,20 @@ pub struct Settler {
 #### Key Methods
 
 ```rust
-// Add new position (prevents duplicates)
-pub fn add_position(&mut self, pos: PendingPosition)
-
-// Get positions ready for settlement
-pub fn due_positions(&self) -> Vec<PendingPosition>
-
-// Settle positions by market slug
+pub fn add_position(&mut self, pos: PendingPosition)  // prevents duplicates
+pub fn due_positions(&self) -> Vec<PendingPosition>    // past settlement time
 pub fn settle_by_slug(&mut self, slug: &str, won: bool) -> Option<SettlementResult>
-```
-
-#### Settlement Logic
-
-```rust
-fn settle(&mut self, position: PendingPosition, won: bool) -> SettlementResult {
-    let payout = if won {
-        position.filled_shares  // Each share pays $1
-    } else {
-        Decimal::ZERO
-    };
-    
-    let pnl = payout - position.cost;
-    
-    SettlementResult {
-        payout,
-        pnl,
-        won,
-        ...
-    }
-}
 ```
 
 #### Duplicate Prevention
 
 ```rust
 fn add_position(&mut self, pos: PendingPosition) {
-    // Check for existing position with same condition_id
     if self.pending.iter().any(|p| p.condition_id == pos.condition_id) {
         tracing::warn!("Duplicate position, skipping");
         return;
     }
     self.pending.push_back(pos);
-}
-```
-
-#### Position Combining
-
-When multiple positions exist for same market:
-```rust
-fn combine_positions(&self, positions: Vec<PendingPosition>) -> PendingPosition {
-    PendingPosition {
-        size_usdc: positions.iter().map(|p| p.size_usdc).sum(),
-        filled_shares: positions.iter().map(|p| p.filled_shares).sum(),
-        cost: positions.iter().map(|p| p.cost).sum(),
-        // Use first position for other fields
-        ...
-    }
-}
-```
-
-#### Usage Example
-
-```rust
-let mut settler = Settler::new();
-
-// Add position
-settler.add_position(PendingPosition {
-    direction: Direction::Up,
-    size_usdc: decimal("10"),
-    entry_price: decimal("0.15"),
-    filled_shares: decimal("66"),
-    cost: decimal("9.9"),
-    settlement_time_ms,
-    condition_id: "0xabc...".to_string(),
-    market_slug: "btc-updown-5m-123".to_string(),
-});
-
-// Check for settled positions
-if market_resolved {
-    let result = settler.settle_by_slug(&slug, won).unwrap();
-    println!("Settled: PnL = ${}", result.pnl);
 }
 ```
 

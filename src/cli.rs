@@ -56,11 +56,11 @@ async fn redeem_all() -> Result<()> {
 
     eprintln!("Scanning recent markets for redeemable positions...\n");
 
-    let config_path = Path::new("config.json");
+    let config_path = Path::new("config.toml");
     let config = if config_path.exists() {
         Config::load(config_path)?
     } else {
-        anyhow::bail!("config.json not found");
+        anyhow::bail!("config.toml not found");
     };
 
     let private_key = if !config.trading.private_key.expose_secret().is_empty() {
@@ -157,7 +157,7 @@ async fn redeem_one(slug: &str) -> Result<()> {
     use data::market_discovery::{self, GammaMarket, ResolutionState};
     use data::polymarket;
 
-    let config_path = Path::new("config.json");
+    let config_path = Path::new("config.toml");
     let config = Config::load(config_path)?;
 
     let private_key = if !config.trading.private_key.expose_secret().is_empty() {
@@ -202,6 +202,7 @@ async fn redeem_one(slug: &str) -> Result<()> {
     let resolution = market_json.and_then(|m| {
         let state = market_discovery::infer_resolution_state(
             &serde_json::from_value::<GammaMarket>(m.clone()).ok()?,
+            0.99,
         )?;
         Some(state)
     });
