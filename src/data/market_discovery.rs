@@ -224,7 +224,10 @@ fn parse_json_string_array(value: &Option<String>) -> Option<Vec<String>> {
     serde_json::from_str::<Vec<String>>(raw).ok()
 }
 
-pub fn infer_resolution_state(market: &GammaMarket, resolution_price_threshold: f64) -> Option<ResolutionState> {
+pub fn infer_resolution_state(
+    market: &GammaMarket,
+    resolution_price_threshold: f64,
+) -> Option<ResolutionState> {
     let status = match market.uma_resolution_status.as_deref() {
         Some(s) => s.to_ascii_lowercase(),
         None => return Some(ResolutionState::Pending), // not yet published, wait silently

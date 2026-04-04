@@ -89,6 +89,8 @@ React + Vite + Tailwind app in `dashboard/`. Reads `trades.csv` and `balance` fi
 - `config.toml` — Main config. Validated on startup. Auto-generated with defaults if missing.
 - `.env` — `PRIVATE_KEY` (live mode only), `ALCHEMY_KEY` (optional Polygon RPC)
 - Two modes: `paper` (simulated, default $100 balance) and `live` (real orders, on-chain balance sync)
+  - **Paper**: No auth/private key needed. Orders are simulated (UUID, instant fill). Balance tracked in-memory. No on-chain interaction. Logs to `logs/paper/`.
+  - **Live**: Requires `PRIVATE_KEY`. Authenticates with CLOB, places real FAK orders, queries on-chain USDC balance each tick (with lazy reconnect if RPC fails at init), redeems winning CTF positions on-chain. Uses Alchemy RPC (falls back to public). FAK rejection tracking with backoff. Logs to `logs/live/`.
 - `time_windows` section configures two monitoring windows for the dashboard (UTC hours, supports wrap-around)
 
 ## Logs & State Files

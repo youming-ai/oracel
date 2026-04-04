@@ -95,7 +95,7 @@ impl Bot {
         let initial_balance = if config.trading.mode.is_paper() {
             Self::load_balance(&log_dir)
                 .await
-                .unwrap_or_else(|| config.trading.paper_starting_balance)
+                .unwrap_or(config.trading.paper_starting_balance)
         } else {
             let rpc = data::polymarket::rpc_url(config.trading.mode);
             if let Some(ref r) = redeemer {
@@ -145,7 +145,7 @@ impl Bot {
                             }
                             Err(e) => {
                                 tracing::warn!(
-                                    "[INIT] BalanceChecker init failed: {}, will query per-tick",
+                                    "[INIT] BalanceChecker init failed: {}, will retry on next tick",
                                     e
                                 );
                                 None
@@ -320,17 +320,20 @@ impl Bot {
         price_handles.ws_handle.abort();
         price_handles.receiver_handle.abort();
 
-        let _ = tokio::time::timeout(Duration::from_secs(self.config.misc.shutdown_timeout_secs), async {
-            if !settlement_done {
-                let _ = settlement_handle.await;
-            }
-            if !refresher_done {
-                let _ = refresher_handle.await;
-            }
-            if !status_done {
-                let _ = status_handle.await;
-            }
-        })
+        let _ = tokio::time::timeout(
+            Duration::from_secs(self.config.misc.shutdown_timeout_secs),
+            async {
+                if !settlement_done {
+                    let _ = settlement_handle.await;
+                }
+                if !refresher_done {
+                    let _ = refresher_handle.await;
+                }
+                if !status_done {
+                    let _ = status_handle.await;
+                }
+            },
+        )
         .await;
 
         // Final flush of trade log on shutdown
@@ -345,19 +348,44 @@ impl Bot {
         DeciderConfig::from(&self.config)
     }
 
-    async fn tick(&self) -> Result<()> {
-        if let Some(ref checker) = self.balance_checker {
-            match checker.balance().await {
-                Ok(on_chain_bal) => {
-                    let mut account = self.account.write().await;
-                    account.balance = on_chain_bal;
-                    drop(account); // Release lock early
-
-                    util::write_balance(&self.log_dir, on_chain_bal).await;
-                    tracing::debug!("[BALANCE] Wrote balance: ${:.2}", on_chain_bal);
+    async fn tick(&mut self) -> Result<()> {
+        // Live mode: query on-chain USDC balance each tick.
+        // If the BalanceChecker was not created at init (e.g. RPC timeout),
+        // attempt to reconnect lazily so live mode always reflects on-chain state.
+        if self.config.trading.mode.is_live() {
+            if self.balance_checker.is_none() {
+                if let Some(ref r) = self.redeemer {
+                    if let Ok(wallet) = r.wallet_address() {
+                        let rpc = data::polymarket::rpc_url(self.config.trading.mode);
+                        match BalanceChecker::new(wallet, rpc).await {
+                            Ok(checker) => {
+                                tracing::info!("[BAL] BalanceChecker reconnected");
+                                self.balance_checker = Some(checker);
+                            }
+                            Err(e) => {
+                                tracing::debug!(
+                                    "[BAL] BalanceChecker reconnect failed: {}, will retry",
+                                    e
+                                );
+                            }
+                        }
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("[BAL] Failed to query on-chain USDC balance: {}", e);
+            }
+
+            if let Some(ref checker) = self.balance_checker {
+                match checker.balance().await {
+                    Ok(on_chain_bal) => {
+                        let mut account = self.account.write().await;
+                        account.balance = on_chain_bal;
+                        drop(account); // Release lock early
+
+                        util::write_balance(&self.log_dir, on_chain_bal).await;
+                        tracing::debug!("[BALANCE] Wrote balance: ${:.2}", on_chain_bal);
+                    }
+                    Err(e) => {
+                        tracing::warn!("[BAL] Failed to query on-chain USDC balance: {}", e);
+                    }
                 }
             }
         }
@@ -371,7 +399,10 @@ impl Bot {
 
         let buf_len = self.price_source.buffer_len().await;
         if buf_len < self.config.price_source.buffer_min_ticks {
-            let detail = format!("buffer={}/{}", buf_len, self.config.price_source.buffer_min_ticks);
+            let detail = format!(
+                "buffer={}/{}",
+                buf_len, self.config.price_source.buffer_min_ticks
+            );
             self.state
                 .write()
                 .await
