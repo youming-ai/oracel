@@ -18,6 +18,18 @@
 - **systemd**: For service management (Linux)
 - **tmux/screen**: Alternative process management
 
+### Environment Setup
+
+```bash
+# Install Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+
+# Verify installation
+rustc --version
+cargo --version
+```
+
 ---
 
 ## Installation
@@ -32,13 +44,15 @@ cd oracel
 ### 2. Build Release Binary
 
 ```bash
+# Build optimized release binary
 cargo build --release
-# Binaries: ./target/release/polybot and ./target/release/polybot-tools
+
+# Binaries: ./target/release/polybot (bot) and ./target/release/polybot-tools (CLI)
 ```
 
 ### 3. Create Configuration
 
-Edit `config.toml` with your settings. A default config is auto-generated on first run.
+Edit `config.toml` with your settings.
 
 ### 4. Setup Environment Variables
 
@@ -50,32 +64,51 @@ ALCHEMY_KEY=your_alchemy_key_here
 EOF
 ```
 
-**Security Note**: Never commit `.env` to version control.
+**Required**:
+```bash
+# .env
+PRIVATE_KEY=0x...your_private_key...
+ALCHEMY_KEY=...optional_alchemy_key...
+```
+
+**Security Note**: Never commit `.env` or `config.toml` with real keys to version control.
 
 ---
 
 ## Running the Bot
 
+The bot auto-launches a ratatui-based terminal dashboard (TUI) in a dedicated thread. It renders at ~4Hz, sharing state with the bot via `Arc<RwLock<TuiState>>`, and exits cleanly when you press `q` or `Esc` (also used to scroll the trade table). When running under `systemd` or `tmux`, the TUI takes over the controlling terminal, so plain log streaming via `journalctl` / `tail` is the way to inspect historical output.
+
 ### Development/Testing
 
 ```bash
-cargo run                # debug
-cargo run --release      # release
+# Run in development mode
+cargo run
+
+# Run with release optimizations
+cargo run --release
 ```
 
 ### Production
 
 ```bash
+# Run release binary directly
 ./target/release/polybot
+
+# Or with logging
 RUST_LOG=info ./target/release/polybot
 ```
 
 ### Using tmux (Simple)
 
 ```bash
+# Create new session
 tmux new -s polybot
+
+# Run bot
 cd /path/to/oracel
 ./target/release/polybot
+
 # Detach: Ctrl+B, then D
 # Reattach: tmux attach -t polybot
 ```
@@ -87,6 +120,13 @@ cd /path/to/oracel
 ### 1. Create Service File
 
 Edit the provided template:
+
+```bash
+# Edit the service template
+vim deploy/polybot.service
+```
+
+**Update paths** in `deploy/polybot.service`:
 
 ```ini
 [Unit]
@@ -107,56 +147,124 @@ Environment=RUST_LOG=info
 WantedBy=multi-user.target
 ```
 
-### 2. Install Service
+### 2. Create User (Optional but Recommended)
 
 ```bash
+# Create dedicated user
+sudo useradd -m -s /bin/bash polybot
+
+# Set permissions
+sudo chown -R polybot:polybot /home/polybot/oracel
+```
+
+### 3. Install Service
+
+```bash
+# Copy service file
 sudo cp deploy/polybot.service /etc/systemd/system/
+
+# Reload systemd
 sudo systemctl daemon-reload
+
+# Enable service (start on boot)
 sudo systemctl enable polybot
+
+# Start service
 sudo systemctl start polybot
 ```
 
-### 3. Manage Service
+### 4. Manage Service
 
 ```bash
-sudo systemctl status polybot    # check status
-sudo journalctl -u polybot -f    # view logs
-sudo systemctl restart polybot   # restart
-sudo systemctl stop polybot      # stop
+# Check status
+sudo systemctl status polybot
+
+# View logs
+sudo journalctl -u polybot -f
+
+# Restart
+sudo systemctl restart polybot
+
+# Stop
+sudo systemctl stop polybot
+
+# Disable (don't start on boot)
+sudo systemctl disable polybot
+```
+
+---
+
+## Docker Deployment (Optional)
+
+### Dockerfile
+
+Create `Dockerfile`:
+
+```dockerfile
+FROM rust:1.75 as builder
+
+WORKDIR /app
+COPY . .
+RUN cargo build --release
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY --from=builder /app/target/release/polybot /app/polybot
+COPY --from=builder /app/target/release/polybot-tools /app/polybot-tools
+COPY config.toml /app/config.toml
+
+# Create non-root user
+RUN useradd -m -u 1000 bot && chown -R bot:bot /app
+USER bot
+
+CMD ["./polybot"]
+```
+
+### Build and Run
+
+```bash
+# Build image
+docker build -t polybot .
+
+# Run with environment
+docker run -d \
+  --name polybot \
+  -v $(pwd)/.env:/app/.env:ro \
+  -v $(pwd)/logs:/app/logs \
+  polybot
+
+# View logs
+docker logs -f polybot
 ```
 
 ---
 
 ## Log Monitoring
 
-### Web Dashboard
+### Real-time Log Monitoring
 
-```bash
-cd dashboard
-bun run dev                    # paper mode
-BOT_MODE=live bun run dev      # live mode
-```
-
-### Log Files
+The bot logs to files and the terminal dashboard (TUI). Logs are stored in `logs/`:
 
 ```
 logs/
-├── paper/
-│   ├── bot.log
-│   ├── trades.csv
-│   └── balance
-└── live/
-    ├── bot.log
-    ├── trades.csv
-    ├── balance
-    └── time_windows.json
+├── bot.log          # Runtime logs
+├── trades.csv       # Trade history
+└── balance          # Current balance
 ```
 
 ### Log Rotation
 
+Set up log rotation to prevent disk fill:
+
 ```bash
+# Create logrotate config
 sudo tee /etc/logrotate.d/polybot << 'EOF'
-/home/*/oracel/logs/*/bot.log {
+/home/*/oracel/logs/bot.log {
     daily
     rotate 7
     compress
@@ -172,18 +280,20 @@ EOF
 
 ## Backup and Recovery
 
+### Recovery
+
 The bot uses in-memory state only. On restart:
-- Paper mode: Resumes with balance from `logs/paper/balance` (default $100)
-- Live mode: Syncs balance from chain
-- Pending positions: 5-minute markets settle before any realistic restart
+- Balance synced from chain
+- Pending positions: 5-minute markets settle before any realistic restart, so no persistence needed
 
 ### Critical Files to Backup
 
 ```bash
+# Create backup archive
 tar czf polybot_backup_$(date +%Y%m%d).tar.gz \
   config.toml \
   .env \
-  logs/*/balance
+  logs/balance
 ```
 
 ---
@@ -193,24 +303,33 @@ tar czf polybot_backup_$(date +%Y%m%d).tar.gz \
 ### Process Health
 
 ```bash
+# Check if running
 pgrep -f polybot
+
 # Or with systemd
 systemctl is-active polybot
 ```
 
 ### Log Health Indicators
 
-**Healthy**:
+**Healthy signs**:
 ```
-[STATUS] live | BTC=$50000 bal=$1010.00 pnl=+10.00 | 10W/5L streak=2 | pending=0
+[INIT] Starting balance: $1010.00
+[STATUS] BTC=$50000 balance=$1010.00 pnl=+10.00
 [TRADE] DOWN @ 0.150 edge=35% BTC=$50000
 ```
 
-**Warning**:
+**Warning signs**:
 ```
-[RISK] Daily loss limit reached...
-[WS] Price receiver lagged by 1000 messages
-[SKIP] no_market_data
+[RISK] Daily loss limit reached...  # High losses
+[WS] Price receiver lagged by 1000 messages  # Connection issues
+[SKIP] no_market_data  # API issues
+```
+
+**Error signs**:
+```
+Error: CLOB auth failed  # Authentication issue
+Error: price_source.symbol must match...  # Config error
 ```
 
 ---
@@ -219,58 +338,206 @@ systemctl is-active polybot
 
 ### Bot Won't Start
 
+**Check configuration**:
 ```bash
 # Validate config
 cargo run --release 2>&1 | head -20
 ```
 
-Common issues: invalid TOML syntax, out-of-range values, wrong symbol format.
+**Common issues**:
+- Invalid JSON syntax
+- Missing required fields
+- Out-of-range values
+- Wrong symbol format
 
 ### WebSocket Connection Issues
 
+**Symptoms**: No price updates, stale data
+
+**Solutions**:
 ```bash
+# Check internet connection
 ping stream.binance.com
+
 # Check firewall
 sudo ufw status
 ```
 
 ### Authentication Failures
 
+**Symptoms**: "CLOB auth failed" errors
+
+**Solutions**:
 1. Verify `PRIVATE_KEY` in `.env`
 2. Check key format (should start with `0x`)
-3. Try deriving keys: `cargo run --release --bin polybot-tools -- --derive-keys`
+3. Ensure account has USDC balance
+4. Try deriving keys: `cargo run --release --bin polybot-tools -- --derive-keys`
+
+### High Memory Usage
+
+**Causes**:
+- Long runtime without restart
+- Excessive logging
+- Too many pending positions
+
+**Solutions**:
+```bash
+# Restart periodically (cron)
+0 0 * * * systemctl restart polybot
+
+# Reduce log level
+RUST_LOG=warn ./target/release/polybot
+```
 
 ---
 
 ## Security Best Practices
 
+### 1. File Permissions
+
 ```bash
+# Restrict sensitive files
 chmod 600 .env
 chmod 600 config.toml
+
+# Run as non-root user
+sudo chown -R polybot:polybot /home/polybot/oracel
 ```
 
-- Run as non-root user
-- Never commit `.env` or private keys to version control
+### 2. Secret Management
+
+```bash
+# Never commit secrets
+echo ".env" >> .gitignore
+echo "config.toml" >> .gitignore
+
+# Use environment variables for sensitive data
+export PRIVATE_KEY=0x...
+```
+
+### 3. Network Security
+
 - Use firewall to restrict outbound connections
+- Run behind VPN if trading from restricted regions
+- Monitor for unusual network activity
+
+### 4. Key Rotation
+
+```bash
+# Generate new keys periodically
+cargo run --release --bin polybot-tools -- --derive-keys
+
+# Update .env with new keys
+# Transfer funds to new address
+```
+
+---
+
+## Performance Tuning
+
+### Compile Optimizations
+
+Already enabled in release build:
+```bash
+cargo build --release
+```
+
+### System Tuning
+
+```bash
+# Increase file descriptor limits
+ulimit -n 65535
+
+# Set in /etc/security/limits.conf
+# polybot soft nofile 65535
+# polybot hard nofile 65535
+```
+
+### Network Tuning
+
+```bash
+# Reduce TCP keepalive for faster reconnection
+sudo sysctl -w net.ipv4.tcp_keepalive_time=60
+sudo sysctl -w net.ipv4.tcp_keepalive_intvl=10
+sudo sysctl -w net.ipv4.tcp_keepalive_probes=6
+```
+
+---
+
+## Monitoring and Alerting
+
+### Basic Monitoring Script
+
+```bash
+#!/bin/bash
+# monitor.sh
+
+LOG_FILE="logs/bot.log"
+ALERT_EMAIL="admin@example.com"
+
+# Check for errors
+if tail -100 $LOG_FILE | grep -q "ERROR"; then
+    echo "Errors detected in polybot" | mail -s "Polybot Alert" $ALERT_EMAIL
+fi
+
+# Check if running
+if ! pgrep -f polybot > /dev/null; then
+    echo "Polybot not running" | mail -s "Polybot Down" $ALERT_EMAIL
+fi
+```
+
+### Prometheus Metrics (Advanced)
+
+Add metrics export for Prometheus/Grafana monitoring:
+
+```rust
+// In main.rs, add metrics endpoint
+use prometheus::{Counter, Gauge, Registry};
+
+lazy_static! {
+    static ref BALANCE_GAUGE: Gauge = Gauge::new(
+        "polybot_balance", "Current balance"
+    ).unwrap();
+}
+```
 
 ---
 
 ## Upgrade Process
 
+### 1. Backup Current State
+
 ```bash
-# 1. Backup
 cp -r logs backups/logs_$(date +%Y%m%d)
 cp config.toml backups/config_$(date +%Y%m%d).toml
+```
 
-# 2. Pull and rebuild
+### 2. Pull Updates
+
+```bash
+git fetch origin
 git pull origin main
+```
+
+### 3. Rebuild
+
+```bash
 cargo build --release
+```
 
-# 3. Restart
+### 4. Restart
+
+```bash
 sudo systemctl restart polybot
+```
 
-# 4. Verify
-tail -f logs/live/bot.log
+### 5. Verify
+
+```bash
+# Check logs
+tail -f logs/bot.log
+
+# Check status
 sudo systemctl status polybot
 ```
 
@@ -278,10 +545,15 @@ sudo systemctl status polybot
 
 ## Production Checklist
 
+Before running in production:
+
 - [ ] Built in release mode (`--release`)
-- [ ] Configuration validated (`config.toml`)
+- [ ] Configuration validated
 - [ ] Private key secured in `.env`
-- [ ] Paper mode tested thoroughly
+- [ ] Small position size verified (e.g. $1) for first live runs
 - [ ] Log rotation configured
 - [ ] systemd service enabled
 - [ ] Monitoring in place
+- [ ] Backup strategy implemented
+- [ ] Documentation reviewed
+- [ ] Emergency stop procedure known

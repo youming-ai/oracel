@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Rust trading bot for Polymarket BTC 5-minute up/down binary markets. Monitors live BTC prices via WebSocket, fetches market quotes from Polymarket CLOB, and bets against extreme market sentiment. Includes a React web dashboard for monitoring.
+Rust trading bot for Polymarket BTC 5-minute up/down binary markets. Monitors live BTC prices via WebSocket, fetches market quotes from Polymarket CLOB, and bets against extreme market sentiment. Includes a ratatui terminal dashboard.
 
 Two binaries: `polybot` (main bot) and `polybot-tools` (CLI utilities for key derivation and position redemption).
 
@@ -30,13 +30,6 @@ cargo build --locked && cargo test --locked && cargo clippy --workspace --all-ta
 
 # Security audit
 cargo audit
-
-# Dashboard (from dashboard/ directory)
-bun install                    # install deps
-bun run dev                    # dev server
-BOT_MODE=live bun run dev      # dev server reading live logs
-bun run build                  # production build (tsc -b && vite build)
-bun run lint                   # eslint
 ```
 
 ## Architecture
@@ -46,8 +39,8 @@ bun run lint                   # eslint
 The bot runs a linear pipeline each tick (`bot.rs:tick()`):
 
 1. **Price Source** (`pipeline/price_source.rs`) — WebSocket price buffer from Binance
-2. **Decider** (`pipeline/decider.rs`) — Detects extreme market sentiment → determines direction (Up/Down), evaluates entry price range, TTL, balance, daily loss limit → outputs `Trade` or `Pass`
-3. **Executor** (`pipeline/executor.rs`) — Places FAK (Fill-And-Kill) limit orders, paper-simulated or live via CLOB
+2. **Decider** (`pipeline/decider.rs`) — Signal detection + trade decision: evaluates market extremeness, spread check, BTC trend, entry price range, TTL, balance, daily loss limit, circuit breaker → outputs `Trade` or `Pass`
+3. **Executor** (`pipeline/executor.rs`) — Places FAK (Fill-And-Kill) limit orders via CLOB
 4. **Settler** (`pipeline/settler.rs`) — Tracks pending positions, resolves outcomes via Gamma API
 
 ### Core Components
@@ -60,17 +53,25 @@ The bot runs a linear pipeline each tick (`bot.rs:tick()`):
   - `binance.rs` — WebSocket price feed with auto-reconnect and exponential backoff
   - `market_discovery.rs` — Gamma API market slug generation (`btc-updown-5m-{timestamp}`) and resolution inference
   - `polymarket.rs` — CLOB client (unauthenticated price fetching + authenticated order placement), on-chain balance checker, CTF position redeemer
+- `tui/` — ratatui terminal dashboard auto-launched with bot
 
 ### Concurrency Model
 
 - `tokio` async runtime with multiple spawned background tasks
-- `Arc<RwLock<T>>` for shared mutable state (market state, account state, settler)
+- `Arc<RwLock<T>>` for shared mutable state (market state, account state, settler, TUI state)
 - `broadcast` channels for price distribution from WebSocket to pipeline
 - `AtomicBool` for graceful shutdown coordination across tasks
 
-### Dashboard
+### Terminal Dashboard (TUI)
 
-React + Vite + Tailwind app in `dashboard/`. Reads `trades.csv` and `balance` files from `logs/{mode}/` via a custom Vite middleware plugin (see `vite.config.ts`). BOT_MODE env var selects paper/live logs.
+ratatui dashboard automatically launched with the bot. Shows:
+
+- Live BTC price and market info with TTL countdown
+- Balance, PnL, win/loss stats, streak counter
+- Recent trades table (scrolling via ↑↓)
+- Current decision status
+
+Keybindings: `q` or `Esc` to quit, `↑`/`↓` to scroll trade history.
 
 ## Key Conventions
 
@@ -86,19 +87,15 @@ React + Vite + Tailwind app in `dashboard/`. Reads `trades.csv` and `balance` fi
 
 ## Configuration
 
-- `config.toml` — Main config. Validated on startup. Auto-generated with defaults if missing.
-- `.env` — `PRIVATE_KEY` (live mode only), `ALCHEMY_KEY` (optional Polygon RPC)
-- Two modes: `paper` (simulated, default $100 balance) and `live` (real orders, on-chain balance sync)
-  - **Paper**: No auth/private key needed. Orders are simulated (UUID, instant fill). Balance tracked in-memory. No on-chain interaction. Logs to `logs/paper/`.
-  - **Live**: Requires `PRIVATE_KEY`. Authenticates with CLOB, places real FAK orders, queries on-chain USDC balance each tick (with lazy reconnect if RPC fails at init), redeems winning CTF positions on-chain. Uses Alchemy RPC (falls back to public). FAK rejection tracking with backoff. Logs to `logs/live/`.
-- `time_windows` section configures two monitoring windows for the dashboard (UTC hours, supports wrap-around)
+- `config.toml` — Main config. Validated on startup.
+- `.env` — `PRIVATE_KEY` (required), `ALCHEMY_KEY` (optional Polygon RPC)
+- Always live mode — no paper simulation
 
 ## Logs & State Files
 
 ```
-logs/{paper,live}/
-  bot.log             # rolling daily log
-  trades.csv          # trade entries & settlements
-  balance             # current balance snapshot (atomic writes)
-  time_windows.json   # dashboard monitoring windows config
+logs/
+  bot.log       # rolling daily log
+  trades.csv    # trade entries & settlements
+  balance       # current balance snapshot (atomic writes)
 ```

@@ -23,15 +23,15 @@ Example: market prices YES at 0.88, NO at 0.12
 
 ## 2. Price Source
 
-The bot uses a Binance WebSocket feed for BTC/USDT prices:
-
-- **Binance** (default): `BTCUSDT` via `wss://stream.binance.com:9443/ws`
+The bot subscribes to the Binance WebSocket for the configured symbol (default `BTCUSDT`) at `wss://stream.binance.com:9443/ws`.
 
 Configuration in `config.toml`:
-```toml
-[price_source]
-source = "binance"
-symbol = "BTCUSDT"
+```json
+{
+  "price_source": {
+    "symbol": "BTCUSDT"
+  }
+}
 ```
 
 The bot maintains a rolling buffer of price ticks. WebSocket connections automatically reconnect on disconnection.
@@ -121,7 +121,6 @@ The bot implements basic risk controls:
 | One trade per window | At most one trade per 5-minute settlement window | Hard limit |
 | Zero balance guard | Reject trades when balance ≤ 0 | Hard block |
 | Daily loss limit gate | If `daily_loss_limit_usdc > 0` and `daily_pnl < -daily_loss_limit_usdc`, skip new trades | Hard block (`0` disables) |
-| Circuit breaker | Sliding-window win rate check over last N trades | Blocks trading if win rate below threshold (`0` disables) |
 | FAK retries | Retry failed FAK orders up to `max_fak_retries` times with `fak_backoff_ms` delay | Automatic retry |
 
 **Note**: The bot focuses on capturing opportunities in the brief 5-minute window. Balance is the primary protection mechanism.
@@ -138,7 +137,7 @@ The bot implements basic risk controls:
 ### Live Mode
 
 - Uses an authenticated Polymarket CLOB client (SDK-based)
-- Places a Fill-and-Kill (FAK) limit buy at the same slippage-adjusted price used in paper mode: `buy_price = mid_price * (1 + slippage_tolerance)` (capped at `0.99`)
+- Places a Fill-and-Kill (FAK) limit buy at the same slippage-adjusted price used in the executor: `buy_price = mid_price * (1 + slippage_tolerance)` (capped at `0.99`)
 - Computes `filled_shares = floor(size_usdc / price)` and sends that as the order size
 - **Zero-share guard**: If computed shares == 0, the order is rejected
 - Actual cost is `filled_shares × price`, which may be slightly less than `effective_size_usdc` due to floor truncation, or higher than configured `position_size_usdc` when the order is bumped to the $1 minimum

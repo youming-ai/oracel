@@ -22,21 +22,18 @@ pub struct Config {
     pub polling: PollingConfig,
     pub price_source: PriceSourceConfig,
     pub execution: ExecutionConfig,
-    pub timeouts: TimeoutsConfig,
-    pub redeem: RedeemConfig,
-    pub misc: MiscConfig,
-    pub time_windows: TimeWindowsConfig,
 }
 ```
 
 #### Methods
 
 **`load(path: &Path) -> Result<Self>`**
-- Loads configuration from TOML file
-- Returns error if file not found or invalid TOML
+- Loads configuration from JSON file
+- Returns error if file not found or invalid JSON
 
 **`save(&self, path: &Path) -> Result<()>`**
-- Saves configuration to TOML file
+- Saves configuration to JSON file
+- Pretty-printed JSON format
 
 **`validate(&self) -> Result<()>`**
 - Validates all configuration values
@@ -54,7 +51,7 @@ let config = Config::load(Path::new("config.toml"))?;
 config.validate()?;
 
 // Access settings
-println!("Mode: {:?}", config.trading.mode);
+println!("Symbol: {}", config.price_source.symbol);
 ```
 
 ---
@@ -63,11 +60,11 @@ println!("Mode: {:?}", config.trading.mode);
 
 ### `PriceSource`
 
-Price source abstraction for Binance WebSocket feeds.
+Price source backed by the Binance WebSocket.
 
 ```rust
 pub struct PriceSource {
-    client: PriceClient,
+    client: Arc<BinanceClient>,
     buffer: Arc<RwLock<VecDeque<PriceTick>>>,
     max: usize,
     started: AtomicBool,
@@ -76,16 +73,16 @@ pub struct PriceSource {
 
 #### Methods
 
-**`new(source_type: PriceSourceType, symbol: &str, max: usize) -> Self`**
+**`new(symbol: &str, max: usize) -> Self`**
 - Creates new price source
-- `source_type`: Binance
-- `symbol`: Trading pair symbol
+- `symbol`: Binance trading pair (e.g. `BTCUSDT`)
 - `max`: Buffer size (number of ticks to retain)
 
-**`start(self: Arc<Self>)`**
+**`start(&self, shutdown: Arc<AtomicBool>) -> PriceSourceHandles`**
 - Starts WebSocket connections
-- Spawns client and consumer tasks
+- Spawns WebSocket and receiver tasks
 - Idempotent (safe to call multiple times)
+- Returns `PriceSourceHandles` with join handles for the spawned tasks
 
 **`latest(&self) -> Option<Decimal>`**
 - Returns most recent price
@@ -100,23 +97,35 @@ pub struct PriceSource {
 - Returns number of ticks currently in the buffer
 - Async method, requires `.await`
 
+**`trend_pct(&self, window_s: u64) -> Option<Decimal>`**
+- Returns percent price change over the last `window_s` seconds
+- Positive = rising, negative = falling
+- Returns `None` if insufficient data
+
 #### Example
 
 ```rust
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
-let price_source = Arc::new(PriceSource::new(
-    PriceSourceType::Binance,
-    "BTCUSDT",
-    1000,
-));
+let shutdown = Arc::new(AtomicBool::new(false));
+let price_source = Arc::new(PriceSource::new("BTCUSDT", 1000));
 
 // Start WebSocket
-price_source.clone().start().await;
+let _handles = price_source.start(shutdown.clone()).await;
 
 // Query price
 if let Some(price) = price_source.latest().await {
     println!("BTC: ${}", price);
+}
+
+// Get buffer size
+let len = price_source.buffer_len().await;
+println!("Buffer: {} ticks", len);
+
+// Compute 30s trend
+if let Some(trend) = price_source.trend_pct(30).await {
+    println!("30s trend: {}%", trend);
 }
 ```
 
@@ -126,7 +135,7 @@ if let Some(price) = price_source.latest().await {
 
 ### `decide()`
 
-Main trading decision function (includes signal detection).
+Main trading decision function.
 
 ```rust
 pub fn decide(
@@ -146,12 +155,11 @@ pub fn decide(
 
 #### Returns
 
-**`Decision::Trade { direction, size_usdc, edge, payoff_ratio }`**
+**`Decision::Trade { direction, size_usdc, edge }`**
 - Trade should be executed
 - `direction`: Up or Down
 - `size_usdc`: Position size in USDC
 - `edge`: Calculated edge (0.0-1.0)
-- `payoff_ratio`: (1 - cheap_price) / cheap_price
 
 **`Decision::Pass(reason)`**
 - Trade should not be executed
@@ -165,9 +173,31 @@ pub fn decide(
 | `"no_market_data"` | Missing or invalid market prices |
 | `"no_liquidity"` | Zero or negative total liquidity |
 | `"not_extreme_XX%"` | Market not extreme enough |
-| `"entry_price_out_of_range"` | Entry price outside min/max bounds |
-| `"ttl_too_short"` | Insufficient time remaining |
-| `"daily_loss_limit"` | Daily loss limit exceeded |
+| `"edge_X%<Y%"` | Edge below threshold |
+
+#### Example
+
+```rust
+let decision = decide(
+    &DecideContext {
+        market_yes: Some(decimal("0.85")),
+        market_no: Some(decimal("0.15")),
+        remaining_ms: 120000,
+    },
+    &account,
+    &config,
+);
+
+match decision {
+    Decision::Trade { direction, size_usdc, edge } => {
+        println!("Trade: {:?} ${} (edge: {}%)", 
+            direction, size_usdc, edge * 100);
+    }
+    Decision::Pass(reason) => {
+        println!("No trade: {}", reason);
+    }
+}
+```
 
 ---
 
@@ -200,10 +230,11 @@ pub struct AccountState {
 - Deducts cost from balance
 - Updates last trade time
 
-**`record_settlement(&mut self, result: &SettlementResult)`**
+**`record_settlement(&mut self, result: &SettlementResult, max_consecutive_losses: u32)`**
 - Records a settlement outcome
 - Updates balance with payout
 - Tracks win/loss streaks
+- Logs risk warnings
 
 **`already_traded_market(&self, settlement_ms: i64) -> bool`**
 - Checks if already traded this window
@@ -211,31 +242,53 @@ pub struct AccountState {
 **`check_daily_reset(&mut self)`**
 - Resets daily PnL at midnight UTC
 
+#### Example
+
+```rust
+let mut account = AccountState::new(decimal("1000"));
+
+// Record trade
+account.record_trade(decimal("10"));
+
+// Record settlement
+let result = SettlementResult {
+    direction: Direction::Up,
+    payout: decimal("50"),
+    pnl: decimal("40"),
+    won: true,
+    condition_id: "0x...".to_string(),
+    entry_btc_price: decimal("50000"),
+};
+account.record_settlement(&result, 8);
+
+println!("Balance: ${}", account.balance);
+println!("Daily PnL: ${}", account.daily_pnl);
+```
+
 ---
 
 ## Order Execution API
 
 ### `Executor`
 
-Handles order execution for paper and live modes.
+Handles order execution against the Polymarket CLOB. Always-live: there is no paper mode.
 
 ```rust
 pub struct Executor {
-    mode: TradingMode,
-    auth_client: Option<AuthenticatedPolyClient>,
+    auth_client: AuthenticatedPolyClient,
+    execution_config: ExecutionConfig,
 }
 ```
 
 #### Methods
 
-**`new(mode: TradingMode, auth_client: Option<AuthenticatedPolyClient>) -> Self`**
-- Creates new executor
-- `auth_client` required for live mode
+**`new(auth_client: AuthenticatedPolyClient, execution_config: ExecutionConfig) -> Self`**
+- Creates new executor with an authenticated CLOB client and execution config
 
-**`execute(&self, ctx: &ExecuteContext<'_>) -> Option<impl Order>`**
+**`execute(&self, ctx: &ExecuteContext<'_>) -> Option<OrderResult>`**
 - Executes a trade decision
 - Returns order details if successful
-- Returns `None` if execution failed or skipped
+- Returns `None` if execution failed, skipped, or shares rounded to 0
 
 #### ExecuteContext
 
@@ -248,6 +301,43 @@ pub struct ExecuteContext<'a> {
     pub poly_no: Option<Decimal>,
     pub settlement_time_ms: i64,
     pub btc_price: Decimal,
+}
+```
+
+#### OrderResult
+
+```rust
+pub struct OrderResult {
+    pub order_id: String,
+    pub direction: Direction,
+    pub size_usdc: Decimal,
+    pub entry_price: Decimal,
+    pub filled_shares: Decimal,
+    pub cost: Decimal,
+    pub settlement_time_ms: i64,
+    pub entry_btc_price: Decimal,
+}
+```
+
+#### Example
+
+```rust
+let executor = Executor::new(auth_client, execution_config);
+
+let ctx = ExecuteContext {
+    decision: &decision,
+    token_yes: &market.token_yes,
+    token_no: &market.token_no,
+    poly_yes: Some(decimal("0.15")),
+    poly_no: Some(decimal("0.85")),
+    settlement_time_ms,
+    btc_price: decimal("50000"),
+};
+
+if let Some(order) = executor.execute(&ctx).await {
+    println!("Order: {} shares, cost: ${}",
+        order.filled_shares,
+        order.cost);
 }
 ```
 
@@ -300,6 +390,92 @@ pub struct PendingPosition {
 }
 ```
 
+#### Example
+
+```rust
+let mut settler = Settler::new();
+
+// Add position
+settler.add_position(PendingPosition {
+    direction: Direction::Up,
+    size_usdc: decimal("10"),
+    entry_price: decimal("0.15"),
+    filled_shares: decimal("66"),
+    cost: decimal("9.9"),
+    settlement_time_ms: 1704067200000,
+    condition_id: "0xabc...".to_string(),
+    market_slug: "btc-updown-5m-123".to_string(),
+});
+
+// Check for settled positions
+let due = settler.due_positions();
+println!("Due for settlement: {}", due.len());
+
+// Settle
+if let Some(result) = settler.settle_by_slug("btc-updown-5m-123", true) {
+    println!("Payout: ${}, PnL: ${}", result.payout, result.pnl);
+}
+```
+
+---
+
+## TUI API
+
+### `TuiState`
+
+Shared dashboard state, wrapped in `Arc<RwLock<TuiState>>` and updated by bot tasks while the TUI render loop reads it via `try_read`.
+
+```rust
+pub struct TuiState {
+    pub btc_price: Decimal,
+    pub market_slug: String,
+    pub settlement_ms: i64,
+    pub balance: Decimal,
+    pub pnl: Decimal,
+    pub total_wins: u32,
+    pub total_losses: u32,
+    pub consecutive_wins: u32,
+    pub consecutive_losses: u32,
+    pub pending_count: usize,
+    pub last_decision: String,
+    pub recent_trades: Vec<TradeRow>,
+    pub scroll_offset: usize,
+}
+```
+
+#### Methods
+
+**`update_from_account(&mut self, balance, pnl, wins, losses, ...)`**
+- Bulk-update account-derived fields (balance, PnL, win/loss stats, streaks)
+
+**`update_market(&mut self, slug: &str, settlement_ms: i64)`**
+- Update the active market slug and settlement time
+
+**`set_btc_price(&mut self, price: Decimal)`**
+- Update the live BTC price tick
+
+**`set_decision(&mut self, decision: String)`**
+- Update the latest decision status (e.g. `"TRADE: DOWN @ 0.150"` or `"PASS: not_extreme_85%"`)
+
+**`set_pending_count(&mut self, count: usize)`**
+- Update the number of pending positions
+
+**`add_trade(&mut self, row: TradeRow)`**
+- Append a trade to `recent_trades` (capped at 200 rows)
+
+**`load_trades_from_csv(log_dir: &str) -> Vec<TradeRow>`**
+- Load historical trades from `logs/trades.csv` (capped at 200 rows)
+
+### `tui::run`
+
+```rust
+pub fn run(app_state: Arc<RwLock<TuiState>>) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+```
+
+- Blocks until the user presses `q` or `Esc`
+- Renders at 250ms tick rate
+- Handles `↑`/`↓` to scroll trade history
+
 ---
 
 ## Market Discovery API
@@ -321,9 +497,11 @@ pub struct MarketDiscovery {
 
 **`discover() -> Result<ActiveMarket>`**
 - Finds currently active 5-minute market
+- Returns market info
 
 **`fetch_market_by_slug(slug: &str) -> Result<GammaMarket>`**
 - Fetches a specific market by slug
+- Returns market data
 
 #### ActiveMarket
 
@@ -342,8 +520,26 @@ pub struct ActiveMarket {
 ```rust
 pub struct ResolutionState {
     pub resolved: bool,
-    pub outcome: Option<Direction>,
+    pub outcome: Option<Direction>,  // Some(Up) or Some(Down) if resolved
 }
+```
+
+#### Example
+
+```rust
+let discovery = MarketDiscovery::new(DiscoveryConfig {
+    gamma_api_url: "https://gamma-api.polymarket.com".to_string(),
+});
+
+// Find active market
+if let Ok(market) = discovery.discover().await {
+    println!("Active: {} settling at {}", 
+        market.market_slug, 
+        market.settlement_time);
+}
+
+// Fetch market by slug
+let gamma_market = discovery.fetch_market_by_slug("btc-updown-5m-1704067200").await?;
 ```
 
 ---
@@ -351,20 +547,6 @@ pub struct ResolutionState {
 ## Data Types
 
 ### Core Enums
-
-#### `TradingMode`
-
-```rust
-pub enum TradingMode {
-    Paper,  // Simulated trading
-    Live,   // Real trading
-}
-
-impl TradingMode {
-    pub fn is_paper(self) -> bool;
-    pub fn is_live(self) -> bool;
-}
-```
 
 #### `Direction`
 
@@ -377,15 +559,6 @@ pub enum Direction {
 
 impl Direction {
     pub fn as_str(&self) -> &'static str;  // "UP" or "DOWN"
-}
-```
-
-#### `PriceSourceType`
-
-```rust
-pub enum PriceSourceType {
-    Binance,
-    BinanceWs,
 }
 ```
 
@@ -410,6 +583,7 @@ pub struct SettlementResult {
     pub pnl: Decimal,
     pub won: bool,
     pub condition_id: String,
+    pub entry_btc_price: Decimal,
 }
 ```
 
@@ -429,7 +603,52 @@ pub struct DeciderConfig {
 
 ---
 
+## Error Types
+
+### Common Error Patterns
+
+#### Configuration Errors
+
+```rust
+// Validation error
+Err(anyhow!("strategy.extreme_threshold must be in (0, 1)"))
+
+// Invalid symbol format
+Err(anyhow!("price_source.symbol must match Binance format like BTCUSDT when source=binance"))
+```
+
+#### Network Errors
+
+```rust
+// Timeout
+tokio::time::timeout(Duration::from_secs(10), operation)
+    .await
+    .map_err(|_| anyhow!("Operation timed out"))?
+```
+
+#### Trading Errors
+
+```rust
+// Insufficient balance
+Decision::Pass("insufficient_balance".into())
+
+// Execution failed
+tracing::warn!("Order execution failed: {}", error);
+```
+
+---
+
 ## Logging API
+
+### Log Levels
+
+| Level | Usage |
+|-------|-------|
+| `ERROR` | Failures that stop trading or require intervention |
+| `WARN` | Risk warnings, unexpected conditions |
+| `INFO` | Normal operations, trades, settlements |
+| `DEBUG` | Detailed diagnostics (price updates, internal state) |
+| `TRACE` | Very verbose (WebSocket messages, raw data) |
 
 ### Log Prefixes
 
@@ -445,3 +664,90 @@ pub struct DeciderConfig {
 | `[RISK]` | Risk control warnings |
 | `[WS]` | WebSocket connection events |
 | `[BAL]` | Balance update events |
+
+### Custom Log Messages
+
+```rust
+use tracing::{info, warn, error, debug};
+
+// Informational
+info!("[TRADE] {} @ {:.3} edge={:.0}%", direction, price, edge * 100);
+
+// Warning
+warn!("[RISK] Daily loss limit reached: pnl={:.2}", daily_pnl);
+
+// Error
+error!("[WS] Binance connection failed: {}", error);
+
+// Debug
+debug!("Price update: {} @ {}", price, timestamp);
+```
+
+---
+
+## Best Practices
+
+### API Usage Guidelines
+
+1. **Always validate configuration** before starting trading
+2. **Check for None** when querying prices or orders
+3. **Handle all Decision variants** in match statements
+4. **Log appropriately** at the right level
+5. **Use Decimal for money** never f64
+6. **Clone account state** before passing to decide()
+7. **Check errors** from async operations
+
+### Example: Complete Trading Loop
+
+```rust
+async fn trading_tick(&mut self) -> Result<()> {
+    // 1. Get market data
+    let market = self.discovery.discover().await?;
+    let market = match market {
+    
+    // 2. Get prices
+    let (yes_price, no_price) = self.get_market_prices(&market).await?;
+    
+    // 3. Make decision
+    let account = self.account.read().await.clone();
+    let remaining_ms = market.settlement_time.timestamp_millis() - now_ms();
+    let decision = decide(
+        &DecideContext {
+            market_yes: yes_price,
+            market_no: no_price,
+            remaining_ms,
+        },
+        &account,
+        &self.decider_config,
+    );
+    
+    // 4. Execute if trade
+    if let Decision::Trade { .. } = decision {
+        let ctx = ExecuteContext {
+            decision: &decision,
+            token_yes: &market.token_yes,
+            token_no: &market.token_no,
+            poly_yes: yes_price,
+            poly_no: no_price,
+            settlement_time_ms: market.settlement_time.timestamp_millis(),
+            btc_price: self.price_source.latest().await.unwrap_or_default(),
+        };
+        
+        if let Some(order) = self.executor.execute(&ctx).await {
+            // Record position
+            self.settler.write().await.add_position(PendingPosition {
+                direction: order.direction,
+                size_usdc: order.size_usdc,
+                entry_price: order.price,
+                filled_shares: order.filled_shares,
+                cost: order.cost,
+                settlement_time_ms: market.settlement_time.timestamp_millis(),
+                condition_id: market.condition_id.clone(),
+                market_slug: market.market_slug.clone(),
+            });
+        }
+    }
+    
+    Ok(())
+}
+```

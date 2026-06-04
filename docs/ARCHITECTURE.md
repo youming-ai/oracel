@@ -5,40 +5,39 @@
 The Polymarket 5m Bot follows a pipeline architecture with clear separation of concerns:
 
 ```
-┌──────────────────────────────────────────────────────┐
-│                  Data Sources                        │
-├──────────────────┬───────────────────────────────────┤
-│     Binance      │        Polymarket Gamma API       │
-│   WebSocket      │            (REST API)             │
-└────────┬─────────┴──────────────┬────────────────────┘
-         │                        │
-         └────────────┬───────────┘
-                      │
-┌─────────────────────▼─────────────────────────────────┐
-│                    Pipeline                            │
-│  ┌──────────────┬──────────────┬───────────────────┐  │
-│  │ PriceSource  │   Decider    │     Executor      │  │
-│  │  (Stage 1)   │  (Stage 2)   │    (Stage 3)      │  │
-│  └──────────────┴──────────────┴───────────────────┘  │
-│                        │                               │
-│                   ┌────▼────┐                          │
-│                   │ Settler │                          │
-│                   │(Stage 4)│                          │
-│                   └─────────┘                          │
-└──────────────────────────────────────────────────────┘
-                       │
-        ┌──────────────┼──────────────┐
-        │                             │
-┌───────▼──────┐              ┌───────▼──────┐
-│  Paper Mode  │              │  Live Mode   │
-│  (Simulated) │              │ (Real CLOB)  │
-└──────────────┘              └──────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                    Data Sources                             │
+├────────────────────┬────────────────────────────────────────┤
+│     Binance        │      Polymarket Gamma API              │
+│   WebSocket        │         (REST API)                     │
+└─────────┬──────────┴──────────────────┬─────────────────────┘
+          │                             │
+          └──────────┬──────────────────┘
+                     │
+┌────────────────────▼─────────────────────────────────────┐
+│                   Pipeline                                │
+│  ┌──────────────┬──────────────────────────┬──────────┐  │
+│  │ PriceSource  │        Decider           │ Executor │  │
+│  │   (Stage 1)  │  (Stage 2: Signal+Decide)│(Stage 3) │  │
+│  └──────────────┴──────────────────────────┴──────────┘  │
+│                           │                               │
+│                      ┌────▼────┐                          │
+│                      │ Settler │                          │
+│                      │(Stage 4)│                          │
+│                      └─────────┘                          │
+└───────────────────────────────────────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────┐
+│       ratatui TUI Dashboard         │
+│   (Arc<RwLock<TuiState>> shared)    │
+└─────────────────────────────────────┘
 ```
 
 ## Pipeline Stages
 
 ### Stage 1: PriceSource
-**Purpose**: Real-time BTC price ingestion from Binance
+**Purpose**: Real-time BTC price ingestion from Binance WebSocket
 
 **Key Responsibilities**:
 - WebSocket connection management with automatic reconnection
@@ -47,47 +46,43 @@ The Polymarket 5m Bot follows a pipeline architecture with clear separation of c
 
 **Performance Characteristics**:
 - Lock-free read path for latest price queries
+- Zero-allocation hot path for price updates
 - <1ms ingestion latency target
 
-### Stage 2: Decider
-**Purpose**: Signal detection and trade decision logic (combined)
+### Stage 2: Decider (Signal + Decision)
+**Purpose**: Market opportunity detection and trade decision logic
 
 **Key Responsibilities**:
 - Fetch Polymarket CLOB quotes (yes/no mid prices)
-- Calculate market bias and detect extreme sentiment
-- Direction determination (Up/Down) based on market extreme
+- Detect extreme market sentiment (yes > 0.90 → Down, no > 0.90 → Up)
+- Orderbook spread check (reject if yes+no spread > 6%)
+- BTC trend momentum confirmation
 - Entry price range validation
-- Balance check (reject if ≤ 0)
-- Edge calculation: `edge = fair_value - cheap_side_price`
-- Position sizing calculation
-- Daily loss limit enforcement
-
-**Decision Logic**:
-```rust
-if market_bias > extreme_threshold (0.95) → Direction::Down
-if market_bias < 1 - extreme_threshold (0.05) → Direction::Up
-else → no signal (balanced market)
-```
+- TTL (time-to-live) minimum check
+- Balance and daily loss limit enforcement
+- Sliding-window circuit breaker (win rate check)
 
 **Decision Pipeline**:
 ```
 decide()
-├── 1. Market data valid? → Pass("no_market_data")
-├── 2. Spread check? → Pass("spread_too_wide")
-├── 3. Extreme check? → Pass("not_extreme_XX%")
-├── 4. Entry price range? → Pass("entry_price_out_of_range")
-├── 5. Min TTL for entry? → Pass("ttl_too_short")
-├── 6. Balance > 0? → Pass("insufficient_balance")
-├── 7. Daily loss limit? → Pass("daily_loss_limit")
-└── TRADE: Calculate position size
+├── 1. Balance > 0? → Pass("insufficient_balance")
+├── 2. Daily loss limit? → Pass("daily_loss_limit")
+├── 3. Market data valid? → Pass("no_market_data")
+├── 4. Extreme market? → Pass("not_extreme_XX%")
+├── 5. Spread check? → Pass("spread_too_wide")
+├── 6. Entry price range? → Pass("price_out_of_range")
+├── 7. Min TTL for entry? → Pass("ttl_below_entry_floor")
+├── 8. BTC trend against? → Pass("btc_trend_against_XX%")
+├── 9. Circuit breaker? → Pass("circuit_breaker_wr_XX%")
+└── TRADE: Calculate position size, edge, payoff ratio
 ```
 
 ### Stage 3: Executor
-**Purpose**: Order execution (paper or live)
+**Purpose**: Order execution via Polymarket CLOB
 
 **Key Responsibilities**:
-- Paper mode: Generate simulated orders with UUID tracking
-- Live mode: Place FAK (Fill-And-Kill) limit orders via CLOB
+- Place FAK (Fill-And-Kill) limit orders via CLOB
+- Slippage tolerance application (1% default)
 - Zero-share order rejection
 - Order ID safe handling (prevent slicing panics)
 - FAK retry logic on failure
@@ -125,14 +120,15 @@ decide()
 │ 2. Check Price Staleness (<30s old)     │
 │ 3. Check Market Readiness               │
 │ 4. Check Time-to-Live (≥30s remaining)  │
+│ 5. Signal Detection (extreme market?)   │
 └─────────────────────────────────────────┘
      │
      ▼
 ┌─────────────────────────────────────────┐
-│         Decider (Signal + Filters)      │
+│           Decision Pipeline             │
 │ - Market data valid?                    │
 │ - Spread check?                         │
-│ - Extreme market? → direction           │
+│ - Extreme market?                       │
 │ - Entry price in range?                 │
 │ - TTL sufficient for entry?             │
 │ - Balance > 0?                          │
@@ -144,8 +140,16 @@ decide()
 │         Trade Execution                 │
 │ - Calculate position size               │
 │ - Validate shares > 0                   │
-│ - Execute order (paper/live)            │
+│ - Execute order via CLOB                │
 │ - Record position in settler            │
+└─────────────────────────────────────────┘
+     │
+     ▼
+┌─────────────────────────────────────────┐
+│   TUI State Update                      │
+│ - BTC price, market info                │
+│ - Balance, PnL, stats                   │
+│ - Trade history, decision status        │
 └─────────────────────────────────────────┘
 ```
 
@@ -153,29 +157,34 @@ decide()
 
 ```
 src/
-├── main.rs                  # Entry point, tracing setup, CLI
+├── main.rs                  # Entry point, tracing setup, TUI init
 ├── bot.rs                   # Bot struct, main loop, order logic, trade recording
 ├── config.rs                # Configuration definitions, validation, defaults
 ├── state.rs                 # BotState (in-memory: idle reasons, FAK state)
 ├── tasks.rs                 # Background tasks: settlement, market refresh, status, balance
-├── lib.rs                   # Library re-exports (config, data, pipeline)
+├── lib.rs                   # Library re-exports (config, data, pipeline, tui)
 ├── cli.rs                   # CLI tools binary (polybot-tools)
-├── trade_log.rs             # Async trade log writer (CSV)
-├── util.rs                  # Shared utilities
 │
 ├── data/                    # External data source clients
 │   ├── mod.rs               # Data module exports
 │   ├── binance.rs           # Binance WebSocket client
 │   ├── market_discovery.rs  # Gamma API integration
-│   └── polymarket.rs        # Polymarket CLOB client + RPC URL selection
+│   └── polymarket.rs        # Polymarket CLOB client + RPC URL
 │
-└── pipeline/               # Trading pipeline stages
-    ├── mod.rs              # Pipeline module exports
-    ├── price_source.rs     # Stage 1: Price ingestion
-    ├── decider.rs          # Stage 2: Signal detection + decision logic
-    ├── executor.rs         # Stage 3: Order execution
-    ├── settler.rs          # Stage 4: Settlement
-    └── test_helpers.rs     # Test utilities
+├── pipeline/                # Trading pipeline stages
+│   ├── mod.rs               # Pipeline module exports
+│   ├── price_source.rs      # Stage 1: Price ingestion
+│   ├── decider.rs           # Stage 2: Signal detection + trade decision
+│   ├── executor.rs          # Stage 3: Order execution
+│   ├── settler.rs           # Stage 4: Settlement
+│   └── test_helpers.rs      # Test utilities (d() helper)
+│
+└── tui/                     # Terminal dashboard
+    ├── mod.rs               # TUI event loop
+    ├── state.rs             # TuiState (shared via Arc<RwLock>)
+    ├── ui.rs                # Layout and widget rendering
+    ├── event.rs             # Event handling stubs
+    └── keys.rs              # Key handling stubs
 ```
 
 ## Concurrency Model
@@ -188,12 +197,14 @@ Main Task
 │   └── Price Consumer Task (buffer updates)
 ├── Settlement Checker Task (15s interval)
 ├── Market Refresher Task (60s interval)
-└── Signal Tick Task (1s interval)
-    └── Decision → Execution → Settlement
+├── Signal Tick Task (1s interval)
+│   └── Decision → Execution → Settlement
+└── TUI Blocking Thread
+    └── 250ms render loop (reads TuiState via try_read)
 ```
 
 ### Synchronization Primitives
-- **RwLock**: Used for shared state (balance, positions, market data)
+- **RwLock**: Used for shared state (balance, positions, market data, TUI state)
 - **broadcast channels**: Price tick distribution from exchange clients
 - **AtomicBool**: PriceSource start guard (prevent duplicate starts)
 
@@ -205,6 +216,7 @@ struct Bot {
     settler: Arc<RwLock<Settler>>,
     market_state: Arc<RwLock<MarketState>>,
     price_source: Arc<PriceSource>,
+    tui_state: Arc<RwLock<TuiState>>,
 }
 ```
 
@@ -232,7 +244,7 @@ struct Bot {
 
 ### Hot Path Optimizations
 1. **Lock-free reads**: Latest price accessed via read lock (no contention)
-2. **Enum dispatch**: Avoid trait object overhead for price clients
+2. **Zero-allocation**: Price updates use pre-allocated buffer
 
 ### Memory Management
 - Fixed-size price buffer (circular queue, 1000 ticks default)
@@ -254,9 +266,8 @@ struct Bot {
 ### Input Validation
 - Configuration validation on startup
 - Price range validation (prevent degenerate orders)
-- Symbol format validation (exchange-specific)
+- Symbol format validation
 
 ### Safe Defaults
-- Paper mode default (no real trades without explicit opt-in)
 - Fixed position sizing for simplicity
 - Balance-based trade rejection

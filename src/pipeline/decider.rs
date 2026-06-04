@@ -1,10 +1,10 @@
-//! Stage 3: Trade Decider
-//! Market sentiment arbitrage decider.
+//! Stage 2: Trade Decider
+//! Market sentiment arbitrage decider — signal detection + trade decision.
 //!
 //! Core logic: When market is extremely overconfident (≥90%), bet against it.
 //! Edge = fair_value - cheap_side_price (our fair value minus market's extreme price).
 //! Direction is determined by market price extremes.
-//! Risk controls: daily loss limit.
+//! Risk controls: daily loss limit, BTC trend filter, sliding-window circuit breaker.
 
 use crate::util;
 use rust_decimal::Decimal;
@@ -60,19 +60,18 @@ pub struct DeciderConfig {
 
 impl Default for DeciderConfig {
     fn default() -> Self {
-        use crate::config::defaults as d;
         Self {
-            position_size_usdc: d::position_size_usdc(),
-            extreme_threshold: d::extreme_threshold(),
-            fair_value: d::fair_value(),
-            min_entry_price: d::min_entry_price(),
-            max_entry_price: d::max_entry_price(),
-            min_ttl_for_entry_ms: d::min_ttl_for_entry_ms(),
-            daily_loss_limit_usdc: d::daily_loss_limit(),
-            btc_trend_window_s: d::btc_trend_window_s(),
-            btc_trend_min_pct: d::btc_trend_min_pct(),
-            circuit_breaker_window: d::circuit_breaker_window(),
-            circuit_breaker_min_win_rate: d::circuit_breaker_min_win_rate(),
+            position_size_usdc: util::decimal("1.0"),
+            extreme_threshold: util::decimal("0.90"),
+            fair_value: util::decimal("0.50"),
+            min_entry_price: util::decimal("0.02"),
+            max_entry_price: util::decimal("0.12"),
+            min_ttl_for_entry_ms: 120_000,
+            daily_loss_limit_usdc: util::decimal("0"),
+            btc_trend_window_s: 30,
+            btc_trend_min_pct: util::decimal("0.05"),
+            circuit_breaker_window: 50,
+            circuit_breaker_min_win_rate: util::decimal("0.05"),
         }
     }
 }
@@ -205,6 +204,17 @@ pub fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderConfig) 
             (yes * util::decimal("100")).round_dp(0)
         ));
     };
+
+    // --- Orderbook spread check ---
+    // Reject when the sum of yes + no prices diverges from 1.0 by more than the
+    // allowed spread. A wide spread signals poor liquidity and high slippage risk,
+    // meaning a FAK order placed at the mid price is unlikely to fill cleanly.
+    let spread = (yes + no).abs() - Decimal::ONE;
+    let max_spread = util::decimal("0.06");
+    if spread.abs() > max_spread {
+        let pct = (spread * util::decimal("100")).round_dp(1);
+        return Decision::Pass(format!("spread_too_wide_{pct}%"));
+    }
 
     let edge = cfg.fair_value - cheap_price;
 

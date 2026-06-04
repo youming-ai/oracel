@@ -12,7 +12,7 @@
 
 ### `src/config.rs`
 
-Central configuration management with validation. Loaded from `config.toml`. All default values are consolidated in a `defaults` submodule for a single source of truth.
+Central configuration management with validation. All default values are consolidated in a `defaults` submodule for a single source of truth.
 
 #### Key Structures
 
@@ -27,20 +27,22 @@ pub struct Config {
     pub polling: PollingConfig,
     pub price_source: PriceSourceConfig,
     pub execution: ExecutionConfig,
-    pub timeouts: TimeoutsConfig,
-    pub redeem: RedeemConfig,
-    pub misc: MiscConfig,
-    pub time_windows: TimeWindowsConfig,
 }
 ```
 
-**`PriceSourceConfig`** - Exchange configuration
+**`RiskConfig`** - Risk management settings
+```rust
+pub struct RiskConfig {
+    pub max_fak_retries: u32,            // Maximum FAK order retries
+    pub fak_backoff_ms: u64,             // Backoff after FAK rejection (ms)
+    pub daily_loss_limit_usdc: Decimal,  // Daily loss cap (0 = disabled)
+}
+```
+
+**`PriceSourceConfig`** - Binance symbol configuration
 ```rust
 pub struct PriceSourceConfig {
-    pub source: PriceSourceType,    // Binance
-    pub symbol: String,             // Trading pair (BTCUSDT)
-    pub buffer_max: usize,          // Max buffer size
-    pub buffer_min_ticks: usize,    // Min ticks before trading
+    pub symbol: String,             // Binance trading pair (e.g. BTCUSDT)
 }
 ```
 
@@ -52,20 +54,23 @@ The `validate()` method performs startup checks:
 |-------|-----------|---------------|
 | Signal interval | > 0 | `polling.signal_interval_ms must be > 0` |
 | Extreme threshold | 0 < value < 1 | `strategy.extreme_threshold must be in (0, 1)` |
+| Extreme threshold | > fair_value | `strategy.extreme_threshold (X) must be > fair_value (Y)` |
 | Fair value | 0 < value < 1 | `strategy.fair_value must be in (0, 1)` |
 | Position size | > 0 | `strategy.position_size_usdc must be > 0` |
-| Symbol format | Binance format | `price_source.symbol must match...` |
+| Entry price range | 0 < min < max < 1 | `strategy.min_entry_price and max_entry_price must satisfy...` |
+| Symbol format | Binance format | `price_source.symbol must match Binance format like BTCUSDT` |
 
 #### Symbol Format Validation
 
 **Binance Format** (`BTCUSDT`, `ETHUSDT`):
 - Uppercase letters and numbers only
 - No dashes or special characters
+- Minimum 1 character
 
 #### Usage Example
 
 ```rust
-// Load from file (auto-generated with defaults if missing)
+// Load from file
 let config = Config::load(Path::new("config.toml"))?;
 
 // Validate before use
@@ -135,6 +140,7 @@ Binance ticker stream message:
 Initial backoff: 1 second
 Max backoff: 60 seconds
 Backoff multiplier: 2x
+Jitter: None (deterministic)
 ```
 
 #### Usage Example
@@ -226,8 +232,8 @@ let discovery = MarketDiscovery::new(DiscoveryConfig {
 
 // Find active market
 if let Some(market) = discovery.discover().await? {
-    println!("Trading: {} settling at {}",
-        market.market_slug,
+    println!("Trading: {} settling at {}", 
+        market.market_slug, 
         market.settlement_time
     );
 }
@@ -322,24 +328,17 @@ let order = auth.place_fak_order(
 
 ### `src/pipeline/price_source.rs`
 
-Price source abstraction for Binance WebSocket feeds.
+Price source backed by the Binance WebSocket. Maintains a rolling buffer of recent ticks and exposes lock-free read paths for the latest price.
 
 #### Key Structures
 
-**`PriceSource`** - Main price source manager
+**`PriceSource`** - Price source manager
 ```rust
 pub struct PriceSource {
-    client: PriceClient,
+    client: Arc<BinanceClient>,
     buffer: Arc<RwLock<VecDeque<PriceTick>>>,
     max: usize,
     started: AtomicBool,
-}
-```
-
-**`PriceClient`** - Enum-based client dispatch
-```rust
-pub enum PriceClient {
-    Binance(Arc<BinanceClient>),
 }
 ```
 
@@ -355,10 +354,10 @@ pub struct PriceTick {
 
 ```rust
 // Create new price source
-pub fn new(source_type: PriceSourceType, symbol: &str, max: usize) -> Self
+pub fn new(symbol: &str, max: usize) -> Self
 
-// Start WebSocket connections
-pub async fn start(self: Arc<Self>)
+// Start WebSocket connections (returns handles for graceful shutdown)
+pub async fn start(&self, shutdown: Arc<AtomicBool>) -> PriceSourceHandles
 
 // Get latest price
 pub async fn latest(&self) -> Option<Decimal>
@@ -368,19 +367,23 @@ pub async fn last_tick_ms(&self) -> Option<i64>
 
 // Get buffer length
 pub async fn buffer_len(&self) -> usize
+
+// Compute price trend (percent change) over the last `window_s` seconds
+pub async fn trend_pct(&self, window_s: u64) -> Option<Decimal>
 ```
 
 #### Task Architecture
 
 ```
-PriceSource::start()
-├── Spawn Client Task
-│   └── client.start_ticker_ws() (reconnect loop)
-└── Spawn Consumer Task
+PriceSource::start(shutdown)
+├── Spawn WebSocket Task
+│   └── BinanceClient::start_ticker_ws() (reconnect loop)
+└── Spawn Receiver Task
     └── Loop:
         ├── rx.recv() → Get tick
         ├── Check timestamp >= last (monotonic)
         └── Push to buffer (pop front if full)
+        └── Break on shutdown signal
 ```
 
 #### Out-of-Order Protection
@@ -394,11 +397,105 @@ if h.back().map(|last| ticker.timestamp_ms >= last.timestamp_ms).unwrap_or(true)
 }
 ```
 
+#### Usage Example
+
+```rust
+let shutdown = Arc::new(AtomicBool::new(false));
+let price_source = Arc::new(PriceSource::new("BTCUSDT", 1000));
+
+// Start WebSocket (returns join handles)
+let handles = price_source.start(shutdown).await;
+
+// Query prices
+if let Some(price) = price_source.latest().await {
+    println!("Current BTC: ${}", price);
+}
+
+let history = price_source.buffer_len().await;
+println!("Buffer: {} ticks", history);
+
+// Graceful shutdown
+shutdown.store(true, Ordering::Relaxed);
+```
+
+---
+
+### `src/pipeline/signal.rs`
+
+Signal detection module for extreme market sentiment.
+
+#### Key Structures
+
+**`Signal`** - Detected market signal
+```rust
+pub enum Signal {
+    Up,    // Market extremely bearish, buy UP
+    Down,  // Market extremely bullish, buy DOWN
+}
+```
+
+**`SignalComputer`** - Signal computation logic
+```rust
+pub struct SignalComputer {
+    extreme_threshold: Decimal,
+    fair_value: Decimal,
+}
+```
+
+#### Signal Detection Algorithm
+
+```rust
+fn compute_signal(&self, yes_price: Decimal, no_price: Decimal) -> Option<Signal> {
+    let total = yes_price + no_price;
+    let mkt_up = yes_price / total;
+    
+    if mkt_up > self.extreme_threshold {
+        Some(Signal::Down)  // Market bullish → buy cheap DOWN
+    } else if mkt_up < (Decimal::ONE - self.extreme_threshold) {
+        Some(Signal::Up)    // Market bearish → buy cheap UP
+    } else {
+        None  // Balanced
+    }
+}
+```
+
+#### Pre-Filter Checks
+
+Before signal computation:
+1. Price buffer has ≥60 samples
+2. Latest tick is <30 seconds old
+3. Market tokens discovered
+4. ≥30 seconds until settlement
+5. Market data available (yes/no prices > 0.01)
+
+#### Usage Example
+
+```rust
+let computer = SignalComputer::new(
+    decimal("0.95"),  // extreme_threshold
+    decimal("0.50"),  // fair_value
+);
+
+let signal = computer.compute_signal(
+    decimal("0.85"),  // yes price
+    decimal("0.15"),  // no price
+);
+
+match signal {
+    Some(Signal::Up) => println!("Signal: Buy UP"),
+    Some(Signal::Down) => println!("Signal: Buy DOWN"),
+    None => println!("No signal (balanced market)"),
+}
+
+// The decider wraps signal into a Decision:
+// Decision::Trade { direction, size_usdc, edge, payoff_ratio } or Decision::Pass(reason)
+```
+
 ---
 
 ### `src/pipeline/decider.rs`
 
-Signal detection, trade decision logic, and risk management. The signal computation is integrated directly into the decider — there is no separate signal module.
+Trade decision logic and risk management.
 
 #### Key Structures
 
@@ -442,14 +539,6 @@ pub enum Decision {
 }
 ```
 
-**`Direction`** - Trade direction
-```rust
-pub enum Direction {
-    Up,    // Market extremely bearish, buy UP
-    Down,  // Market extremely bullish, buy DOWN
-}
-```
-
 #### Decision Pipeline
 
 ```
@@ -464,19 +553,61 @@ decide()
 └── TRADE: Calculate position size
 ```
 
+#### Position Sizing
+
+```rust
+fn calculate_position_size(position_size_usdc: Decimal, entry_price: Decimal) -> Decimal {
+    // Calculate shares from fixed position size
+    let shares = (position_size_usdc / entry_price).floor();
+    
+    // Zero-share guard
+    if shares > Decimal::ZERO {
+        shares
+    } else {
+        Decimal::ZERO  // Reject order
+    }
+}
+```
+
+#### Usage Example
+
+```rust
+let account = AccountState::new(decimal("1000"));
+let cfg = DeciderConfig::default();
+
+let decision = decide(
+    &DecideContext {
+        market_yes: Some(decimal("0.85")),
+        market_no: Some(decimal("0.15")),
+        remaining_ms: 120000,
+    },
+    &account,
+    &cfg,
+);
+
+match decision {
+    Decision::Trade { direction, size_usdc, edge } => {
+        println!("Trade: {:?} ${} (edge: {})", direction, size_usdc, edge);
+    }
+    Decision::Pass(reason) => {
+        println!("No trade: {}", reason);
+    }
+}
+```
+
 ---
 
 ### `src/pipeline/executor.rs`
 
-Order execution module for paper and live trading.
+Order execution module. Always-live: places real FAK orders against the Polymarket CLOB via an authenticated client.
 
 #### Key Structures
 
 **`Executor`** - Execution coordinator
 ```rust
 pub struct Executor {
-    mode: TradingMode,
-    auth_client: Option<AuthenticatedPolyClient>,
+    auth_client: AuthenticatedPolyClient,
+    execution_config: ExecutionConfig,
 }
 ```
 
@@ -493,13 +624,74 @@ pub struct ExecuteContext<'a> {
 }
 ```
 
-#### Execution Modes
+**`OrderResult`** - Execution result
+```rust
+pub struct OrderResult {
+    pub order_id: String,
+    pub direction: Direction,
+    pub size_usdc: Decimal,
+    pub entry_price: Decimal,
+    pub filled_shares: Decimal,
+    pub cost: Decimal,
+    pub settlement_time_ms: i64,
+    pub entry_btc_price: Decimal,
+}
+```
 
-**Paper Mode**: Generates UUID order ID, calculates shares, returns `PaperOrder`.
+#### Execution Flow
 
-**Live Mode**: Places FAK order via CLOB, returns `LiveOrder`.
+```rust
+async fn execute(&self, ctx: &ExecuteContext<'_>) -> Option<OrderResult> {
+    // 1. Pick token + mid price from the decision direction
+    // 2. Reject if mid price is ≤ 0.01 or ≥ 0.99 (extreme)
+    // 3. Apply slippage tolerance: price = mid * (1 + slippage), capped at 0.99
+    // 4. Round price to 2dp for CLOB compatibility
+    // 5. Floor shares to whole numbers (compute_filled_shares)
+    // 6. Bump shares to satisfy Polymarket's $1 minimum order
+    // 7. Place FAK order via auth_client
+    // 8. Return OrderResult with cost, shares, order_id
+}
+```
 
-Both modes apply zero-share guard (reject if shares == 0).
+#### Zero-Share Guard
+
+```rust
+fn compute_filled_shares(size_usdc: Decimal, price: Decimal) -> Option<Decimal> {
+    // Floor to whole shares so that maker_amount (= price × shares) stays
+    // within the CLOB's 2-decimal-place limit for market buy orders.
+    // Returns None if resulting shares would be 0 (reject tiny orders).
+    let shares = (size_usdc / price).floor();
+    if shares > Decimal::ZERO {
+        Some(shares)
+    } else {
+        tracing::warn!("[EXEC] Computed 0 shares for size={} price={}", size_usdc, price);
+        None
+    }
+}
+```
+
+#### Usage Example
+
+```rust
+let executor = Executor::new(auth_client, execution_config);
+
+let ctx = ExecuteContext {
+    decision: &decision,
+    token_yes: &market.token_yes,
+    token_no: &market.token_no,
+    poly_yes: Some(decimal("0.15")),
+    poly_no: Some(decimal("0.85")),
+    settlement_time_ms,
+    btc_price: decimal("50000"),
+};
+
+if let Some(order) = executor.execute(&ctx).await {
+    println!("Executed: {} shares for ${}",
+        order.filled_shares,
+        order.cost
+    );
+}
+```
 
 ---
 
@@ -544,15 +736,42 @@ pub struct Settler {
 #### Key Methods
 
 ```rust
-pub fn add_position(&mut self, pos: PendingPosition)  // prevents duplicates
-pub fn due_positions(&self) -> Vec<PendingPosition>    // past settlement time
+// Add new position (prevents duplicates)
+pub fn add_position(&mut self, pos: PendingPosition)
+
+// Get positions ready for settlement
+pub fn due_positions(&self) -> Vec<PendingPosition>
+
+// Settle positions by market slug
 pub fn settle_by_slug(&mut self, slug: &str, won: bool) -> Option<SettlementResult>
+```
+
+#### Settlement Logic
+
+```rust
+fn settle(&mut self, position: PendingPosition, won: bool) -> SettlementResult {
+    let payout = if won {
+        position.filled_shares  // Each share pays $1
+    } else {
+        Decimal::ZERO
+    };
+    
+    let pnl = payout - position.cost;
+    
+    SettlementResult {
+        payout,
+        pnl,
+        won,
+        ...
+    }
+}
 ```
 
 #### Duplicate Prevention
 
 ```rust
 fn add_position(&mut self, pos: PendingPosition) {
+    // Check for existing position with same condition_id
     if self.pending.iter().any(|p| p.condition_id == pos.condition_id) {
         tracing::warn!("Duplicate position, skipping");
         return;
@@ -560,6 +779,83 @@ fn add_position(&mut self, pos: PendingPosition) {
     self.pending.push_back(pos);
 }
 ```
+
+#### Position Combining
+
+When multiple positions exist for same market:
+```rust
+fn combine_positions(&self, positions: Vec<PendingPosition>) -> PendingPosition {
+    PendingPosition {
+        size_usdc: positions.iter().map(|p| p.size_usdc).sum(),
+        filled_shares: positions.iter().map(|p| p.filled_shares).sum(),
+        cost: positions.iter().map(|p| p.cost).sum(),
+        // Use first position for other fields
+        ...
+    }
+}
+```
+
+#### Usage Example
+
+```rust
+let mut settler = Settler::new();
+
+// Add position
+settler.add_position(PendingPosition {
+    direction: Direction::Up,
+    size_usdc: decimal("10"),
+    entry_price: decimal("0.15"),
+    filled_shares: decimal("66"),
+    cost: decimal("9.9"),
+    settlement_time_ms,
+    condition_id: "0xabc...".to_string(),
+    market_slug: "btc-updown-5m-123".to_string(),
+});
+
+// Check for settled positions
+if market_resolved {
+    let result = settler.settle_by_slug(&slug, won).unwrap();
+    println!("Settled: PnL = ${}", result.pnl);
+}
+```
+
+---
+
+## TUI Layer
+
+### `src/tui/`
+
+ratatui-based terminal dashboard, auto-launched with the bot in a dedicated thread. State is shared with async bot tasks via `Arc<RwLock<TuiState>>`.
+
+#### Files
+
+- `mod.rs` — Event loop, render tick (250ms), key handling (`q`/`Esc` to quit, `↑`/`↓` to scroll trades)
+- `state.rs` — `TuiState` (BTC price, market info, balance/PnL, recent trades, decision status)
+- `ui.rs` — Layout and widget rendering
+- `event.rs` — Event handling stubs
+- `keys.rs` — Key handling stubs
+
+#### `TuiState`
+
+```rust
+pub struct TuiState {
+    pub btc_price: Decimal,
+    pub market_slug: String,
+    pub settlement_ms: i64,
+    pub balance: Decimal,
+    pub pnl: Decimal,
+    pub total_wins: u32,
+    pub total_losses: u32,
+    pub consecutive_wins: u32,
+    pub consecutive_losses: u32,
+    pub pending_count: usize,
+    pub last_decision: String,
+    pub recent_trades: Vec<TradeRow>,
+    pub scroll_offset: usize,
+}
+```
+
+`TuiState` is updated by bot tasks via helper methods (`update_from_account`, `update_market`, `set_btc_price`, `set_decision`, `add_trade`) and read by the render loop via `try_read` to avoid blocking.
 
 ---
 
