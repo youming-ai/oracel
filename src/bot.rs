@@ -390,6 +390,24 @@ impl Bot {
             }
         }
 
+        // Update TUI with current account state (must happen before any early
+        // returns so balance is always visible, even during buffer_filling or
+        // other idle states).
+        {
+            let acc = self.account.read().await;
+            let pending = self.settler.read().await.pending_count();
+            let mut tui = self.tui_state.write().await;
+            tui.update_from_account(
+                acc.balance,
+                acc.pnl(),
+                acc.total_wins,
+                acc.total_losses,
+                acc.consecutive_wins,
+                acc.consecutive_losses,
+            );
+            tui.set_pending_count(pending);
+        }
+
         let mkt = self.market_state.read().await.clone();
 
         let btc_price = match self.price_source.latest().await {
@@ -639,6 +657,9 @@ impl Bot {
                 }
             }
         }
+
+        // Account stats are updated at the top of tick() so they show
+        // immediately on startup, even during buffer_filling or idle states.
 
         Ok(())
     }
