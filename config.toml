@@ -1,10 +1,6 @@
 # Polymarket 5m Bot Configuration
 # Durations in milliseconds unless noted (secs suffix).
 
-[trading]
-mode = "paper"                      # "paper" or "live"
-paper_starting_balance = 100.0      # paper mode starting balance
-
 [market]
 stale_threshold_ms = 30000          # max BTC price age before skipping (ms)
 min_ttl_ms = 30000                  # min remaining market TTL to enter (ms)
@@ -36,7 +32,6 @@ market_refresh_secs = 60            # market discovery refresh (s)
 settlement_check_secs = 15          # settlement poll interval (s)
 
 [price_source]
-source = "binance"                  # "binance" or "binance_ws"
 symbol = "BTCUSDT"
 buffer_max = 1000                   # max price ticks retained
 buffer_min_ticks = 60               # min ticks before trading starts
@@ -65,10 +60,3 @@ trade_log_flush_secs = 30
 shutdown_timeout_secs = 5           # graceful shutdown wait (s)
 market_search_windows = 5           # future 5m windows to search
 resolution_price_threshold = 0.999  # winning resolution threshold
-
-# Dashboard monitoring windows (UTC hours, half-open [start, end), wrap-around).
-[time_windows]
-window1_start = 0
-window1_end = 12
-window2_start = 12
-window2_end = 24

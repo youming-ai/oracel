@@ -1,6 +1,6 @@
 //! Polymarket 5m Bot — Pipeline Architecture
 //!
-//! Flow: PriceSource → SignalComputer → TradeDecider → OrderExecutor → Settler
+//! Flow: PriceSource → Decider → Executor → Settler
 
 mod bot;
 mod state;
@@ -9,8 +9,12 @@ mod tasks;
 use anyhow::Result;
 use bot::Bot;
 use polymarket_5m_bot::config::Config;
+use polymarket_5m_bot::tui;
+use polymarket_5m_bot::tui::state::TuiState;
 use secrecy::ExposeSecret;
 use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
@@ -49,34 +53,14 @@ async fn main() -> Result<()> {
 
     config.validate()?;
 
-    let log_dir = format!("logs/{}", config.trading.mode);
+    if config.trading.private_key.expose_secret().is_empty() {
+        anyhow::bail!("PRIVATE_KEY not set in .env — required for trading");
+    }
+
+    let log_dir = "logs".to_string();
     if let Err(e) = tokio::fs::create_dir_all(&log_dir).await {
         eprintln!("[INIT] Failed to create log dir {}: {}", log_dir, e);
         std::process::exit(1);
-    }
-
-    // Write time windows config for dashboard consumption (atomic write)
-    {
-        let tw_tmp = std::path::Path::new(&log_dir).join("time_windows.json.tmp");
-        let tw_dst = std::path::Path::new(&log_dir).join("time_windows.json");
-        let tw_json = serde_json::json!({
-            "window1": {
-                "start": config.time_windows.window1_start,
-                "end": config.time_windows.window1_end,
-                "label": format!("{:02}:00-{:02}:00 UTC", config.time_windows.window1_start, config.time_windows.window1_end)
-            },
-            "window2": {
-                "start": config.time_windows.window2_start,
-                "end": config.time_windows.window2_end,
-                "label": format!("{:02}:00-{:02}:00 UTC", config.time_windows.window2_start, config.time_windows.window2_end)
-            }
-        });
-        let content = serde_json::to_string_pretty(&tw_json).unwrap();
-        if let Err(e) = tokio::fs::write(&tw_tmp, &content).await {
-            eprintln!("[INIT] Failed to write time_windows.json: {}", e);
-        } else if let Err(e) = tokio::fs::rename(&tw_tmp, &tw_dst).await {
-            eprintln!("[INIT] Failed to rename time_windows.json: {}", e);
-        }
     }
 
     let file_appender = tracing_appender::rolling::daily(&log_dir, "bot.log");
@@ -101,18 +85,24 @@ async fn main() -> Result<()> {
         .init();
     tracing::info!("polybot v{}", env!("CARGO_PKG_VERSION"));
 
-    if config.trading.mode.is_live() && config.is_default_non_trading() {
-        tracing::warn!(
-            "[INIT] Running live mode with default config values; review config.toml before trading"
-        );
-    }
+    // Initialize TUI state with historical trades from CSV
+    let tui_state = Arc::new(RwLock::new(TuiState {
+        recent_trades: TuiState::load_trades_from_csv(&log_dir),
+        ..TuiState::default()
+    }));
 
-    if config.trading.mode.is_live() && config.trading.private_key.expose_secret().is_empty() {
-        anyhow::bail!("PRIVATE_KEY not set in .env — required for live trading");
-    }
+    let mut bot = Bot::new(config, log_dir, tui_state.clone()).await?;
 
-    let mut bot = Bot::new(config, log_dir).await?;
+    // Spawn TUI on a blocking thread
+    let tui_handle = std::thread::spawn(move || {
+        if let Err(e) = tui::run(tui_state) {
+            eprintln!("TUI error: {}", e);
+        }
+    });
+
     bot.run().await?;
+
+    let _ = tui_handle.join();
 
     Ok(())
 }

@@ -26,6 +26,7 @@ use pipeline::settler::{PendingPosition, Settler};
 
 use crate::state::{BotState, MarketState};
 use crate::tasks;
+use polymarket_5m_bot::tui::state::TuiState;
 use polymarket_5m_bot::util;
 
 pub(crate) struct Bot {
@@ -43,10 +44,15 @@ pub(crate) struct Bot {
     market_state: Arc<RwLock<MarketState>>,
     shutdown: Arc<AtomicBool>,
     trade_log: Option<TradeLog>,
+    tui_state: Arc<RwLock<TuiState>>,
 }
 
 impl Bot {
-    pub(crate) async fn new(config: Config, log_dir: String) -> Result<Self> {
+    pub(crate) async fn new(
+        config: Config,
+        log_dir: String,
+        tui_state: Arc<RwLock<TuiState>>,
+    ) -> Result<Self> {
         let price_source = Arc::new(PriceSource::new(
             &config.price_source.symbol,
             config.price_source.buffer_max,
@@ -191,6 +197,7 @@ impl Bot {
             market_state: Arc::new(RwLock::new(MarketState::default())),
             shutdown: Arc::new(AtomicBool::new(false)),
             trade_log,
+            tui_state,
         })
     }
 
