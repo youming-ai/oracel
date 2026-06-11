@@ -14,7 +14,7 @@ pub fn render(frame: &mut Frame, state: Option<&TuiState>) {
     ])
     .split(frame.area());
 
-    let (btc_str, bal_str, pnl_str, record, streak) = match state {
+    let (btc_str, bal_str, pnl_str, record, streak, mode_str) = match state {
         Some(s) => (
             format!("${:.0}", s.btc_price.to_f64().unwrap_or(0.0)),
             format!("${:.2}", s.balance),
@@ -27,8 +27,20 @@ pub fn render(frame: &mut Frame, state: Option<&TuiState>) {
             } else {
                 "0".to_string()
             },
+            if s.mode.is_empty() {
+                "PAPER".to_string()
+            } else {
+                s.mode.to_uppercase()
+            },
         ),
-        None => ("—".into(), "—".into(), "—".into(), "—".into(), "—".into()),
+        None => (
+            "—".into(),
+            "—".into(),
+            "—".into(),
+            "—".into(),
+            "—".into(),
+            "PAPER".into(),
+        ),
     };
 
     let header = Paragraph::new(Line::from(vec![
@@ -40,7 +52,7 @@ pub fn render(frame: &mut Frame, state: Option<&TuiState>) {
         ),
         Span::raw(format!(" | BTC {} | ", btc_str)),
         Span::styled(
-            "LIVE",
+            mode_str,
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),

@@ -1,6 +1,6 @@
 # Polymarket 5m Bot
 
-An automated trading bot for Polymarket BTC 5-minute up/down markets. It monitors live BTC prices via WebSocket (Binance or Coinbase), fetches market quotes from the Polymarket CLOB, and bets against extreme market sentiment. Supports both paper trading (simulated) and live trading with on-chain order placement and CTF redemption.
+An automated trading bot for Polymarket BTC 5-minute up/down markets. It monitors live BTC prices via Binance WebSocket, fetches market quotes from the Polymarket CLOB, and bets against extreme market sentiment. Supports both paper trading (simulated) and live trading with on-chain order placement and CTF redemption.
 
 ## Strategy Overview
 
@@ -27,13 +27,13 @@ Comprehensive documentation is available in the `docs/` directory:
 ## Architecture
 
 ```text
-Binance/Coinbase WS ──────► BTC price buffer (1s ticks)
+Binance WS ─────────────► BTC price buffer (1s ticks)
                                    │
 Polymarket CLOB REST ─────► Yes/No mid prices
                                    │
                          ┌─────────┴─────────┐
                          │     Pipeline       │
-                         │  1. PriceSource    │  BTC price history (multi-exchange)
+                          │  1. PriceSource    │  BTC price history (Binance WS)
                          │  2. Signal         │  Extreme market detection
                          │  3. Decider        │  Edge, entry filters, zero-balance guard
                          │  4. Executor       │  Paper UUID / Live FAK order
@@ -72,12 +72,11 @@ src/
 ├── data/
 │   ├── mod.rs               # Data module exports
 │   ├── binance.rs           # Binance WebSocket client
-│   ├── coinbase.rs          # Coinbase Advanced Trade WebSocket client
 │   ├── market_discovery.rs  # Gamma API market discovery and resolution
 │   └── polymarket.rs        # CLOB client, order placement, CTF redemption, RPC URL selection
 └── pipeline/
     ├── mod.rs               # Pipeline module
-    ├── price_source.rs      # BTC price buffer (multi-exchange)
+    ├── price_source.rs      # BTC price buffer (Binance WS)
     ├── signal.rs            # Extreme market detection
     ├── decider.rs           # Trade decision logic, entry filters
     ├── executor.rs          # Paper/live order execution
@@ -175,8 +174,8 @@ Trading mode and all strategy parameters are configured in `config.json`. See `c
 | `market.stale_threshold_ms` | `30000` | Max age of BTC price data before considered stale (ms) |
 | `market.min_ttl_ms` | `30000` | Minimum remaining time before market expiry to place a trade (ms) |
 | `polyclob.gamma_api_url` | `https://gamma-api.polymarket.com` | Gamma API base URL |
-| `price_source.source` | `"binance"` | Price feed: `"binance"`, `"binance_ws"`, `"coinbase"`, `"coinbase_ws"` |
-| `price_source.symbol` | `"BTCUSDT"` | Trading pair symbol (e.g., "BTCUSDT" for Binance, "BTC-USD" for Coinbase) |
+| `price_source.source` | `"binance"` | Price feed: `"binance"` or `"binance_ws"` |
+| `price_source.symbol` | `"BTCUSDT"` | Trading pair symbol (e.g., "BTCUSDT" for Binance) |
 | `strategy.extreme_threshold` | `0.95` | Market bias threshold to consider sentiment extreme |
 | `strategy.fair_value` | `0.50` | Fair-value assumption for a binary 5-minute outcome |
 | `strategy.position_size_usdc` | `1.0` | Fixed position size per trade in USDC |
@@ -189,7 +188,7 @@ Trading mode and all strategy parameters are configured in `config.json`. See `c
 
 ### Price Source Configuration
 
-The bot supports multiple price sources via the `price_source` config section:
+The bot uses Binance WebSocket for real-time BTC price updates via the `price_source` config section:
 
 ```json
 {
@@ -203,21 +202,16 @@ The bot supports multiple price sources via the `price_source` config section:
 Available sources:
 - `binance` (default): Binance WebSocket stream
 - `binance_ws`: Binance WebSocket (explicit)
-- `coinbase`: Coinbase WebSocket
-- `coinbase_ws`: Coinbase WebSocket (explicit)
 
-Symbol formats:
-- Binance: `BTCUSDT`, `ETHUSDT` (no dash, uppercase)
-- Coinbase: `BTC-USD`, `ETH-USD` (with dash)
+Symbol format: `BTCUSDT`, `ETHUSDT` (no dash, uppercase)
 
-The bot validates symbol format on startup and rejects mismatched configurations (e.g., using `BTCUSDT` with Coinbase source).
+The bot validates symbol format on startup and rejects invalid configurations.
 
 ## Data Sources
 
 | Source | Protocol | Purpose |
 | --- | --- | --- |
-| Binance | WebSocket | Live BTC/USDT price stream (default, low latency) |
-| Coinbase Advanced Trade | WebSocket | Live BTC/USD price stream (alternative) |
+| Binance | WebSocket | Live BTC/USDT price stream (low latency) |
 | Polymarket CLOB | REST | Yes/No mid prices and live order placement |
 | Gamma API | REST | Market discovery, slug lookup, resolution checks |
 | CTF Contract | Polygon RPC | On-chain position balance queries and redemption |
@@ -278,18 +272,18 @@ The bot handles `SIGINT` and `SIGTERM` for graceful shutdown: it persists state 
 
 ## Recent Changes
 
-### Multi-Exchange Price Sources
-- Added Binance WebSocket support (default)
+### Binance WebSocket Price Source
+- Binance WebSocket support (default)
 - Configurable via `price_source.source` and `price_source.symbol`
-- Enum-based dispatch for performance (no trait objects)
+- Enum-based dispatch for performance
 
 ### Risk Controls
 - Cooldown and daily-loss conditions are logged as warnings but do not block trading
 - Zero-balance trades are always rejected regardless of configuration
 
 ### WebSocket Improvements
-- Simplified WebSocket task architecture: one client task + one consumer task per exchange
-- Uses exchange timestamps (Binance `E` field) for more accurate price staleness detection
+- Simplified WebSocket task architecture: one client task + one consumer task
+- Uses Binance timestamp (`E` field) for more accurate price staleness detection
 - Invalid symbol errors (`-1121`) now cause permanent failure instead of infinite reconnection loops
 - Out-of-order tick protection: ignores timestamps that move backward
 

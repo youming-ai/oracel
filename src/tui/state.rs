@@ -13,6 +13,7 @@ pub struct TradeRow {
 }
 
 pub struct TuiState {
+    pub mode: String,
     pub btc_price: Decimal,
     pub market_slug: String,
     pub settlement_ms: i64,
@@ -31,6 +32,7 @@ pub struct TuiState {
 impl Default for TuiState {
     fn default() -> Self {
         Self {
+            mode: String::new(),
             btc_price: Decimal::ZERO,
             market_slug: String::new(),
             settlement_ms: 0,

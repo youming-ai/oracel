@@ -1,5 +1,3 @@
-pub mod event;
-pub mod keys;
 pub mod state;
 pub mod ui;
 

@@ -53,8 +53,8 @@ async fn main() -> Result<()> {
 
     config.validate()?;
 
-    if config.trading.private_key.expose_secret().is_empty() {
-        anyhow::bail!("PRIVATE_KEY not set in .env — required for trading");
+    if config.trading.mode.is_live() && config.trading.private_key.expose_secret().is_empty() {
+        anyhow::bail!("PRIVATE_KEY not set in .env — required for live trading");
     }
 
     let log_dir = "logs".to_string();
@@ -87,6 +87,7 @@ async fn main() -> Result<()> {
 
     // Initialize TUI state with historical trades from CSV
     let tui_state = Arc::new(RwLock::new(TuiState {
+        mode: config.trading.mode.to_string(),
         recent_trades: TuiState::load_trades_from_csv(&log_dir),
         ..TuiState::default()
     }));

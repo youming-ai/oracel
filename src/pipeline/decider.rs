@@ -199,9 +199,10 @@ pub fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderConfig) 
         // Market is extremely bearish → bet against (Up)
         (Direction::Up, yes)
     } else {
+        let dominant = yes.max(no);
         return Decision::Pass(format!(
             "not_extreme_{}%",
-            (yes * util::decimal("100")).round_dp(0)
+            (dominant * util::decimal("100")).round_dp(0)
         ));
     };
 
@@ -209,7 +210,7 @@ pub fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderConfig) 
     // Reject when the sum of yes + no prices diverges from 1.0 by more than the
     // allowed spread. A wide spread signals poor liquidity and high slippage risk,
     // meaning a FAK order placed at the mid price is unlikely to fill cleanly.
-    let spread = (yes + no).abs() - Decimal::ONE;
+    let spread = (yes + no) - Decimal::ONE;
     let max_spread = util::decimal("0.06");
     if spread.abs() > max_spread {
         let pct = (spread * util::decimal("100")).round_dp(1);
