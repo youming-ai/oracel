@@ -1,7 +1,8 @@
 # Polymarket BTC 5m Bot
 
-Automated contrarian trader for Polymarket BTC 5-minute UP/DOWN markets. Binance supplies
-real-time BTC prices; Polymarket supplies the market, order book, execution, and resolution.
+Oracle-aligned value-momentum trader for Polymarket BTC five-minute UP/DOWN markets. Chainlink
+defines the opening/current reference, Binance confirms low-latency momentum, and executable CLOB
+order books determine whether a trade has enough conservative edge.
 
 The bot has exactly two modes:
 
@@ -31,22 +32,26 @@ POLYBOT_HEADLESS=1 cargo run --release --bin polybot
 
 ## Live mode
 
-Set the mode in `config.toml`:
+The probability baseline is intentionally Paper-first. Live mode requires both settings:
 
 ```toml
 [trading]
 mode = "live"
+allow_uncalibrated_model_live = true
 ```
+
+Do not acknowledge this guard until the model has been calibrated from the observation dataset.
 
 Create `.env` from `.env.example` and set `PRIVATE_KEY`. `ALCHEMY_KEY` is optional; without it the
 bot uses a public Polygon RPC endpoint.
 
 Before enabling live mode:
 
-1. Run paper mode through at least one entry and settlement.
-2. Verify the wallet address, USDC balance, approvals, and Polymarket access.
-3. Keep `position_size_usdc` small.
-4. Confirm `logs/live/` is writable and backed up.
+1. Collect at least 2,000 windows and 200 realistic Paper fills.
+2. Validate walk-forward calibration, net PnL after costs, and drawdown.
+3. Verify the wallet address, USDC balance, approvals, and Polymarket access.
+4. Keep `position_size_usdc` at `$1` for initial live validation.
+5. Confirm `logs/live/` is writable and backed up.
 
 ## Runtime files
 
@@ -57,6 +62,8 @@ logs/
 ├── paper/
 │   ├── bot.log.YYYY-MM-DD
 │   ├── trades.csv
+│   ├── observations.csv
+│   ├── outcomes.csv
 │   ├── balance
 │   └── pending_positions.json
 └── live/
@@ -69,9 +76,10 @@ Pending positions and balances are written atomically and restored after restart
 
 | Source | Purpose |
 | --- | --- |
-| Binance WebSocket | BTCUSDT price buffer and momentum filter |
+| Polymarket Chainlink RTDS | Authoritative BTC/USD opening/current values and volatility |
+| Binance WebSocket | Low-latency BTCUSDT momentum confirmation |
 | Polymarket Gamma API | Active-market discovery and official resolution |
-| Polymarket CLOB | Buy quotes and live FAK execution |
+| Polymarket CLOB | Full order books, executable quote depth, and live FAK execution |
 | Polygon RPC | Live USDC balance and CTF redemption |
 
 ## Tools
@@ -107,7 +115,8 @@ src/
 ├── tasks.rs                # market refresh, status, settlement, redemption
 ├── trade_log.rs            # shared CSV writer
 ├── data/
-│   ├── binance.rs          # BTC WebSocket
+│   ├── binance.rs          # low-latency exchange WebSocket
+│   ├── chainlink.rs        # authoritative Polymarket RTDS feed
 │   ├── market_discovery.rs # Gamma discovery and resolution
 │   └── polymarket.rs       # CLOB and Polygon clients
 ├── pipeline/

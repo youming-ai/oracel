@@ -17,6 +17,9 @@ pub(crate) mod defaults {
     pub fn paper_starting_balance() -> Decimal {
         dec("100")
     }
+    pub fn allow_uncalibrated_model_live() -> bool {
+        false
+    }
 
     // ─── Market ───
     pub fn stale_threshold_ms() -> i64 {
@@ -32,29 +35,47 @@ pub(crate) mod defaults {
     }
 
     // ─── Strategy ───
-    pub fn extreme_threshold() -> Decimal {
-        dec("0.90")
-    }
-    pub fn fair_value() -> Decimal {
-        dec("0.50")
-    }
     pub fn position_size_usdc() -> Decimal {
         dec("1.0")
     }
-    pub fn min_entry_price() -> Decimal {
+    pub fn min_entry_ttl_ms() -> u64 {
+        75_000
+    }
+    pub fn max_entry_ttl_ms() -> u64 {
+        150_000
+    }
+    pub fn min_normalized_move() -> Decimal {
+        dec("0.60")
+    }
+    pub fn min_net_edge() -> Decimal {
+        dec("0.05")
+    }
+    pub fn model_uncertainty() -> Decimal {
+        dec("0.03")
+    }
+    pub fn fee_buffer() -> Decimal {
         dec("0.02")
     }
-    pub fn max_entry_price() -> Decimal {
-        dec("0.12")
+    pub fn max_spread() -> Decimal {
+        dec("0.03")
     }
-    pub fn min_ttl_for_entry_ms() -> u64 {
-        120_000
+    pub fn min_depth_multiple() -> Decimal {
+        dec("5")
     }
-    pub fn btc_trend_window_s() -> u64 {
-        30
+    pub fn volatility_lookback_secs() -> u64 {
+        900
     }
-    pub fn btc_trend_min_pct() -> Decimal {
-        dec("0.05")
+    pub fn min_volatility_samples() -> usize {
+        120
+    }
+    pub fn oracle_stale_threshold_ms() -> i64 {
+        5_000
+    }
+    pub fn order_book_stale_threshold_ms() -> i64 {
+        8_000
+    }
+    pub fn max_unsettled_positions() -> usize {
+        2
     }
     pub fn circuit_breaker_window() -> u32 {
         50
@@ -73,6 +94,15 @@ pub(crate) mod defaults {
     pub fn fak_backoff_ms() -> u64 {
         3_000
     }
+    pub fn max_consecutive_losses() -> u32 {
+        3
+    }
+    pub fn max_trades_per_day() -> u32 {
+        8
+    }
+    pub fn loss_cooldown_ms() -> i64 {
+        1_800_000
+    }
 
     // ─── Polling ───
     pub fn signal_interval_ms() -> u64 {
@@ -86,11 +116,6 @@ pub(crate) mod defaults {
     }
     pub fn settlement_check_secs() -> u64 {
         15
-    }
-
-    // ─── Execution ───
-    pub fn slippage_tolerance() -> Decimal {
-        dec("0.01")
     }
 
     // ─── Price Source ───
@@ -191,6 +216,9 @@ pub struct TradingConfig {
         with = "rust_decimal::serde::float"
     )]
     pub paper_starting_balance: Decimal,
+    /// Explicit acknowledgement required before an uncalibrated model can trade live.
+    #[serde(default = "defaults::allow_uncalibrated_model_live")]
+    pub allow_uncalibrated_model_live: bool,
     /// Loaded from PRIVATE_KEY env var (not stored in config)
     #[serde(skip, default = "defaults::private_key")]
     pub private_key: SecretString,
@@ -213,59 +241,55 @@ pub struct PolymarketConfig {
 #[serde(deny_unknown_fields)]
 pub struct StrategyConfig {
     #[serde(
-        default = "defaults::extreme_threshold",
-        with = "rust_decimal::serde::float"
-    )]
-    pub extreme_threshold: Decimal,
-    #[serde(default = "defaults::fair_value", with = "rust_decimal::serde::float")]
-    pub fair_value: Decimal,
-    #[serde(
         default = "defaults::position_size_usdc",
         with = "rust_decimal::serde::float"
     )]
     pub position_size_usdc: Decimal,
-    /// Minimum entry price to trade (avoid illiquid extreme prices)
+    #[serde(default = "defaults::min_entry_ttl_ms")]
+    pub min_entry_ttl_ms: u64,
+    #[serde(default = "defaults::max_entry_ttl_ms")]
+    pub max_entry_ttl_ms: u64,
     #[serde(
-        default = "defaults::min_entry_price",
+        default = "defaults::min_normalized_move",
         with = "rust_decimal::serde::float"
     )]
-    pub min_entry_price: Decimal,
-    /// Maximum entry price to trade (avoid illiquid extreme prices)
+    pub min_normalized_move: Decimal,
     #[serde(
-        default = "defaults::max_entry_price",
+        default = "defaults::min_net_edge",
         with = "rust_decimal::serde::float"
     )]
-    pub max_entry_price: Decimal,
-    /// Minimum time-to-live for market to enter a trade (ms)
-    #[serde(default = "defaults::min_ttl_for_entry_ms")]
-    pub min_ttl_for_entry_ms: u64,
-    /// BTC trend lookback window in seconds for momentum confirmation.
-    /// 0 = disabled.
-    #[serde(default = "defaults::btc_trend_window_s")]
-    pub btc_trend_window_s: u64,
-    /// Minimum BTC price change (%, as decimal e.g. 0.05 = 0.05%) to consider
-    /// a meaningful trend. Trades against the trend are skipped.
+    pub min_net_edge: Decimal,
     #[serde(
-        default = "defaults::btc_trend_min_pct",
+        default = "defaults::model_uncertainty",
         with = "rust_decimal::serde::float"
     )]
-    pub btc_trend_min_pct: Decimal,
-    /// Sliding-window circuit breaker: number of recent trades to evaluate.
-    /// 0 = disabled.
+    pub model_uncertainty: Decimal,
+    #[serde(default = "defaults::fee_buffer", with = "rust_decimal::serde::float")]
+    pub fee_buffer: Decimal,
+    #[serde(default = "defaults::max_spread", with = "rust_decimal::serde::float")]
+    pub max_spread: Decimal,
+    #[serde(
+        default = "defaults::min_depth_multiple",
+        with = "rust_decimal::serde::float"
+    )]
+    pub min_depth_multiple: Decimal,
+    #[serde(default = "defaults::volatility_lookback_secs")]
+    pub volatility_lookback_secs: u64,
+    #[serde(default = "defaults::min_volatility_samples")]
+    pub min_volatility_samples: usize,
+    #[serde(default = "defaults::oracle_stale_threshold_ms")]
+    pub oracle_stale_threshold_ms: i64,
+    #[serde(default = "defaults::order_book_stale_threshold_ms")]
+    pub order_book_stale_threshold_ms: i64,
+    #[serde(default = "defaults::max_unsettled_positions")]
+    pub max_unsettled_positions: usize,
     #[serde(default = "defaults::circuit_breaker_window")]
     pub circuit_breaker_window: u32,
-    /// Sliding-window circuit breaker: minimum win rate to keep trading.
     #[serde(
         default = "defaults::circuit_breaker_min_win_rate",
         with = "rust_decimal::serde::float"
     )]
     pub circuit_breaker_min_win_rate: Decimal,
-    /// Maximum premium over the current CLOB buy quote.
-    #[serde(
-        default = "defaults::slippage_tolerance",
-        with = "rust_decimal::serde::float"
-    )]
-    pub slippage_tolerance: Decimal,
 }
 
 // ─── Risk ───
@@ -277,6 +301,12 @@ pub struct RiskConfig {
     pub max_fak_retries: u32,
     #[serde(default = "defaults::fak_backoff_ms")]
     pub fak_backoff_ms: u64,
+    #[serde(default = "defaults::max_consecutive_losses")]
+    pub max_consecutive_losses: u32,
+    #[serde(default = "defaults::max_trades_per_day")]
+    pub max_trades_per_day: u32,
+    #[serde(default = "defaults::loss_cooldown_ms")]
+    pub loss_cooldown_ms: i64,
     /// Daily loss limit in USDC (0 = disabled)
     #[serde(
         default = "defaults::daily_loss_limit",
@@ -364,6 +394,7 @@ impl Default for TradingConfig {
         Self {
             mode: TradingMode::default(),
             paper_starting_balance: defaults::paper_starting_balance(),
+            allow_uncalibrated_model_live: defaults::allow_uncalibrated_model_live(),
             private_key: defaults::private_key(),
         }
     }
@@ -381,17 +412,22 @@ impl Default for PolymarketConfig {
 impl Default for StrategyConfig {
     fn default() -> Self {
         Self {
-            extreme_threshold: defaults::extreme_threshold(),
-            fair_value: defaults::fair_value(),
             position_size_usdc: defaults::position_size_usdc(),
-            min_entry_price: defaults::min_entry_price(),
-            max_entry_price: defaults::max_entry_price(),
-            min_ttl_for_entry_ms: defaults::min_ttl_for_entry_ms(),
-            btc_trend_window_s: defaults::btc_trend_window_s(),
-            btc_trend_min_pct: defaults::btc_trend_min_pct(),
+            min_entry_ttl_ms: defaults::min_entry_ttl_ms(),
+            max_entry_ttl_ms: defaults::max_entry_ttl_ms(),
+            min_normalized_move: defaults::min_normalized_move(),
+            min_net_edge: defaults::min_net_edge(),
+            model_uncertainty: defaults::model_uncertainty(),
+            fee_buffer: defaults::fee_buffer(),
+            max_spread: defaults::max_spread(),
+            min_depth_multiple: defaults::min_depth_multiple(),
+            volatility_lookback_secs: defaults::volatility_lookback_secs(),
+            min_volatility_samples: defaults::min_volatility_samples(),
+            oracle_stale_threshold_ms: defaults::oracle_stale_threshold_ms(),
+            order_book_stale_threshold_ms: defaults::order_book_stale_threshold_ms(),
+            max_unsettled_positions: defaults::max_unsettled_positions(),
             circuit_breaker_window: defaults::circuit_breaker_window(),
             circuit_breaker_min_win_rate: defaults::circuit_breaker_min_win_rate(),
-            slippage_tolerance: defaults::slippage_tolerance(),
         }
     }
 }
@@ -401,6 +437,9 @@ impl Default for RiskConfig {
         Self {
             max_fak_retries: defaults::max_fak_retries(),
             fak_backoff_ms: defaults::fak_backoff_ms(),
+            max_consecutive_losses: defaults::max_consecutive_losses(),
+            max_trades_per_day: defaults::max_trades_per_day(),
+            loss_cooldown_ms: defaults::loss_cooldown_ms(),
             daily_loss_limit_usdc: defaults::daily_loss_limit(),
         }
     }
@@ -471,6 +510,11 @@ impl Config {
         if self.trading.paper_starting_balance <= zero {
             anyhow::bail!("trading.paper_starting_balance must be > 0");
         }
+        if self.trading.mode.is_live() && !self.trading.allow_uncalibrated_model_live {
+            anyhow::bail!(
+                "live mode requires trading.allow_uncalibrated_model_live = true until the probability model is calibrated"
+            );
+        }
         if self.price_source.stale_threshold_ms <= 0 {
             anyhow::bail!("price_source.stale_threshold_ms must be > 0");
         }
@@ -484,42 +528,53 @@ impl Config {
         {
             anyhow::bail!("all polling intervals must be > 0");
         }
-        if !(zero < self.strategy.extreme_threshold && self.strategy.extreme_threshold < one) {
-            anyhow::bail!("strategy.extreme_threshold must be in (0, 1)");
-        }
-        if !(zero < self.strategy.fair_value && self.strategy.fair_value < one) {
-            anyhow::bail!("strategy.fair_value must be in (0, 1)");
-        }
-        // Validate threshold > fair_value (otherwise edge can never be positive)
-        if self.strategy.extreme_threshold <= self.strategy.fair_value {
-            anyhow::bail!(
-                "strategy.extreme_threshold ({}) must be > fair_value ({})",
-                self.strategy.extreme_threshold,
-                self.strategy.fair_value
-            );
-        }
-        if self.strategy.extreme_threshold < dec("0.80") {
-            tracing::warn!(
-                "extreme_threshold < 0.80 (current: {}) — this bot targets extreme markets, consider >= 0.90",
-                self.strategy.extreme_threshold
-            );
-        }
         if self.strategy.position_size_usdc < one {
             anyhow::bail!("strategy.position_size_usdc must be >= 1 USDC");
         }
-        if !(zero < self.strategy.min_entry_price
-            && self.strategy.min_entry_price < self.strategy.max_entry_price
-            && self.strategy.max_entry_price < one)
+        if self.strategy.min_entry_ttl_ms == 0
+            || self.strategy.min_entry_ttl_ms >= self.strategy.max_entry_ttl_ms
+            || self.strategy.max_entry_ttl_ms >= 300_000
         {
             anyhow::bail!(
-                "strategy.min_entry_price and max_entry_price must satisfy: 0 < min_entry_price < max_entry_price < 1"
+                "strategy entry TTLs must satisfy 0 < min_entry_ttl_ms < max_entry_ttl_ms < 300000"
             );
         }
-        if self.strategy.min_ttl_for_entry_ms == 0 {
-            anyhow::bail!("strategy.min_ttl_for_entry_ms must be > 0");
+        if self.strategy.min_normalized_move <= zero {
+            anyhow::bail!("strategy.min_normalized_move must be > 0");
         }
-        if self.strategy.btc_trend_min_pct < zero {
-            anyhow::bail!("strategy.btc_trend_min_pct must be >= 0");
+        for (name, value) in [
+            ("min_net_edge", self.strategy.min_net_edge),
+            ("model_uncertainty", self.strategy.model_uncertainty),
+            ("fee_buffer", self.strategy.fee_buffer),
+            ("max_spread", self.strategy.max_spread),
+        ] {
+            if value < zero || value >= one {
+                anyhow::bail!("strategy.{name} must be in [0, 1)");
+            }
+        }
+        if self.strategy.min_net_edge + self.strategy.model_uncertainty + self.strategy.fee_buffer
+            >= one
+        {
+            anyhow::bail!("strategy edge, uncertainty, and fee buffers must sum to < 1");
+        }
+        if self.strategy.min_depth_multiple < one {
+            anyhow::bail!("strategy.min_depth_multiple must be >= 1");
+        }
+        if self.strategy.volatility_lookback_secs == 0
+            || self.strategy.min_volatility_samples == 0
+            || self.strategy.min_volatility_samples as u64 >= self.strategy.volatility_lookback_secs
+        {
+            anyhow::bail!(
+                "strategy volatility settings must satisfy 0 < min_volatility_samples < volatility_lookback_secs"
+            );
+        }
+        if self.strategy.oracle_stale_threshold_ms <= 0
+            || self.strategy.order_book_stale_threshold_ms <= 0
+        {
+            anyhow::bail!("strategy data staleness thresholds must be > 0");
+        }
+        if self.strategy.max_unsettled_positions == 0 {
+            anyhow::bail!("strategy.max_unsettled_positions must be > 0");
         }
         if self.strategy.circuit_breaker_min_win_rate < zero
             || self.strategy.circuit_breaker_min_win_rate > one
@@ -551,13 +606,13 @@ impl Config {
                 self.price_source.buffer_max
             );
         }
-        if self.strategy.slippage_tolerance < zero || self.strategy.slippage_tolerance >= one {
-            anyhow::bail!("strategy.slippage_tolerance must be in [0, 1)");
-        }
-        if self.risk.daily_loss_limit_usdc < zero || self.risk.max_fak_retries == 0 {
-            anyhow::bail!(
-                "risk.daily_loss_limit_usdc must be >= 0 and max_fak_retries must be > 0"
-            );
+        if self.risk.daily_loss_limit_usdc < zero
+            || self.risk.max_fak_retries == 0
+            || self.risk.max_consecutive_losses == 0
+            || self.risk.max_trades_per_day == 0
+            || self.risk.loss_cooldown_ms <= 0
+        {
+            anyhow::bail!("risk limits and retry counts must be > 0; daily loss must be >= 0");
         }
         if self.redeem.max_retries == 0
             || self.misc.trade_log_flush_secs == 0
@@ -610,6 +665,19 @@ min_ttl_ms = 30000
     }
 
     #[test]
+    fn test_live_requires_uncalibrated_model_acknowledgement() {
+        let mut cfg = Config::default();
+        cfg.trading.mode = TradingMode::Live;
+        let error = cfg
+            .validate()
+            .expect_err("live should require acknowledgement");
+        assert!(error.to_string().contains("allow_uncalibrated_model_live"));
+
+        cfg.trading.allow_uncalibrated_model_live = true;
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
     fn test_trading_mode_serde_roundtrip() {
         let toml_str = r#"mode = "live""#;
         let cfg: TradingConfig = toml::from_str(toml_str).unwrap();
@@ -650,40 +718,35 @@ min_ttl_ms = 30000
     }
 
     #[test]
-    fn test_validate_rejects_max_entry_price_not_above_min() {
+    fn test_validate_rejects_invalid_entry_ttl_window() {
         let mut cfg = Config::default();
-        cfg.strategy.min_entry_price = dec("0.08");
-        cfg.strategy.max_entry_price = dec("0.08");
-
+        cfg.strategy.min_entry_ttl_ms = cfg.strategy.max_entry_ttl_ms;
         let err = cfg.validate().expect_err("expected validation failure");
-        assert!(err.to_string().contains("min_entry_price"));
+        assert!(err.to_string().contains("entry TTLs"));
     }
 
     #[test]
-    fn test_validate_rejects_zero_min_ttl_for_entry_ms() {
+    fn test_validate_rejects_non_positive_normalized_move() {
         let mut cfg = Config::default();
-        cfg.strategy.min_ttl_for_entry_ms = 0;
-
+        cfg.strategy.min_normalized_move = Decimal::ZERO;
         let err = cfg.validate().expect_err("expected validation failure");
-        assert!(err.to_string().contains("min_ttl_for_entry_ms"));
+        assert!(err.to_string().contains("min_normalized_move"));
     }
 
     #[test]
-    fn test_validate_rejects_non_positive_min_entry_price() {
+    fn test_validate_rejects_invalid_probability_buffers() {
         let mut cfg = Config::default();
-        cfg.strategy.min_entry_price = Decimal::ZERO;
-
+        cfg.strategy.min_net_edge = dec("0.95");
         let err = cfg.validate().expect_err("expected validation failure");
-        assert!(err.to_string().contains("min_entry_price"));
+        assert!(err.to_string().contains("must sum"));
     }
 
     #[test]
-    fn test_validate_rejects_max_entry_price_at_or_above_one() {
+    fn test_validate_rejects_insufficient_volatility_history() {
         let mut cfg = Config::default();
-        cfg.strategy.max_entry_price = Decimal::ONE;
-
+        cfg.strategy.min_volatility_samples = 900;
         let err = cfg.validate().expect_err("expected validation failure");
-        assert!(err.to_string().contains("max_entry_price"));
+        assert!(err.to_string().contains("volatility settings"));
     }
 
     #[test]

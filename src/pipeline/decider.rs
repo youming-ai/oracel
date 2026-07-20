@@ -1,16 +1,16 @@
-//! Stage 2: Trade Decider
-//! Market sentiment arbitrage decider — signal detection + trade decision.
+//! Stage 2: oracle-aligned value and momentum trade decider.
 //!
-//! Core logic: When market is extremely overconfident (≥90%), bet against it.
-//! Edge = fair_value - cheap_side_price (our fair value minus market's extreme price).
-//! Direction is determined by market price extremes.
-//! Risk controls: daily loss limit, BTC trend filter, sliding-window circuit breaker.
+//! Chainlink defines the market outcome. Binance confirms short-term momentum,
+//! while executable CLOB order-book prices determine whether an entry has
+//! enough conservative net edge.
 
-use crate::util;
-use rust_decimal::Decimal;
 use std::collections::VecDeque;
 
-/// Trade direction — bet on price going up or down.
+use rust_decimal::{Decimal, MathematicalOps};
+
+use crate::data::polymarket::BuyQuote;
+use crate::util;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Direction {
     Up,
@@ -32,71 +32,79 @@ pub enum Decision {
     Trade {
         direction: Direction,
         size_usdc: Decimal,
+        /// Conservative edge after fee and model-uncertainty buffers.
         edge: Decimal,
-        /// (1 - cheap_price) / cheap_price — the core "以小搏大" metric.
         payoff_ratio: Decimal,
+        model_probability: Decimal,
+        entry_price: Decimal,
+        /// Highest price that still preserves the configured minimum edge.
+        order_limit_price: Decimal,
     },
 }
 
 #[derive(Debug, Clone)]
 pub struct DeciderConfig {
     pub position_size_usdc: Decimal,
-    pub extreme_threshold: Decimal,
-    pub fair_value: Decimal,
-    pub min_entry_price: Decimal,
-    pub max_entry_price: Decimal,
-    pub min_ttl_for_entry_ms: u64,
+    pub min_entry_ttl_ms: u64,
+    pub max_entry_ttl_ms: u64,
+    pub min_normalized_move: Decimal,
+    pub min_net_edge: Decimal,
+    pub model_uncertainty: Decimal,
+    pub fee_buffer: Decimal,
+    pub max_spread: Decimal,
+    pub min_depth_multiple: Decimal,
     pub daily_loss_limit_usdc: Decimal,
-    /// BTC trend lookback window in seconds (0 = disabled).
-    pub btc_trend_window_s: u64,
-    /// Minimum BTC price change (% as decimal) to consider a meaningful trend.
-    pub btc_trend_min_pct: Decimal,
-    /// Sliding window circuit breaker: number of recent trades to evaluate.
-    /// 0 = disabled.
+    pub max_consecutive_losses: u32,
+    pub loss_cooldown_ms: i64,
+    pub max_trades_per_day: u32,
     pub circuit_breaker_window: u32,
-    /// Sliding window circuit breaker: minimum win rate to keep trading.
     pub circuit_breaker_min_win_rate: Decimal,
 }
 
 impl Default for DeciderConfig {
     fn default() -> Self {
         Self {
-            position_size_usdc: util::decimal("1.0"),
-            extreme_threshold: util::decimal("0.90"),
-            fair_value: util::decimal("0.50"),
-            min_entry_price: util::decimal("0.02"),
-            max_entry_price: util::decimal("0.12"),
-            min_ttl_for_entry_ms: 120_000,
-            daily_loss_limit_usdc: util::decimal("0"),
-            btc_trend_window_s: 30,
-            btc_trend_min_pct: util::decimal("0.05"),
+            position_size_usdc: util::decimal("1"),
+            min_entry_ttl_ms: 75_000,
+            max_entry_ttl_ms: 150_000,
+            min_normalized_move: util::decimal("0.60"),
+            min_net_edge: util::decimal("0.05"),
+            model_uncertainty: util::decimal("0.03"),
+            fee_buffer: util::decimal("0.02"),
+            max_spread: util::decimal("0.03"),
+            min_depth_multiple: util::decimal("5"),
+            daily_loss_limit_usdc: Decimal::ZERO,
+            max_consecutive_losses: 3,
+            loss_cooldown_ms: 1_800_000,
+            max_trades_per_day: 8,
             circuit_breaker_window: 50,
             circuit_breaker_min_win_rate: util::decimal("0.05"),
         }
     }
 }
 
-fn integer_suffix(value: Decimal) -> String {
-    value.abs().trunc().to_string()
-}
-
 impl From<&crate::config::Config> for DeciderConfig {
     fn from(cfg: &crate::config::Config) -> Self {
         Self {
             position_size_usdc: cfg.strategy.position_size_usdc,
-            extreme_threshold: cfg.strategy.extreme_threshold,
-            fair_value: cfg.strategy.fair_value,
-            min_entry_price: cfg.strategy.min_entry_price,
-            max_entry_price: cfg.strategy.max_entry_price,
-            min_ttl_for_entry_ms: cfg.strategy.min_ttl_for_entry_ms,
+            min_entry_ttl_ms: cfg.strategy.min_entry_ttl_ms,
+            max_entry_ttl_ms: cfg.strategy.max_entry_ttl_ms,
+            min_normalized_move: cfg.strategy.min_normalized_move,
+            min_net_edge: cfg.strategy.min_net_edge,
+            model_uncertainty: cfg.strategy.model_uncertainty,
+            fee_buffer: cfg.strategy.fee_buffer,
+            max_spread: cfg.strategy.max_spread,
+            min_depth_multiple: cfg.strategy.min_depth_multiple,
             daily_loss_limit_usdc: cfg.risk.daily_loss_limit_usdc,
-            btc_trend_window_s: cfg.strategy.btc_trend_window_s,
-            btc_trend_min_pct: cfg.strategy.btc_trend_min_pct,
+            max_consecutive_losses: cfg.risk.max_consecutive_losses,
+            loss_cooldown_ms: cfg.risk.loss_cooldown_ms,
+            max_trades_per_day: cfg.risk.max_trades_per_day,
             circuit_breaker_window: cfg.strategy.circuit_breaker_window,
             circuit_breaker_min_win_rate: cfg.strategy.circuit_breaker_min_win_rate,
         }
     }
 }
+
 #[derive(Debug, Clone)]
 pub struct AccountState {
     pub balance: Decimal,
@@ -106,9 +114,9 @@ pub struct AccountState {
     pub total_wins: u32,
     pub total_losses: u32,
     pub daily_pnl: Decimal,
+    pub daily_trades: u32,
+    pub last_loss_ms: i64,
     pub daily_reset_date: String,
-    /// Ring buffer of recent trade outcomes (true = win, false = loss).
-    /// Used for sliding-window circuit breaker.
     pub recent_results: VecDeque<bool>,
 }
 
@@ -122,6 +130,8 @@ impl AccountState {
             total_wins: 0,
             total_losses: 0,
             daily_pnl: Decimal::ZERO,
+            daily_trades: 0,
+            last_loss_ms: 0,
             daily_reset_date: String::new(),
             recent_results: VecDeque::new(),
         }
@@ -133,12 +143,12 @@ impl AccountState {
 
     pub fn record_trade(&mut self, cost: Decimal) {
         self.balance -= cost;
+        self.daily_trades = self.daily_trades.saturating_add(1);
     }
 
     pub fn record_settlement(&mut self, result: &crate::pipeline::settler::SettlementResult) {
         self.balance += result.payout;
         self.daily_pnl += result.pnl;
-
         if result.won {
             self.consecutive_wins += 1;
             self.consecutive_losses = 0;
@@ -147,10 +157,9 @@ impl AccountState {
             self.consecutive_losses += 1;
             self.consecutive_wins = 0;
             self.total_losses += 1;
+            self.last_loss_ms = chrono::Utc::now().timestamp_millis();
         }
-
         self.recent_results.push_back(result.won);
-        // Keep the ring buffer bounded (cap at 200 to cover any circuit_breaker_window)
         if self.recent_results.len() > 200 {
             self.recent_results.pop_front();
         }
@@ -159,25 +168,99 @@ impl AccountState {
     pub fn reset_daily_if_needed(&mut self, today: &str) {
         if self.daily_reset_date != today {
             self.daily_pnl = Decimal::ZERO;
+            self.daily_trades = 0;
             self.daily_reset_date = today.to_string();
         }
     }
 }
 
 pub struct DecideContext {
-    pub market_yes: Option<Decimal>,
-    pub market_no: Option<Decimal>,
+    pub now_ms: i64,
+    pub up_quote: Option<BuyQuote>,
+    pub down_quote: Option<BuyQuote>,
     pub remaining_ms: i64,
-    /// BTC price trend over the last N seconds, as a percentage change (positive = BTC rising).
-    /// `None` if trend data is unavailable.
-    pub btc_trend_pct: Option<Decimal>,
+    pub chainlink_open: Option<Decimal>,
+    pub chainlink_current: Option<Decimal>,
+    pub sigma_per_second: Option<Decimal>,
+    pub binance_trend_15s_pct: Option<Decimal>,
+    pub binance_trend_30s_pct: Option<Decimal>,
+}
+
+fn integer_suffix(value: Decimal) -> String {
+    value.abs().trunc().to_string()
+}
+
+/// Decimal-only approximation of the standard normal cumulative distribution.
+fn normal_cdf(value: Decimal) -> Decimal {
+    let six = Decimal::from(6);
+    if value >= six {
+        return util::decimal("0.999999");
+    }
+    if value <= -six {
+        return util::decimal("0.000001");
+    }
+
+    let x = value.abs();
+    let t = Decimal::ONE / (Decimal::ONE + util::decimal("0.2316419") * x);
+    let polynomial = t
+        * (util::decimal("0.319381530")
+            + t * (util::decimal("-0.356563782")
+                + t * (util::decimal("1.781477937")
+                    + t * (util::decimal("-1.821255978") + t * util::decimal("1.330274429")))));
+    let density = (-x * x / Decimal::from(2)).exp() * util::decimal("0.3989422804014327");
+    let positive_cdf = Decimal::ONE - density * polynomial;
+    if value >= Decimal::ZERO {
+        positive_cdf
+    } else {
+        Decimal::ONE - positive_cdf
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ModelEstimate {
+    pub normalized_move: Decimal,
+    pub p_up: Decimal,
+}
+
+pub fn estimate_probability(ctx: &DecideContext) -> Option<ModelEstimate> {
+    let open = ctx.chainlink_open?;
+    let current = ctx.chainlink_current?;
+    let sigma_per_second = ctx.sigma_per_second?;
+    if open <= Decimal::ZERO || current <= Decimal::ZERO || sigma_per_second <= Decimal::ZERO {
+        return None;
+    }
+    let ttl_seconds = Decimal::from(ctx.remaining_ms) / Decimal::from(1_000);
+    let expected_remaining_volatility = sigma_per_second * ttl_seconds.sqrt()?;
+    if expected_remaining_volatility <= Decimal::ZERO {
+        return None;
+    }
+    let distance_return = (current - open) / open;
+    let normalized_move = distance_return / expected_remaining_volatility;
+    Some(ModelEstimate {
+        normalized_move,
+        p_up: normal_cdf(normalized_move),
+    })
+}
+
+fn circuit_breaker_reason(account: &AccountState, cfg: &DeciderConfig) -> Option<String> {
+    let window = &account.recent_results;
+    if cfg.circuit_breaker_window == 0 || window.len() < cfg.circuit_breaker_window as usize {
+        return None;
+    }
+    let wins = window.iter().filter(|&&won| won).count() as u32;
+    let win_rate = Decimal::from(wins) / Decimal::from(window.len() as u32);
+    (win_rate < cfg.circuit_breaker_min_win_rate).then(|| {
+        format!(
+            "circuit_breaker_wr_{}%",
+            (win_rate * Decimal::from(100)).round_dp(0)
+        )
+    })
 }
 
 pub fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderConfig) -> Decision {
     if account.balance < cfg.position_size_usdc {
         return Decision::Pass("insufficient_balance".into());
     }
-
     if cfg.daily_loss_limit_usdc > Decimal::ZERO && account.daily_pnl <= -cfg.daily_loss_limit_usdc
     {
         return Decision::Pass(format!(
@@ -185,100 +268,108 @@ pub fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderConfig) 
             integer_suffix(account.daily_pnl)
         ));
     }
-
-    let (yes, no) = match (ctx.market_yes, ctx.market_no) {
-        (Some(y), Some(n)) if y > util::decimal("0.01") && n > util::decimal("0.01") => (y, n),
-        _ => return Decision::Pass("no_market_data".into()),
-    };
-
-    // Use raw Polymarket mid-prices directly (already probabilities in [0,1]).
-    // Normalization by (yes+no) is removed — it distorts values when yes+no≠1.0.
-    let (base_direction, cheap_price) = if yes > cfg.extreme_threshold {
-        // Market is extremely bullish → bet against (Down)
-        (Direction::Down, no)
-    } else if no > cfg.extreme_threshold {
-        // Market is extremely bearish → bet against (Up)
-        (Direction::Up, yes)
-    } else {
-        let dominant = yes.max(no);
+    if account.consecutive_losses >= cfg.max_consecutive_losses
+        && ctx.now_ms.saturating_sub(account.last_loss_ms) < cfg.loss_cooldown_ms
+    {
         return Decision::Pass(format!(
-            "not_extreme_{}%",
-            (dominant * util::decimal("100")).round_dp(0)
+            "consecutive_loss_cooldown_{}",
+            account.consecutive_losses
         ));
+    }
+    if account.daily_trades >= cfg.max_trades_per_day {
+        return Decision::Pass(format!("daily_trade_limit_{}", account.daily_trades));
+    }
+    if let Some(reason) = circuit_breaker_reason(account, cfg) {
+        return Decision::Pass(reason);
+    }
+
+    let min_ttl = i64::try_from(cfg.min_entry_ttl_ms).unwrap_or(i64::MAX);
+    let max_ttl = i64::try_from(cfg.max_entry_ttl_ms).unwrap_or(i64::MAX);
+    if ctx.remaining_ms < min_ttl {
+        return Decision::Pass(format!(
+            "ttl_below_entry_floor_{}",
+            ctx.remaining_ms.max(0) / 1_000
+        ));
+    }
+    if ctx.remaining_ms > max_ttl {
+        return Decision::Pass(format!(
+            "ttl_above_entry_ceiling_{}",
+            ctx.remaining_ms / 1_000
+        ));
+    }
+
+    let Some(estimate) = estimate_probability(ctx) else {
+        return Decision::Pass("oracle_model_not_ready".into());
     };
-
-    // --- Orderbook spread check ---
-    // Reject when the sum of yes + no prices diverges from 1.0 by more than the
-    // allowed spread. A wide spread signals poor liquidity and high slippage risk,
-    // meaning a FAK order placed at the mid price is unlikely to fill cleanly.
-    let spread = (yes + no) - Decimal::ONE;
-    let max_spread = util::decimal("0.06");
-    if spread.abs() > max_spread {
-        let pct = (spread * util::decimal("100")).round_dp(1);
-        return Decision::Pass(format!("spread_too_wide_{pct}%"));
+    let z = estimate.normalized_move;
+    if z.abs() < cfg.min_normalized_move {
+        return Decision::Pass(format!("normalized_move_{:.2}", z.abs()));
     }
 
-    let edge = cfg.fair_value - cheap_price;
-
-    if cheap_price < cfg.min_entry_price || cheap_price > cfg.max_entry_price {
-        let cents = integer_suffix(cheap_price * util::decimal("100"));
-        return Decision::Pass(format!("price_out_of_range_{cents}"));
-    }
-
-    let min_ttl_for_entry_ms = i64::try_from(cfg.min_ttl_for_entry_ms).unwrap_or(i64::MAX);
-    if ctx.remaining_ms < min_ttl_for_entry_ms {
-        let seconds = ctx.remaining_ms.max(0) / 1000;
-        return Decision::Pass(format!("ttl_below_entry_floor_{seconds}"));
-    }
-
-    let payoff_ratio = if cheap_price > Decimal::ZERO {
-        (Decimal::ONE - cheap_price) / cheap_price
+    let (direction, model_probability, quote) = if z > Decimal::ZERO {
+        let momentum_confirmed = ctx
+            .binance_trend_15s_pct
+            .is_some_and(|trend| trend > Decimal::ZERO)
+            && ctx
+                .binance_trend_30s_pct
+                .is_some_and(|trend| trend > Decimal::ZERO);
+        if !momentum_confirmed {
+            return Decision::Pass("binance_momentum_not_confirmed_up".into());
+        }
+        (Direction::Up, estimate.p_up, ctx.up_quote)
     } else {
-        Decimal::new(99, 0)
+        let momentum_confirmed = ctx
+            .binance_trend_15s_pct
+            .is_some_and(|trend| trend < Decimal::ZERO)
+            && ctx
+                .binance_trend_30s_pct
+                .is_some_and(|trend| trend < Decimal::ZERO);
+        if !momentum_confirmed {
+            return Decision::Pass("binance_momentum_not_confirmed_down".into());
+        }
+        (
+            Direction::Down,
+            Decimal::ONE - estimate.p_up,
+            ctx.down_quote,
+        )
+    };
+    let Some(quote) = quote else {
+        return Decision::Pass("no_order_book_quote".into());
     };
 
-    // --- BTC momentum confirmation ---
-    // Skip if BTC is trending against our direction.
-    if let Some(trend) = ctx.btc_trend_pct {
-        let threshold = cfg.btc_trend_min_pct;
-        match base_direction {
-            Direction::Down => {
-                if trend > threshold {
-                    return Decision::Pass(format!(
-                        "btc_trend_against_down_{}%",
-                        trend.round_dp(2)
-                    ));
-                }
-            }
-            Direction::Up => {
-                if trend < -threshold {
-                    return Decision::Pass(format!(
-                        "btc_trend_against_up_{}%",
-                        trend.abs().round_dp(2)
-                    ));
-                }
-            }
-        }
+    let Some(spread) = quote.spread else {
+        return Decision::Pass("no_order_book_bid".into());
+    };
+    if spread > cfg.max_spread {
+        return Decision::Pass(format!("spread_too_wide_{:.3}", spread));
+    }
+    let required_depth = cfg.position_size_usdc * cfg.min_depth_multiple;
+    if quote.best_ask_notional < required_depth {
+        return Decision::Pass(format!(
+            "insufficient_top_ask_depth_{:.2}",
+            quote.best_ask_notional
+        ));
     }
 
-    // --- Sliding window win-rate circuit breaker ---
-    // If the last N trades have a win rate below the minimum, pause trading.
-    let window = &account.recent_results;
-    if cfg.circuit_breaker_window > 0 && window.len() >= cfg.circuit_breaker_window as usize {
-        let wins_in_window = window.iter().filter(|&&w| w).count() as u32;
-        let total_in_window = window.len() as u32;
-        let win_rate = Decimal::from(wins_in_window) / Decimal::from(total_in_window);
-        if win_rate < cfg.circuit_breaker_min_win_rate {
-            let pct = (win_rate * util::decimal("100")).round_dp(0);
-            return Decision::Pass(format!("circuit_breaker_wr_{pct}%"));
-        }
+    let conservative_edge =
+        model_probability - quote.effective_price - cfg.model_uncertainty - cfg.fee_buffer;
+    if conservative_edge < cfg.min_net_edge {
+        return Decision::Pass(format!("net_edge_{:.3}", conservative_edge));
+    }
+    let order_limit_price =
+        model_probability - cfg.model_uncertainty - cfg.fee_buffer - cfg.min_net_edge;
+    if quote.limit_price > order_limit_price {
+        return Decision::Pass(format!("book_limit_exceeds_value_{:.3}", quote.limit_price));
     }
 
     Decision::Trade {
-        direction: base_direction,
+        direction,
         size_usdc: cfg.position_size_usdc,
-        edge,
-        payoff_ratio,
+        edge: conservative_edge,
+        payoff_ratio: (Decimal::ONE - quote.effective_price) / quote.effective_price,
+        model_probability,
+        entry_price: quote.effective_price,
+        order_limit_price,
     }
 }
 
@@ -287,304 +378,177 @@ mod tests {
     use super::*;
     use crate::pipeline::test_helpers::d;
 
-    fn cfg_for_threshold_test() -> DeciderConfig {
-        DeciderConfig {
-            extreme_threshold: d("0.90"),
-            max_entry_price: d("0.50"),
-            ..DeciderConfig::default()
+    fn quote(price: &str) -> BuyQuote {
+        let price = d(price);
+        BuyQuote {
+            best_bid: Some(price - d("0.01")),
+            best_ask: price,
+            spread: Some(d("0.01")),
+            best_ask_notional: d("20"),
+            effective_price: price,
+            limit_price: price,
+            timestamp_ms: 1_700_000_000_000,
         }
     }
 
-    fn cfg_for_entry_filter_test() -> DeciderConfig {
-        DeciderConfig::default()
-    }
-
-    fn default_ctx() -> DecideContext {
+    fn context() -> DecideContext {
         DecideContext {
-            market_yes: Some(d("0.97")),
-            market_no: Some(d("0.03")),
-            remaining_ms: 240_000,
-            btc_trend_pct: None,
+            now_ms: 1_700_000_000_000,
+            up_quote: Some(quote("0.60")),
+            down_quote: Some(quote("0.40")),
+            remaining_ms: 120_000,
+            chainlink_open: Some(d("64000")),
+            chainlink_current: Some(d("64100")),
+            sigma_per_second: Some(d("0.0001")),
+            binance_trend_15s_pct: Some(d("0.10")),
+            binance_trend_30s_pct: Some(d("0.15")),
         }
     }
 
     #[test]
-    fn test_extreme_bullish_allows_trade() {
-        let account = AccountState::new(d("1000"));
-        let mut ctx = default_ctx();
-        ctx.market_yes = Some(d("0.97"));
-        ctx.market_no = Some(d("0.03"));
+    fn normal_cdf_is_symmetric_and_monotonic() {
+        assert!((normal_cdf(Decimal::ZERO) - d("0.5")).abs() < d("0.000001"));
+        assert!(normal_cdf(d("1")) > normal_cdf(d("0.5")));
+        assert!((normal_cdf(d("1")) + normal_cdf(d("-1")) - Decimal::ONE).abs() < d("0.000001"));
+    }
 
-        let decision = decide(&ctx, &account, &cfg_for_threshold_test());
-
-        match decision {
+    #[test]
+    fn trades_up_when_oracle_value_and_momentum_agree() {
+        let decision = decide(
+            &context(),
+            &AccountState::new(d("100")),
+            &DeciderConfig::default(),
+        );
+        assert!(matches!(
+            decision,
             Decision::Trade {
-                edge, direction, ..
-            } => {
-                assert_eq!(direction, Direction::Down);
-                assert!(edge > d("0.40"));
+                direction: Direction::Up,
+                ..
             }
-            Decision::Pass(reason) => panic!("expected trade but got pass: {}", reason),
-        }
+        ));
     }
 
     #[test]
-    fn test_record_settlement_applies_decimal_pnl_exactly() {
-        let mut account = AccountState::new(d("1000"));
-        let result = crate::pipeline::settler::SettlementResult {
+    fn trades_down_when_oracle_value_and_momentum_agree() {
+        let mut ctx = context();
+        ctx.chainlink_current = Some(d("63900"));
+        ctx.binance_trend_15s_pct = Some(d("-0.10"));
+        ctx.binance_trend_30s_pct = Some(d("-0.15"));
+        ctx.down_quote = Some(quote("0.60"));
+        assert!(matches!(
+            decide(
+                &ctx,
+                &AccountState::new(d("100")),
+                &DeciderConfig::default()
+            ),
+            Decision::Trade {
+                direction: Direction::Down,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_entries_outside_ttl_window() {
+        let mut ctx = context();
+        ctx.remaining_ms = 151_000;
+        assert!(matches!(
+            decide(&ctx, &AccountState::new(d("100")), &DeciderConfig::default()),
+            Decision::Pass(reason) if reason.starts_with("ttl_above_entry_ceiling")
+        ));
+        ctx.remaining_ms = 74_000;
+        assert!(matches!(
+            decide(&ctx, &AccountState::new(d("100")), &DeciderConfig::default()),
+            Decision::Pass(reason) if reason.starts_with("ttl_below_entry_floor")
+        ));
+    }
+
+    #[test]
+    fn rejects_momentum_disagreement() {
+        let mut ctx = context();
+        ctx.binance_trend_15s_pct = Some(d("-0.01"));
+        assert!(matches!(
+            decide(&ctx, &AccountState::new(d("100")), &DeciderConfig::default()),
+            Decision::Pass(reason) if reason == "binance_momentum_not_confirmed_up"
+        ));
+    }
+
+    #[test]
+    fn rejects_wide_spread_and_thin_depth() {
+        let mut ctx = context();
+        let mut wide = quote("0.60");
+        wide.spread = Some(d("0.04"));
+        ctx.up_quote = Some(wide);
+        assert!(matches!(
+            decide(&ctx, &AccountState::new(d("100")), &DeciderConfig::default()),
+            Decision::Pass(reason) if reason.starts_with("spread_too_wide")
+        ));
+
+        let mut thin = quote("0.60");
+        thin.best_ask_notional = d("4.99");
+        ctx.up_quote = Some(thin);
+        assert!(matches!(
+            decide(&ctx, &AccountState::new(d("100")), &DeciderConfig::default()),
+            Decision::Pass(reason) if reason.starts_with("insufficient_top_ask_depth")
+        ));
+    }
+
+    #[test]
+    fn rejects_unprofitable_quote() {
+        let mut ctx = context();
+        ctx.up_quote = Some(quote("0.90"));
+        assert!(matches!(
+            decide(&ctx, &AccountState::new(d("100")), &DeciderConfig::default()),
+            Decision::Pass(reason) if reason.starts_with("net_edge")
+        ));
+    }
+
+    #[test]
+    fn risk_controls_still_apply() {
+        let mut account = AccountState::new(d("100"));
+        account.daily_pnl = d("-5");
+        let cfg = DeciderConfig {
+            daily_loss_limit_usdc: d("5"),
+            ..DeciderConfig::default()
+        };
+        assert!(matches!(
+            decide(&context(), &account, &cfg),
+            Decision::Pass(reason) if reason == "daily_loss_limit_5"
+        ));
+    }
+
+    #[test]
+    fn consecutive_loss_and_daily_trade_limits_apply() {
+        let mut account = AccountState::new(d("100"));
+        account.consecutive_losses = 3;
+        account.last_loss_ms = context().now_ms - 1_000;
+        assert!(matches!(
+            decide(&context(), &account, &DeciderConfig::default()),
+            Decision::Pass(reason) if reason == "consecutive_loss_cooldown_3"
+        ));
+
+        account.consecutive_losses = 0;
+        account.daily_trades = 8;
+        assert!(matches!(
+            decide(&context(), &account, &DeciderConfig::default()),
+            Decision::Pass(reason) if reason == "daily_trade_limit_8"
+        ));
+    }
+
+    #[test]
+    fn settlement_accounting_remains_exact() {
+        let mut account = AccountState::new(d("100"));
+        account.record_trade(d("1"));
+        account.record_settlement(&crate::pipeline::settler::SettlementResult {
             direction: Direction::Up,
-            payout: d("24.99"),
-            pnl: d("19.99"),
+            payout: d("1.5"),
+            pnl: d("0.5"),
             won: true,
             condition_id: "cid".into(),
-            entry_btc_price: d("70000"),
-        };
-
-        account.record_trade(d("5.0"));
-        account.record_settlement(&result);
-
-        assert_eq!(account.balance, d("1019.99"));
-        assert_eq!(account.daily_pnl, d("19.99"));
-    }
-
-    #[test]
-    fn test_trade_when_extreme_bullish() {
-        let account = AccountState::new(d("1000"));
-        let cfg = DeciderConfig::default();
-        let ctx = default_ctx(); // yes=0.97, no=0.03
-
-        let decision = decide(&ctx, &account, &cfg);
-
-        match decision {
-            Decision::Trade {
-                direction,
-                edge,
-                payoff_ratio,
-                ..
-            } => {
-                assert_eq!(direction, Direction::Down);
-                // cheap_price = 0.03/1.00 = 0.03, edge = 0.50 - 0.03 = 0.47
-                assert_eq!(edge, d("0.47"));
-                // payoff = (1 - 0.03) / 0.03 ≈ 32.33
-                assert!(payoff_ratio > d("32"));
-            }
-            Decision::Pass(reason) => panic!("expected trade but got pass: {}", reason),
-        }
-    }
-
-    #[test]
-    fn test_disabled_circuit_breaker_does_not_divide_by_zero() {
-        let account = AccountState::new(d("1000"));
-        let cfg = DeciderConfig {
-            circuit_breaker_window: 0,
-            ..DeciderConfig::default()
-        };
-
-        assert!(matches!(
-            decide(&default_ctx(), &account, &cfg),
-            Decision::Trade { .. }
-        ));
-    }
-
-    #[test]
-    fn test_rejects_position_larger_than_balance() {
-        let account = AccountState::new(d("0.99"));
-
-        assert!(matches!(
-            decide(&default_ctx(), &account, &DeciderConfig::default()),
-            Decision::Pass(reason) if reason == "insufficient_balance"
-        ));
-    }
-
-    #[test]
-    fn test_daily_loss_limit() {
-        let mut account = AccountState::new(d("1000"));
-        account.daily_pnl = d("-15.0");
-        let cfg = DeciderConfig {
-            daily_loss_limit_usdc: d("10.0"),
-            ..DeciderConfig::default()
-        };
-        let ctx = default_ctx();
-
-        let decision = decide(&ctx, &account, &cfg);
-
-        match decision {
-            Decision::Pass(reason) => assert_eq!(reason, "daily_loss_limit_15"),
-            Decision::Trade { .. } => panic!("expected pass but got trade"),
-        }
-    }
-
-    #[test]
-    fn test_pass_when_not_extreme() {
-        let account = AccountState::new(d("1000"));
-        let cfg = DeciderConfig::default();
-        let mut ctx = default_ctx();
-        ctx.market_yes = Some(d("0.55"));
-        ctx.market_no = Some(d("0.45"));
-
-        let decision = decide(&ctx, &account, &cfg);
-
-        match decision {
-            Decision::Pass(reason) => assert!(reason.starts_with("not_extreme_")),
-            Decision::Trade { .. } => panic!("expected pass but got trade"),
-        }
-    }
-
-    #[test]
-    fn test_pass_when_no_market_data() {
-        let account = AccountState::new(d("1000"));
-        let cfg = DeciderConfig::default();
-        let mut ctx = default_ctx();
-        ctx.market_yes = None;
-
-        let decision = decide(&ctx, &account, &cfg);
-
-        match decision {
-            Decision::Pass(reason) => assert_eq!(reason, "no_market_data"),
-            Decision::Trade { .. } => panic!("expected pass but got trade"),
-        }
-    }
-
-    #[test]
-    fn test_risk_controls_block_on_insufficient_balance() {
-        let account = AccountState::new(d("0"));
-        let cfg = DeciderConfig::default();
-        let ctx = default_ctx();
-
-        let decision = decide(&ctx, &account, &cfg);
-
-        match decision {
-            Decision::Pass(reason) => assert_eq!(reason, "insufficient_balance"),
-            Decision::Trade { .. } => panic!("expected pass due to zero balance but got trade"),
-        }
-    }
-
-    #[test]
-    fn test_pass_when_entry_price_below_range_price_out_of_range() {
-        let account = AccountState::new(d("1000"));
-        let cfg = cfg_for_entry_filter_test();
-        let mut ctx = default_ctx();
-        // cheap = 0.015/0.995 ≈ 0.015 < min_entry_price(0.02)
-        ctx.market_yes = Some(d("0.98"));
-        ctx.market_no = Some(d("0.015"));
-
-        let decision = decide(&ctx, &account, &cfg);
-
-        match decision {
-            Decision::Pass(reason) => assert_eq!(reason, "price_out_of_range_1"),
-            Decision::Trade { .. } => panic!("expected pass due to entry price below range"),
-        }
-    }
-
-    #[test]
-    fn test_pass_when_entry_price_above_range_price_out_of_range() {
-        let account = AccountState::new(d("1000"));
-        // Use a lower threshold to get cheap_price above max_entry_price
-        let cfg = DeciderConfig {
-            extreme_threshold: d("0.85"),
-            max_entry_price: d("0.10"),
-            ..DeciderConfig::default()
-        };
-        let mut ctx = default_ctx();
-        ctx.market_yes = Some(d("0.88"));
-        ctx.market_no = Some(d("0.12"));
-
-        let decision = decide(&ctx, &account, &cfg);
-
-        match decision {
-            Decision::Pass(reason) => assert_eq!(reason, "price_out_of_range_12"),
-            Decision::Trade { .. } => panic!("expected pass due to entry price above range"),
-        }
-    }
-
-    #[test]
-    fn test_pass_when_remaining_ms_below_entry_floor_ttl_below_entry_floor() {
-        let account = AccountState::new(d("1000"));
-        let cfg = cfg_for_entry_filter_test();
-        let mut ctx = default_ctx();
-        ctx.market_yes = Some(d("0.97"));
-        ctx.market_no = Some(d("0.03"));
-        ctx.remaining_ms = 119_000;
-
-        let decision = decide(&ctx, &account, &cfg);
-
-        match decision {
-            Decision::Pass(reason) => assert_eq!(reason, "ttl_below_entry_floor_119"),
-            Decision::Trade { .. } => panic!("expected pass due to ttl floor"),
-        }
-    }
-
-    #[test]
-    fn test_pass_when_remaining_ms_negative_ttl_suffix_is_zero() {
-        let account = AccountState::new(d("1000"));
-        let cfg = cfg_for_entry_filter_test();
-        let mut ctx = default_ctx();
-        ctx.market_yes = Some(d("0.97"));
-        ctx.market_no = Some(d("0.03"));
-        ctx.remaining_ms = -1_000;
-
-        let decision = decide(&ctx, &account, &cfg);
-
-        match decision {
-            Decision::Pass(reason) => assert_eq!(reason, "ttl_below_entry_floor_0"),
-            Decision::Trade { .. } => panic!("expected pass due to ttl floor"),
-        }
-    }
-
-    #[test]
-    fn test_uses_raw_yes_price_not_normalized() {
-        // yes=0.95, no=0.06 → total=1.01 → normalized mkt_up=0.941 (WRONG)
-        // Raw yes=0.95 > 0.90 → should trigger Down trade
-        let account = AccountState::new(d("1000"));
-        let cfg = DeciderConfig {
-            max_entry_price: d("0.50"),
-            ..DeciderConfig::default()
-        };
-        let ctx = DecideContext {
-            market_yes: Some(d("0.95")),
-            market_no: Some(d("0.06")),
-            remaining_ms: 240_000,
-            btc_trend_pct: None,
-        };
-
-        let decision = decide(&ctx, &account, &cfg);
-        match decision {
-            Decision::Trade {
-                direction, edge, ..
-            } => {
-                assert_eq!(direction, Direction::Down);
-                // cheap side = no = 0.06, edge = 0.50 - 0.06 = 0.44
-                assert_eq!(edge, d("0.44"));
-            }
-            Decision::Pass(reason) => panic!("expected trade but got: {}", reason),
-        }
-    }
-
-    #[test]
-    fn test_extreme_bearish_uses_raw_no_price() {
-        // yes=0.03, no=0.96 → should trigger Up trade (raw no=0.96 > 0.90)
-        let account = AccountState::new(d("1000"));
-        let cfg = DeciderConfig {
-            max_entry_price: d("0.50"),
-            ..DeciderConfig::default()
-        };
-        let ctx = DecideContext {
-            market_yes: Some(d("0.03")),
-            market_no: Some(d("0.96")),
-            remaining_ms: 240_000,
-            btc_trend_pct: None,
-        };
-
-        let decision = decide(&ctx, &account, &cfg);
-        match decision {
-            Decision::Trade {
-                direction, edge, ..
-            } => {
-                assert_eq!(direction, Direction::Up);
-                // cheap side = yes = 0.03, edge = 0.50 - 0.03 = 0.47
-                assert_eq!(edge, d("0.47"));
-            }
-            Decision::Pass(reason) => panic!("expected trade but got: {}", reason),
-        }
+            market_slug: "btc-updown-5m-test".into(),
+            entry_btc_price: d("64000"),
+        });
+        assert_eq!(account.balance, d("100.5"));
+        assert_eq!(account.daily_pnl, d("0.5"));
     }
 }

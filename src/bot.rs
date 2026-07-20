@@ -17,9 +17,10 @@ use polymarket_5m_bot::trade_log::TradeLog;
 use polymarket_5m_bot::{config, data, pipeline};
 
 use config::Config;
+use data::chainlink::ChainlinkSource;
 use data::market_discovery::{DiscoveryConfig, MarketDiscovery};
 use data::polymarket::{AuthenticatedPolyClient, BalanceChecker, CtfRedeemer, PolymarketClient};
-use pipeline::decider::{self, AccountState, DeciderConfig, Direction};
+use pipeline::decider::{self, AccountState, DeciderConfig};
 use pipeline::executor::{ExecuteContext, Executor};
 use pipeline::price_source::PriceSource;
 use pipeline::settler::{PendingPosition, Settler};
@@ -39,6 +40,7 @@ pub(crate) struct Bot {
     config: Config,
     log_dir: String,
     price_source: Arc<PriceSource>,
+    chainlink_source: Arc<ChainlinkSource>,
     polymarket: Arc<PolymarketClient>,
     discovery: Arc<MarketDiscovery>,
     state: Arc<RwLock<BotState>>,
@@ -63,6 +65,10 @@ impl Bot {
             &config.price_source.symbol,
             config.price_source.buffer_max,
         ));
+        let chainlink_capacity = usize::try_from(config.strategy.volatility_lookback_secs)
+            .unwrap_or(900)
+            .saturating_add(600);
+        let chainlink_source = Arc::new(ChainlinkSource::new(chainlink_capacity));
         let polymarket = Arc::new(PolymarketClient::new()?);
 
         let discovery_cfg = DiscoveryConfig {
@@ -88,11 +94,7 @@ impl Bot {
             None
         };
 
-        let executor = Executor::new(
-            config.trading.mode,
-            auth_client,
-            config.strategy.slippage_tolerance,
-        );
+        let executor = Executor::new(config.trading.mode, auth_client);
 
         let redeemer = if config.trading.mode.is_live()
             && !config.trading.private_key.expose_secret().is_empty()
@@ -193,6 +195,7 @@ impl Bot {
             config,
             log_dir,
             price_source,
+            chainlink_source,
             polymarket,
             discovery,
             state: Arc::new(RwLock::new(BotState::new())),
@@ -228,6 +231,11 @@ impl Bot {
 
         self.refresh_market().await;
         let price_handles = self.price_source.clone().start(self.shutdown.clone()).await;
+        let chainlink_handle = self
+            .chainlink_source
+            .clone()
+            .start(self.shutdown.clone())
+            .await;
 
         #[cfg(unix)]
         let mut sigint = signal(SignalKind::interrupt())?;
@@ -256,7 +264,7 @@ impl Bot {
         let mut settlement_handle = tasks::start_settlement_checker(
             self.settler.clone(),
             self.account.clone(),
-            self.price_source.clone(),
+            self.chainlink_source.clone(),
             self.discovery.clone(),
             self.redeemer.clone(),
             self.log_dir.clone(),
@@ -340,6 +348,7 @@ impl Bot {
 
         price_handles.ws_handle.abort();
         price_handles.receiver_handle.abort();
+        chainlink_handle.abort();
 
         let _ = tokio::time::timeout(
             Duration::from_secs(self.config.misc.shutdown_timeout_secs),
@@ -484,30 +493,25 @@ impl Bot {
             return Ok(());
         }
 
-        // Fetch both prices in parallel
-        let (yes_result, no_result) = join!(
-            self.polymarket.fetch_buy_price(&mkt.token_yes),
-            self.polymarket.fetch_buy_price(&mkt.token_no),
+        let quote_size = self.config.strategy.position_size_usdc;
+        let (up_result, down_result) = join!(
+            self.polymarket.fetch_buy_quote(&mkt.token_yes, quote_size),
+            self.polymarket.fetch_buy_quote(&mkt.token_no, quote_size),
         );
-
-        let (poly_yes_dec, poly_no_dec) = match (yes_result, no_result) {
-            (Ok(y), Ok(n)) => {
-                tracing::debug!("[PRICE] Yes={:.3} No={:.3} | buffer={}", y, n, buf_len);
-                (Some(y), Some(n))
-            }
-            (Ok(y), Err(e)) => {
-                tracing::warn!("[PRICE] Polymarket NO fetch failed: {}", e);
-                (Some(y), None)
-            }
-            (Err(e), Ok(n)) => {
-                tracing::warn!("[PRICE] Polymarket YES fetch failed: {}", e);
-                (None, Some(n))
-            }
-            (Err(e), _) => {
-                tracing::warn!("[PRICE] Polymarket fetch failed: {}", e);
-                (None, None)
-            }
-        };
+        let up_quote = up_result
+            .inspect_err(|error| tracing::warn!("[BOOK] UP quote failed: {}", error))
+            .ok();
+        let down_quote = down_result
+            .inspect_err(|error| tracing::warn!("[BOOK] DOWN quote failed: {}", error))
+            .ok();
+        let poly_yes_dec = up_quote.map(|quote| quote.effective_price);
+        let poly_no_dec = down_quote.map(|quote| quote.effective_price);
+        tracing::debug!(
+            "[BOOK] UP={:.3} DOWN={:.3} | buffer={}",
+            poly_yes_dec.unwrap_or_default(),
+            poly_no_dec.unwrap_or_default(),
+            buf_len
+        );
         let settlement_ms = mkt.settlement_ms;
 
         let today = Utc::now().format("%Y-%m-%d").to_string();
@@ -519,17 +523,48 @@ impl Bot {
         let decider_cfg = self.decider_cfg();
         let remaining_ms = (settlement_ms - Utc::now().timestamp_millis()).max(0);
 
+        let now_ms = Utc::now().timestamp_millis();
+        let chainlink_tick = self.chainlink_source.latest().await.filter(|tick| {
+            now_ms.saturating_sub(tick.timestamp_ms)
+                <= self.config.strategy.oracle_stale_threshold_ms
+        });
+        let window_start_ms = settlement_ms.saturating_sub(300_000);
+        let chainlink_open = self.chainlink_source.opening_price(window_start_ms).await;
+        let sigma_per_second = self
+            .chainlink_source
+            .realized_sigma_per_second(
+                self.config.strategy.volatility_lookback_secs,
+                self.config.strategy.min_volatility_samples,
+            )
+            .await;
+        let quote_is_fresh = |timestamp_ms: i64| {
+            now_ms.saturating_sub(timestamp_ms)
+                <= self.config.strategy.order_book_stale_threshold_ms
+        };
         let decide_ctx = decider::DecideContext {
-            market_yes: poly_yes_dec,
-            market_no: poly_no_dec,
+            now_ms,
+            up_quote: up_quote.filter(|quote| quote_is_fresh(quote.timestamp_ms)),
+            down_quote: down_quote.filter(|quote| quote_is_fresh(quote.timestamp_ms)),
             remaining_ms,
-            btc_trend_pct: self
-                .price_source
-                .trend_pct(decider_cfg.btc_trend_window_s)
-                .await,
+            chainlink_open,
+            chainlink_current: chainlink_tick.map(|tick| tick.price),
+            sigma_per_second,
+            binance_trend_15s_pct: self.price_source.trend_pct(15).await,
+            binance_trend_30s_pct: self.price_source.trend_pct(30).await,
         };
 
-        let decision = decider::decide(&decide_ctx, &account_read, &decider_cfg);
+        let mut decision = decider::decide(&decide_ctx, &account_read, &decider_cfg);
+        if matches!(decision, decider::Decision::Trade { .. }) {
+            let settler = self.settler.read().await;
+            if settler.has_condition(&mkt.condition_id) {
+                decision = decider::Decision::Pass("market_already_traded".into());
+            } else if settler.pending_count() >= self.config.strategy.max_unsettled_positions {
+                decision = decider::Decision::Pass("max_unsettled_positions".into());
+            }
+        }
+        self.trade_log
+            .log_observation(&mkt.market_slug, btc_price, &decide_ctx, &decision)
+            .await;
 
         match &decision {
             decider::Decision::Pass(reason) => {
@@ -557,22 +592,17 @@ impl Bot {
             }
             decider::Decision::Trade {
                 direction,
-                size_usdc: _,
                 edge,
                 payoff_ratio,
+                model_probability,
+                entry_price,
+                ..
             } => {
-                if self.settler.read().await.pending_count() > 0 {
-                    self.tui_state
-                        .write()
-                        .await
-                        .set_decision("PASS: pending_position".to_string());
-                    return Ok(());
-                }
                 self.tui_state.write().await.set_decision(format!(
-                    "TRADE {} edge={:.1}% payoff={:.1}x",
+                    "TRADE {} p={:.1}% edge={:.1}%",
                     direction.as_str(),
+                    *model_probability * util::decimal("100"),
                     *edge * util::decimal("100"),
-                    payoff_ratio
                 ));
 
                 let fak_backoff_ms = self.config.risk.fak_backoff_ms as i64;
@@ -596,25 +626,7 @@ impl Bot {
                     }
                 }
 
-                let cheap_price = match direction {
-                    Direction::Up => poly_yes_dec,
-                    Direction::Down => poly_no_dec,
-                };
-                let cheap_price = match cheap_price {
-                    Some(p) => p,
-                    None => {
-                        tracing::warn!(
-                            "[TRADE] {} price missing for {}, skipping trade",
-                            if matches!(direction, Direction::Up) {
-                                "YES"
-                            } else {
-                                "NO"
-                            },
-                            direction.as_str()
-                        );
-                        return Ok(());
-                    }
-                };
+                let cheap_price = *entry_price;
 
                 tracing::info!(
                     "[TRADE] {} @ {:.3} edge={:.0}% payoff={:.1}x BTC=${:.0}",
@@ -631,10 +643,8 @@ impl Bot {
                         decision: &decision,
                         token_yes: &mkt.token_yes,
                         token_no: &mkt.token_no,
-                        poly_yes: poly_yes_dec,
-                        poly_no: poly_no_dec,
                         settlement_time_ms: settlement_ms,
-                        btc_price,
+                        btc_price: chainlink_tick.map(|tick| tick.price).unwrap_or(btc_price),
                     })
                     .await;
 

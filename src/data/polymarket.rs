@@ -9,7 +9,9 @@ use futures_util::stream::{self, StreamExt};
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::{LocalSigner, Normal, Signer as _};
 use polymarket_client_sdk::clob;
-use polymarket_client_sdk::clob::types::{request::PriceRequest, Amount, OrderType, Side};
+use polymarket_client_sdk::clob::types::{
+    request::OrderBookSummaryRequest, response::OrderSummary, Amount, OrderType, Side,
+};
 use polymarket_client_sdk::ctf;
 use polymarket_client_sdk::ctf::types::RedeemPositionsRequest;
 use polymarket_client_sdk::types::{address, Decimal, U256};
@@ -59,7 +61,64 @@ alloy::sol! {
     }
 }
 
-/// Unauthenticated client for price queries.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BuyQuote {
+    pub best_bid: Option<rust_decimal::Decimal>,
+    pub best_ask: rust_decimal::Decimal,
+    pub spread: Option<rust_decimal::Decimal>,
+    pub best_ask_notional: rust_decimal::Decimal,
+    pub effective_price: rust_decimal::Decimal,
+    pub limit_price: rust_decimal::Decimal,
+    pub timestamp_ms: i64,
+}
+
+fn build_buy_quote(
+    bids: &[OrderSummary],
+    mut asks: Vec<OrderSummary>,
+    amount_usdc: rust_decimal::Decimal,
+    timestamp_ms: i64,
+) -> Result<BuyQuote> {
+    asks.sort_by_key(|level| level.price);
+    let best_ask = asks
+        .first()
+        .map(|level| level.price)
+        .context("CLOB order book has no asks")?;
+    let best_bid = bids.iter().map(|level| level.price).max();
+    let best_ask_notional = asks
+        .iter()
+        .take_while(|level| level.price == best_ask)
+        .map(|level| level.price * level.size)
+        .sum();
+
+    let mut remaining = amount_usdc;
+    let mut shares = rust_decimal::Decimal::ZERO;
+    let mut limit_price = best_ask;
+    for level in asks {
+        if remaining <= rust_decimal::Decimal::ZERO {
+            break;
+        }
+        let level_notional = level.price * level.size;
+        let spent = remaining.min(level_notional);
+        shares += spent / level.price;
+        remaining -= spent;
+        limit_price = level.price;
+    }
+    if remaining > rust_decimal::Decimal::ZERO || shares <= rust_decimal::Decimal::ZERO {
+        anyhow::bail!("insufficient CLOB ask depth for ${amount_usdc}");
+    }
+
+    Ok(BuyQuote {
+        best_bid,
+        best_ask,
+        spread: best_bid.map(|bid| best_ask - bid),
+        best_ask_notional,
+        effective_price: amount_usdc / shares,
+        limit_price,
+        timestamp_ms,
+    })
+}
+
+/// Unauthenticated client for order-book queries.
 pub struct PolymarketClient {
     unauth: clob::Client,
 }
@@ -73,17 +132,28 @@ impl PolymarketClient {
         })
     }
 
-    pub async fn fetch_buy_price(&self, token_id: &str) -> Result<rust_decimal::Decimal> {
+    /// Return the executable BUY quote for a fixed-USDC order.
+    ///
+    /// The effective price walks asks from cheapest to most expensive. The
+    /// returned limit price is the worst level required for the requested fill.
+    pub async fn fetch_buy_quote(
+        &self,
+        token_id: &str,
+        amount_usdc: rust_decimal::Decimal,
+    ) -> Result<BuyQuote> {
         let tid = U256::from_str(token_id).context("Invalid token_id")?;
-        let req = PriceRequest::builder()
-            .token_id(tid)
-            .side(Side::Buy)
-            .build();
-        let result = tokio::time::timeout(Duration::from_secs(10), self.unauth.price(&req))
+        let request = OrderBookSummaryRequest::builder().token_id(tid).build();
+        let book = tokio::time::timeout(Duration::from_secs(10), self.unauth.order_book(&request))
             .await
-            .map_err(|_| anyhow::anyhow!("CLOB price request timed out after 10s"))?
-            .context("CLOB price request failed")?;
-        Ok(result.price)
+            .map_err(|_| anyhow::anyhow!("CLOB order-book request timed out after 10s"))?
+            .context("CLOB order-book request failed")?;
+
+        build_buy_quote(
+            &book.bids,
+            book.asks,
+            amount_usdc,
+            book.timestamp.timestamp_millis(),
+        )
     }
 }
 
@@ -385,5 +455,43 @@ impl BalanceChecker {
             .try_into()
             .map_err(|_| anyhow::anyhow!("USDC balance too large for u128"))?;
         Ok(Decimal::from(raw_u128) / Decimal::from(1_000_000u64))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipeline::test_helpers::d;
+
+    fn level(price: &str, size: &str) -> OrderSummary {
+        OrderSummary::builder()
+            .price(d(price))
+            .size(d(size))
+            .build()
+    }
+
+    #[test]
+    fn executable_quote_walks_multiple_ask_levels() {
+        let quote = build_buy_quote(
+            &[level("0.49", "10")],
+            vec![level("0.52", "1"), level("0.50", "1")],
+            d("1"),
+            123,
+        )
+        .unwrap();
+
+        assert_eq!(quote.best_bid, Some(d("0.49")));
+        assert_eq!(quote.best_ask, d("0.50"));
+        assert_eq!(quote.best_ask_notional, d("0.50"));
+        assert_eq!(quote.limit_price, d("0.52"));
+        assert!(quote.effective_price > d("0.50"));
+        assert!(quote.effective_price < d("0.52"));
+    }
+
+    #[test]
+    fn executable_quote_rejects_insufficient_depth() {
+        let error = build_buy_quote(&[], vec![level("0.50", "1")], d("1"), 123)
+            .expect_err("half a dollar cannot fill a one-dollar order");
+        assert!(error.to_string().contains("insufficient CLOB ask depth"));
     }
 }

@@ -2,169 +2,178 @@
 
 ## Strategy in one sentence
 
-When Polymarket becomes extremely confident in one BTC five-minute outcome, buy the cheaper opposite
-outcome, subject to liquidity, price, time, momentum, balance, and loss controls.
+Estimate the probability of the Chainlink BTC/USD close finishing above the same feed's five-minute
+opening price, confirm direction with low-latency Binance momentum, and buy only when the executable
+Polymarket order book leaves a conservative net edge.
 
-This is a contrarian market-pricing strategy. Binance BTC data is a filter, not the primary signal.
+This is an oracle-aligned value-momentum strategy. It is not the former 95% contrarian strategy and
+it does not infer direction from the prediction-market price.
 
-## Inputs
+## Source of truth
 
-| Input | Use |
+Polymarket's BTC five-minute rules resolve UP when the ending Chainlink BTC/USD Data Stream value is
+greater than or equal to its opening value. Otherwise they resolve DOWN.
+
+| Source | Role |
 | --- | --- |
-| Polymarket YES buy quote | Detect extreme UP sentiment and price an UP entry |
-| Polymarket NO buy quote | Detect extreme DOWN sentiment and price a DOWN entry |
-| Remaining market TTL | Reject entries too close to expiry |
-| Binance BTC trend | Reject trades fighting strong recent momentum |
-| Account state | Balance, daily loss, and rolling result controls |
+| Polymarket RTDS `crypto_prices_chainlink` | Authoritative opening/current price and volatility |
+| Binance BTCUSDT WebSocket | Faster 15-second and 30-second momentum confirmation |
+| Polymarket CLOB order book | Executable bid, ask, depth, average fill, and limit price |
+| Gamma API | Market discovery and official resolution state |
 
-The code uses raw CLOB buy quotes. It does not normalize YES and NO into a synthetic probability.
+A Chainlink opening tick must exist within five seconds of the exact window boundary. The bot skips
+the market rather than substituting Binance or a late oracle value.
 
-## Direction
+## Probability model
 
-```text
-YES > extreme_threshold  → candidate = buy DOWN at the NO quote
-NO  > extreme_threshold  → candidate = buy UP at the YES quote
-otherwise                → PASS not_extreme
-```
-
-With the checked-in configuration, `extreme_threshold = 0.95`. The comparison is strict (`>`), not
-`>=`.
-
-## Decision gates
-
-The decider evaluates gates in this order and returns immediately on the first failure:
+For each tick:
 
 ```text
-1. balance >= position_size_usdc
-2. daily loss limit not reached
-3. YES and NO quotes both exist and are > 0.01
-4. one raw quote is above extreme_threshold
-5. abs((YES + NO) - 1) <= 0.06
-6. opposite-side entry price is within [min_entry_price, max_entry_price]
-7. remaining TTL >= min_ttl_for_entry_ms
-8. Binance trend is not strongly against the candidate direction
-9. circuit-breaker win rate is not below its floor
+K       = Chainlink opening price
+S       = latest Chainlink price
+sigma   = one-second realized volatility over the configured lookback
+T       = seconds remaining
+move    = (S - K) / K
+z       = move / (sigma * sqrt(T))
+p_up    = standard_normal_cdf(z)
+p_down  = 1 - p_up
 ```
 
-Outside the decider, execution also requires:
+All runtime calculations use `rust_decimal::Decimal`. The current normal-CDF model is a transparent
+baseline, not a historically calibrated claim. That is why live mode requires an explicit
+`allow_uncalibrated_model_live = true` acknowledgement.
 
-- a warm Binance buffer;
-- a non-stale latest BTC tick;
-- a discovered Polymarket market;
-- no existing pending position; and
-- live FAK retry/backoff allowance.
+The first release collects `observations.csv` so this baseline can be replaced by a walk-forward
+empirical calibration without changing execution or accounting.
 
-## Price and payoff metrics
+## Entry gates
+
+The decider returns on the first failed gate:
 
 ```text
-edge         = fair_value - entry_price
-payoff_ratio = (1 - entry_price) / entry_price
+1. available balance covers position_size_usdc
+2. daily loss and rolling-result circuit breakers permit trading
+3. min_entry_ttl_ms <= TTL <= max_entry_ttl_ms
+4. opening/current Chainlink prices and realized volatility are available
+5. abs(z) >= min_normalized_move
+6. Binance 15s and 30s trends agree with the Chainlink direction
+7. selected outcome has a fresh executable order-book quote and a bid
+8. selected bid/ask spread <= max_spread
+9. best-ask notional >= position_size_usdc * min_depth_multiple
+10. conservative net edge >= min_net_edge
+11. required fill levels do not exceed the value-capped order limit
 ```
 
-`edge` and `payoff_ratio` are recorded and displayed. There is currently no separate minimum-edge
-gate; the configured entry-price range indirectly constrains edge.
+The checked-in entry window is 75–150 seconds before expiry. The first half of the market is for
+observation; the final 75 seconds are excluded from new entries.
 
-`fair_value = 0.50` is a strategy assumption, not an oracle-derived probability.
+## Value and order limit
 
-## Momentum filter
-
-`PriceSource` compares the latest Binance price with the oldest available tick at or after the
-configured lookback cutoff:
+The CLOB client walks asks for the configured fixed-USDC amount:
 
 ```text
-trend_pct = (latest - old) / old * 100
+effective_price = requested USDC / shares available across required ask levels
 ```
 
-- DOWN candidate passes unless BTC is rising by more than `btc_trend_min_pct`.
-- UP candidate passes unless BTC is falling by more than `btc_trend_min_pct`.
-- Set `btc_trend_window_s = 0` to make the calculated trend zero and effectively disable the filter.
-
-Momentum never creates a trade on its own.
-
-## Position sizing and fills
-
-`position_size_usdc` is the maximum requested spend and must be at least 1 USDC.
-
-### Paper
+The conservative edge is:
 
 ```text
-requested cost = position_size_usdc
-shares         = truncate(position_size_usdc / max_buy_price, 4 decimals)
-entry price    = cost / shares
+net_edge = model_probability
+         - effective_price
+         - model_uncertainty
+         - fee_buffer
 ```
 
-Paper assumes a complete fill. It does not model queue position, depth, fees, latency, or partial
-fills.
-
-### Live
-
-The executor submits a fixed-USDC FAK market buy with the slippage-adjusted price as its maximum
-price. It records `making_amount` as actual cost and `taking_amount` as actual filled shares from the
-CLOB response. Zero-fill and rejected FAK responses do not create positions.
-
-## Slippage
+The checked-in minimum is 0.05. The largest acceptable live FAK limit is:
 
 ```text
-max_buy_price = round_2dp(mid_quote * (1 + slippage_tolerance))
+order_limit = model_probability
+            - model_uncertainty
+            - fee_buffer
+            - min_net_edge
 ```
 
-The value is capped at `0.99`. Both modes reject target prices at or below `0.01` and at or above
-`0.99` before applying the order.
+The executor rounds this cap down. It never raises a quote by an unconditional slippage percentage,
+because doing so could turn a positive-value signal negative.
 
-The CLOB request explicitly asks for the BUY-side price. Strategy analysis should treat it as an
-executable quote, not a mathematically derived mid.
+`fee_buffer` is currently a conservative probability-point allowance rather than a reconstruction of
+Polymarket's dynamic fee formula. Actual CLOB-reported cost and shares remain authoritative for live
+accounting.
+
+## Direction and momentum
+
+```text
+z > 0 and both Binance trends > 0  -> evaluate UP
+z < 0 and both Binance trends < 0  -> evaluate DOWN
+otherwise                          -> PASS
+```
+
+Market prices never create direction. A 95% contract may be correctly priced and is neither an
+automatic momentum entry nor an automatic reversal entry.
+
+## Position and execution
+
+- Fixed requested amount: `$1` with the checked-in configuration.
+- Minimum Polymarket order amount: `$1`.
+- At most one position per condition/market.
+- At most two unresolved positions globally, allowing delayed Gamma settlement without duplicate
+  market exposure.
+- No averaging down, martingale sizing, or opposite-side micro-hedge.
+- Paper uses the order-book weighted effective price and assumes the validated `$1` amount fills.
+- Live submits a fixed-USDC FAK capped by model value and records only actual CLOB cost and shares.
+- A rejection or zero fill creates no position.
+
+The first version holds positions through official settlement. It does not use a contract-price
+percentage stop, which would cross the spread and confuse market repricing with final-outcome risk.
 
 ## Risk controls
 
-| Control | Current behavior |
-| --- | --- |
-| Position budget | Fixed USDC amount per entry |
-| Open-position limit | One pending position globally |
-| Daily loss | Blocks at or below the configured negative limit; `0` disables |
-| Momentum | Blocks entries against a strong Binance trend |
-| Spread | Blocks when YES + NO differs from 1 by more than 6% |
-| Entry range | Avoids prices outside the configured cheap-side range |
-| TTL | Requires enough time before market expiry |
-| Circuit breaker | Blocks when recent-result win rate is below the floor |
-| Live FAK retry | Per-market retry cap plus backoff |
+Checked-in Paper defaults:
 
-The result history is kept in memory with a 200-result cap. W/L counters and circuit-breaker history
-are not restored after restart; balance and pending positions are restored.
+| Control | Value |
+| --- | ---: |
+| Position size | `$1` |
+| Daily loss limit | `$5` |
+| Maximum trades per day | `8` |
+| Loss-streak cooldown | `3 losses → 30 minutes` |
+| Entry TTL | `75–150s` |
+| Minimum normalized move | `0.60` |
+| Minimum net edge | `0.05` |
+| Model uncertainty | `0.03` |
+| Fee buffer | `0.02` |
+| Maximum spread | `0.03` |
+| Minimum best-ask depth | `5x` order size |
+| Maximum unresolved positions | `2` |
 
-## Why the default strategy trades rarely
+A three-loss streak pauses entries for 30 minutes; a win clears the streak. Daily trade count, daily
+PnL, and rolling win-rate history remain in memory and are not restored after restart. Balance and
+pending positions are persisted.
 
-The checked-in defaults require all of the following at once:
+## Observation and calibration
 
-- one side strictly above 95%;
-- the opposite side priced between 0.05 and 0.15;
-- at least 90 seconds remaining;
-- 60 Binance ticks already buffered; and
-- no conflicting BTC momentum.
+Every model evaluation after market and price warm-up is appended to
+`logs/<mode>/observations.csv`, including:
 
-Extreme prices often occur late in a five-minute window, when the TTL gate already blocks entry.
-Zero paper trades over a short run is therefore expected and does not by itself indicate a runtime
-failure. Use `RUST_LOG=debug` to see the first failed gate.
+- Chainlink opening/current price and realized volatility;
+- Binance price and 15s/30s trend;
+- both outcomes' bid, ask, effective price, and best-ask depth;
+- TTL, pass reason, selected direction, model probability, and net edge.
 
-## Settlement
+`trades.csv` remains the accounting ledger. `outcomes.csv` records official settlement, direction,
+PnL, and entry/settlement Chainlink values keyed by market slug so observations can be calibrated
+without reconstructing labels from unstructured logs.
 
-Trading direction is settled from Gamma's official Polymarket resolution, not by comparing Binance
-prices locally.
+Before removing the uncalibrated-live guard, collect at least 2,000 market windows and 200 realistic
+Paper fills, join each observation to its official outcome, and evaluate walk-forward calibration,
+net PnL after conservative costs, drawdown, and performance by TTL/volatility/price bucket. Win rate
+alone is not a sufficient metric.
 
-```text
-win:  payout = filled_shares; pnl = payout - cost
-loss: payout = 0;             pnl = -cost
-```
+## Known limitations
 
-Live winners additionally require on-chain CTF redemption before the wallet receives spendable USDC.
-
-## Known model limitations
-
-- The 0.50 fair-value assumption is not empirically calibrated in code.
-- Fees are not included in the decision edge.
-- Paper fills do not model order-book depth or partial execution.
-- A delayed settlement blocks trading in subsequent windows because only one global pending position
-  is allowed.
-- The circuit breaker uses the bounded in-memory result history and resets on restart.
+- The normal-CDF probability is not yet empirically calibrated.
+- Paper validates current depth but does not model network latency or partial fills.
+- Dynamic fees are represented by a conservative fixed buffer.
+- Chainlink history delivered on a fresh RTDS connection may not reach the current window boundary;
+  the bot safely waits for a later market in that case.
+- Daily PnL and rolling circuit-breaker history reset on process restart.
 - Automatic redemption retries are not persisted after accounting settlement.
-
-These are explicit strategy changes for a later phase; they are not hidden configuration switches.
