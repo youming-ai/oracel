@@ -1,265 +1,130 @@
-# Polymarket 5m Bot
+# Polymarket BTC 5m Bot
 
-An automated trading bot for Polymarket BTC 5-minute up/down markets. It monitors live BTC prices via Binance WebSocket, fetches market quotes from the Polymarket CLOB, and bets against extreme market sentiment. Supports both paper trading (simulated) and live trading with on-chain order placement and CTF redemption.
+Automated contrarian trader for Polymarket BTC 5-minute UP/DOWN markets. Binance supplies
+real-time BTC prices; Polymarket supplies the market, order book, execution, and resolution.
 
-## Strategy Overview
+The bot has exactly two modes:
 
-- Buy `DOWN` when the market becomes extremely bullish (≥95%)
-- Buy `UP` when the market becomes extremely bearish (≤5%)
-- Fair value assumption: `0.50` for a 5-minute binary outcome
-- Only trade when edge and entry filters pass
-- Fixed position size from `strategy.position_size_usdc`, with a $1 order minimum
-- Daily-loss and sliding-window circuit breakers can block new entries
+- **paper** — simulates fills and PnL without a private key
+- **live** — submits real FAK orders and redeems winning CTF positions
 
-See [docs/STRATEGY.md](docs/STRATEGY.md) for the full strategy logic, decision flow, and risk controls.
+See [Trading flow](docs/ARCHITECTURE.md) and [Strategy](docs/STRATEGY.md) for the authoritative
+behavior. `config.toml` is the authoritative configuration example.
 
-## Documentation
+## Quick start
 
-Comprehensive documentation is available in the `docs/` directory:
+```bash
+# Validate, build, and test
+cargo build --locked
+cargo test --locked
 
-- **[docs/STRATEGY.md](docs/STRATEGY.md)** - Trading strategy and decision flow
-- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - System architecture and data flow
-- **[docs/MODULES.md](docs/MODULES.md)** - Detailed module documentation
-- **[docs/API.md](docs/API.md)** - API reference and data structures
-- **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)** - Configuration guide
-- **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** - Deployment and operations guide
-
-## Architecture
-
-```text
-Binance WS ─────────────► BTC price buffer (1s ticks)
-                                   │
-Polymarket CLOB REST ─────► Yes/No mid prices
-                                   │
-                         ┌─────────┴─────────┐
-                         │     Pipeline       │
-                          │  1. PriceSource    │  BTC price history (Binance WS)
-                         │  2. Decider        │  Signal, edge and risk filters
-                         │  3. Executor       │  Paper UUID / Live FAK order
-                         │  4. Settler        │  Expiry settlement + PnL
-                         └─────────┬─────────┘
-                                   │
-                   ┌───────────────┼───────────────┐
-                   │ Paper                         │ Live
-                   │ Gamma API ──► market resolution │ Gamma API ──► market resolution
-                   │                               │ CTF Redeemer ──► on-chain redeem
-                   └───────────────────────────────┘
+# Paper mode is the checked-in default
+cargo run --release --bin polybot
 ```
 
-### Background Tasks
+The terminal dashboard starts automatically. Press `q` or `Esc` to stop. For a service or log-only
+run:
 
-The main loop runs four concurrent tasks:
+```bash
+POLYBOT_HEADLESS=1 cargo run --release --bin polybot
+```
 
-| Task | Interval | Purpose |
-| --- | --- | --- |
-| Signal tick | 1s | Fetch prices, evaluate signal, decide and execute |
-| Settlement checker | 15s | Settle expired positions via Gamma API resolution |
-| Market refresher | 60s | Discover the current active 5-minute market via Gamma API |
-| Status printer | 10s | Log runtime summary (balance, PnL, streak, pending, TTL) |
+## Live mode
 
-## Repository Layout
+Set the mode in `config.toml`:
+
+```toml
+[trading]
+mode = "live"
+```
+
+Create `.env` from `.env.example` and set `PRIVATE_KEY`. `ALCHEMY_KEY` is optional; without it the
+bot uses a public Polygon RPC endpoint.
+
+Before enabling live mode:
+
+1. Run paper mode through at least one entry and settlement.
+2. Verify the wallet address, USDC balance, approvals, and Polymarket access.
+3. Keep `position_size_usdc` small.
+4. Confirm `logs/live/` is writable and backed up.
+
+## Runtime files
+
+Mode-specific files prevent paper state from contaminating live state:
+
+```text
+logs/
+├── paper/
+│   ├── bot.log.YYYY-MM-DD
+│   ├── trades.csv
+│   ├── balance
+│   └── pending_positions.json
+└── live/
+    └── ...
+```
+
+Pending positions and balances are written atomically and restored after restart.
+
+## Data sources
+
+| Source | Purpose |
+| --- | --- |
+| Binance WebSocket | BTCUSDT price buffer and momentum filter |
+| Polymarket Gamma API | Active-market discovery and official resolution |
+| Polymarket CLOB | Buy quotes and live FAK execution |
+| Polygon RPC | Live USDC balance and CTF redemption |
+
+## Tools
+
+```bash
+# Derive CLOB credentials without writing secrets to disk
+cargo run --release --bin polybot-tools -- --derive-keys
+
+# Redeem one resolved market
+cargo run --release --bin polybot-tools -- --redeem <market-slug>
+
+# Scan the last 24 hours for redeemable positions
+cargo run --release --bin polybot-tools -- --redeem-all
+```
+
+## Development checks
+
+```bash
+cargo build --locked
+cargo test --locked
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo fmt --all -- --check
+cargo audit
+```
+
+## Project layout
 
 ```text
 src/
-├── main.rs                  # Bot entry point and tracing setup
-├── bot.rs                   # Bot struct, main loop, order logic, trade recording
-├── config.rs                # Config definitions, defaults, validation
-├── state.rs                 # BotState (in-memory only: idle reasons, FAK state)
-├── tasks.rs                 # Background tasks: settlement, market refresh, status, balance write
-├── lib.rs                   # Library re-exports
-├── cli.rs                   # polybot-tools binary (derive-keys, redeem)
+├── main.rs                 # startup, logging, TUI/headless mode
+├── bot.rs                  # orchestration and one-second trading tick
+├── config.rs               # paper/live configuration and validation
+├── tasks.rs                # market refresh, status, settlement, redemption
+├── trade_log.rs            # shared CSV writer
 ├── data/
-│   ├── mod.rs               # Data module exports
-│   ├── binance.rs           # Binance WebSocket client
-│   ├── market_discovery.rs  # Gamma API market discovery and resolution
-│   └── polymarket.rs        # CLOB client, order placement, CTF redemption, RPC URL selection
-└── pipeline/
-    ├── mod.rs               # Pipeline module
-    ├── price_source.rs      # BTC price buffer (Binance WS)
-    ├── decider.rs           # Signal detection, risk and entry filters
-    ├── executor.rs          # Paper/live order execution
-    ├── settler.rs           # Position settlement and PnL calculation
-    └── test_helpers.rs      # Test utilities
-
-logs/                        # Generated at runtime (gitignored)
-├── paper/                   # Paper mode data
-│   ├── bot.log              # Runtime log
-│   ├── trades.csv           # Trade entries and settlements
-│   └── balance              # Current balance snapshot
-└── live/                    # Live mode data
-    ├── bot.log
-    ├── trades.csv
-    └── balance
+│   ├── binance.rs          # BTC WebSocket
+│   ├── market_discovery.rs # Gamma discovery and resolution
+│   └── polymarket.rs       # CLOB and Polygon clients
+├── pipeline/
+│   ├── price_source.rs
+│   ├── decider.rs
+│   ├── executor.rs
+│   └── settler.rs
+└── tui/
 ```
 
-## Quick Start
+## Environment variables
 
-```bash
-# 1. Build
-cargo build --release
-
-# 2. Review config.toml (paper mode is the default)
-$EDITOR config.toml
-
-# 3. Run in paper mode
-cargo run --release
-
-# 4. Use the terminal dashboard; press q or Esc to stop cleanly
-```
-
-## CLI
-
-```bash
-# Run the bot (mode determined by config.toml)
-cargo run --release --bin polybot
-
-# Derive Polymarket CLOB API credentials from PRIVATE_KEY
-# Prints to terminal only, does not persist to disk
-cargo run --release --bin polybot-tools -- --derive-keys
-
-# Scan the last 24 hours of markets and redeem winning positions on-chain
-cargo run --release --bin polybot-tools -- --redeem-all
-
-# Redeem a specific market by slug
-cargo run --release --bin polybot-tools -- --redeem btc-updown-5m-1773926700
-```
-
-## Runtime Modes
-
-### Paper
-
-- Default mode (`trading.mode = "paper"` in `config.toml`; omitted also defaults to paper)
-- Does not require `PRIVATE_KEY`
-- Generates a local UUID as the order ID instead of placing a real order
-- Settlement uses Gamma API market resolution
-- Starts with $100 simulated balance (or restores from `logs/paper/balance`)
-
-### Live
-
-- Set `trading.mode` to `"live"` in `config.toml`
-- Requires `PRIVATE_KEY` in `.env`
-- Authenticates with the Polymarket CLOB and places real FAK limit orders
-- Balance is synced from the on-chain USDC wallet every tick
-- Settlement uses Gamma API market resolution
-- Enables CTF redeemer for automatic on-chain redemption of winning positions
-- Uses Alchemy RPC when `ALCHEMY_KEY` is set, otherwise falls back to public Polygon RPC
-
-## Environment Variables
-
-The program reads `.env` from the repository root at startup.
-
-| Variable | Required | Description |
+| Variable | Required | Purpose |
 | --- | --- | --- |
-| `PRIVATE_KEY` | Live mode | Wallet private key for CLOB authentication and CTF redemption |
-| `ALCHEMY_KEY` | Optional | Alchemy API key for Polygon RPC; improves reliability for on-chain operations |
-| `POLYBOT_HEADLESS` | Optional | Disable the TUI for services and automated runtime tests |
+| `PRIVATE_KEY` | Live only | CLOB signing and CTF redemption |
+| `ALCHEMY_KEY` | No | Reliable Polygon RPC |
+| `RUST_LOG` | No | Log level, for example `debug` |
+| `POLYBOT_HEADLESS` | No | Disable terminal UI when set |
 
-## Configuration
-
-Trading mode and all strategy parameters are configured in `config.toml`; see `src/config.rs` for code defaults.
-
-| Field | Default | Description |
-| --- | --- | --- |
-| `trading.mode` | `"paper"` | Runtime mode: `"paper"` or `"live"` |
-| `market.stale_threshold_ms` | `30000` | Max age of BTC price data before considered stale (ms) |
-| `market.min_ttl_ms` | `30000` | Minimum remaining time before market expiry to place a trade (ms) |
-| `polyclob.gamma_api_url` | `https://gamma-api.polymarket.com` | Gamma API base URL |
-| `price_source.source` | `"binance"` | Price feed: `"binance"` or `"binance_ws"` |
-| `price_source.symbol` | `"BTCUSDT"` | Trading pair symbol (e.g., "BTCUSDT" for Binance) |
-| `strategy.extreme_threshold` | `0.95` | Market bias threshold to consider sentiment extreme |
-| `strategy.fair_value` | `0.50` | Fair-value assumption for a binary 5-minute outcome |
-| `strategy.position_size_usdc` | `1.0` | Fixed position size per trade in USDC |
-| `strategy.min_entry_price` | `0.02` | Minimum entry price for a trade candidate |
-| `strategy.max_entry_price` | `0.06` | Maximum entry price for a trade candidate |
-| `strategy.min_ttl_for_entry_ms` | `120000` | Minimum remaining TTL to enter a trade (ms) |
-| `risk.max_fak_retries` | `3` | Maximum retries for FAK (Fill-And-Kill) orders |
-| `polling.signal_interval_ms` | `1000` | Main signal loop interval in milliseconds |
-| `polling.status_interval_ms` | `10000` | Status log printing interval in milliseconds |
-
-### Price Source Configuration
-
-The bot uses Binance WebSocket for real-time BTC price updates via the `price_source` config section:
-
-```toml
-[price_source]
-source = "binance"
-symbol = "BTCUSDT"
-```
-
-Available sources:
-- `binance` (default): Binance WebSocket stream
-- `binance_ws`: Binance WebSocket (explicit)
-
-Symbol format: `BTCUSDT`, `ETHUSDT` (no dash, uppercase)
-
-The bot validates symbol format on startup and rejects invalid configurations.
-
-## Data Sources
-
-| Source | Protocol | Purpose |
-| --- | --- | --- |
-| Binance | WebSocket | Live BTC/USDT price stream (low latency) |
-| Polymarket CLOB | REST | Yes/No mid prices and live order placement |
-| Gamma API | REST | Market discovery, slug lookup, resolution checks |
-| CTF Contract | Polygon RPC | On-chain position balance queries and redemption |
-
-## Logs and Monitoring
-
-All logs are written to `logs/<mode>/` where mode is `paper` or `live`.
-
-| File | Content |
-| --- | --- |
-| `bot.log` | Full runtime log with `[INIT]`, `[MKT]`, `[IDLE]`, `[SKIP]`, `[TRADE]`, `[SETTLED]`, `[STATUS]` prefixes |
-| `trades.csv` | One row per trade entry and one row per settlement |
-| `balance` | Current balance as a plain decimal (atomically updated) |
-
-Log tag reference:
-
-| Tag | Meaning |
-| --- | --- |
-| `[IDLE]` | Pre-signal filter rejected (buffer filling, not extreme, TTL too short) |
-| `[SKIP]` | Decider rejected (already traded, against trend, edge too low) |
-| `[TRADE]` | Order placed (direction, price, edge, BTC price) |
-| `[SETTLED]` | Position settled (WIN/LOSS, PnL, running W/L count) |
-| `[STATUS]` | Periodic summary (mode, BTC, balance, PnL, streak, pending, TTL) |
-| `[RISK]` | Risk warning triggered (cooldown, loss streak, daily loss); zero balance still blocks |
-
-The terminal dashboard starts automatically with `polybot`; press `q` or `Esc` to stop.
-
-## Deployment
-
-Set `POLYBOT_HEADLESS=1` when running under a service manager. The bot handles `SIGINT` and `SIGTERM` for graceful shutdown and persists balance and pending positions before exiting.
-
-## Safety Features
-
-- **Secret handling**: `PRIVATE_KEY` wrapped in `SecretString`; `--derive-keys` masks secret output
-- **Decimal precision**: All financial calculations use `rust_decimal::Decimal`, never `f64`
-- **Network resilience**: All HTTP/RPC calls have explicit timeouts (10–30s); WebSocket reconnects with exponential backoff
-- **Graceful shutdown**: `SIGINT`/`SIGTERM` flush balance and state to disk
-- **Config validation**: Bounds-checked on startup; invalid configs are rejected immediately
-- **Atomic file writes**: Balance and state files use write-to-temp + rename to prevent corruption
-- **Zero-share guard**: Orders with computed 0 shares are rejected to prevent phantom trades
-- **Risk logging**: Cooldown, loss-streak, and daily-loss conditions are logged; zero-balance trades are still rejected
-- **CI**: GitHub Actions pipeline with build, clippy, rustfmt, and `cargo audit`
-
-## Recent Changes
-
-### Binance WebSocket Price Source
-- Binance WebSocket support (default)
-- Configurable via `price_source.source` and `price_source.symbol`
-- Enum-based dispatch for performance
-
-### Risk Controls
-- Cooldown and daily-loss conditions are logged as warnings but do not block trading
-- Zero-balance trades are always rejected regardless of configuration
-
-### WebSocket Improvements
-- Simplified WebSocket task architecture: one client task + one consumer task
-- Uses Binance timestamp (`E` field) for more accurate price staleness detection
-- Invalid symbol errors (`-1121`) now cause permanent failure instead of infinite reconnection loops
-- Out-of-order tick protection: ignores timestamps that move backward
-
-### Bug Fixes
-- Fixed zero-share order bug: orders resulting in 0 shares are now rejected
-- Fixed order ID slicing panic: safe handling of short order IDs
-- Improved position combining safety: explicit error handling instead of unwrap
+Never commit `.env`, private keys, API credentials, or runtime logs.

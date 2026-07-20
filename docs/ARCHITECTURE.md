@@ -1,273 +1,151 @@
-# Architecture Overview
+# Trading Flow
 
-## System Architecture
+This document describes the current runtime behavior. Both paper and live mode use the same market
+data, decision pipeline, position model, persistence, and settlement logic. Only execution, balance
+source, and redemption differ.
 
-The Polymarket 5m Bot follows a pipeline architecture with clear separation of concerns:
+## End-to-end flow
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Data Sources                             │
-├────────────────────┬────────────────────────────────────────┤
-│     Binance        │      Polymarket Gamma API              │
-│   WebSocket        │         (REST API)                     │
-└─────────┬──────────┴──────────────────┬─────────────────────┘
-          │                             │
-          └──────────┬──────────────────┘
-                     │
-┌────────────────────▼─────────────────────────────────────┐
-│                   Pipeline                                │
-│  ┌──────────────┬──────────────────────────┬──────────┐  │
-│  │ PriceSource  │        Decider           │ Executor │  │
-│  │   (Stage 1)  │  (Stage 2: Signal+Decide)│(Stage 3) │  │
-│  └──────────────┴──────────────────────────┴──────────┘  │
-│                           │                               │
-│                      ┌────▼────┐                          │
-│                      │ Settler │                          │
-│                      │(Stage 4)│                          │
-│                      └─────────┘                          │
-└───────────────────────────────────────────────────────────┘
-          │
-          ▼
-┌─────────────────────────────────────┐
-│       ratatui TUI Dashboard         │
-│   (Arc<RwLock<TuiState>> shared)    │
-└─────────────────────────────────────┘
-```
-
-## Pipeline Stages
-
-### Stage 1: PriceSource
-**Purpose**: Real-time BTC price ingestion from Binance WebSocket
-
-**Key Responsibilities**:
-- WebSocket connection management with automatic reconnection
-- Price buffer maintenance (rolling window of last N ticks)
-- Exchange timestamp tracking for accurate staleness detection
-
-**Performance Characteristics**:
-- Lock-free read path for latest price queries
-- Zero-allocation hot path for price updates
-- <1ms ingestion latency target
-
-### Stage 2: Decider (Signal + Decision)
-**Purpose**: Market opportunity detection and trade decision logic
-
-**Key Responsibilities**:
-- Fetch Polymarket CLOB quotes (yes/no mid prices)
-- Detect extreme market sentiment (yes > 0.90 → Down, no > 0.90 → Up)
-- Orderbook spread check (reject if yes+no spread > 6%)
-- BTC trend momentum confirmation
-- Entry price range validation
-- TTL (time-to-live) minimum check
-- Balance and daily loss limit enforcement
-- Sliding-window circuit breaker (win rate check)
-
-**Decision Pipeline**:
-```
-decide()
-├── 1. Balance > 0? → Pass("insufficient_balance")
-├── 2. Daily loss limit? → Pass("daily_loss_limit")
-├── 3. Market data valid? → Pass("no_market_data")
-├── 4. Extreme market? → Pass("not_extreme_XX%")
-├── 5. Spread check? → Pass("spread_too_wide")
-├── 6. Entry price range? → Pass("price_out_of_range")
-├── 7. Min TTL for entry? → Pass("ttl_below_entry_floor")
-├── 8. BTC trend against? → Pass("btc_trend_against_XX%")
-├── 9. Circuit breaker? → Pass("circuit_breaker_wr_XX%")
-└── TRADE: Calculate position size, edge, payoff ratio
+```text
+Startup
+  │
+  ├─ load and validate config.toml
+  ├─ select logs/paper or logs/live
+  ├─ initialize Binance, Gamma, and CLOB clients
+  ├─ paper: restore simulated balance
+  ├─ live: authenticate CLOB and query on-chain USDC
+  └─ restore pending_positions.json
+        │
+        ▼
+Background data
+  ├─ Binance BTCUSDT WebSocket ──► rolling price buffer
+  └─ Gamma market discovery ─────► current token IDs, slug, condition ID, expiry
+        │
+        ▼
+Trading tick (default: 1 second)
+  ├─ require a warm, non-stale BTC buffer
+  ├─ require a discovered Polymarket market
+  ├─ fetch YES and NO buy quotes concurrently
+  ├─ run the decision gates
+  ├─ require no existing pending position
+  └─ paper simulation or live FAK order
+        │
+        ▼
+Position state
+  ├─ deduct actual cost
+  ├─ append ENTRY to trades.csv
+  └─ atomically persist pending_positions.json
+        │
+        ▼
+Settlement task
+  ├─ wait until market expiry
+  ├─ poll Gamma until officially closed and resolved
+  ├─ calculate payout and PnL
+  ├─ append WIN/LOSS to trades.csv
+  ├─ remove the pending position and persist state
+  └─ live win: attempt on-chain CTF redemption
 ```
 
-### Stage 3: Executor
-**Purpose**: Order execution via Polymarket CLOB
+## Startup by mode
 
-**Key Responsibilities**:
-- Place FAK (Fill-And-Kill) limit orders via CLOB
-- Slippage tolerance application (1% default)
-- Zero-share order rejection
-- Order ID safe handling (prevent slicing panics)
-- FAK retry logic on failure
+### Paper
 
-### Stage 4: Settler
-**Purpose**: Position settlement and PnL calculation
+- No private key or authenticated CLOB client.
+- Balance starts from `trading.paper_starting_balance` or `logs/paper/balance`.
+- Existing paper positions are restored from `logs/paper/pending_positions.json`.
 
-**Key Responsibilities**:
-- Track pending positions until settlement time
-- Poll Gamma API for market resolution
-- Calculate payouts and PnL
-- Prevent duplicate position tracking
-- Handle position combining for multiple orders on same market
+### Live
 
-## Data Flow
+- Requires `PRIVATE_KEY`.
+- Authenticates with the Polymarket CLOB before entering the run loop.
+- Derives the wallet and queries Polygon USDC.
+- Initializes the CTF redeemer and restores live pending positions.
+- Re-queries available on-chain USDC during trading ticks.
 
-```
-┌────────────────────────────────────────────────────────────┐
-│                     Main Event Loop                         │
-│                    (1-second intervals)                     │
-└────────────────────┬───────────────────────────────────────┘
-                     │
-    ┌────────────────┼────────────────┐
-    │                │                │
-    ▼                ▼                ▼
-┌─────────┐    ┌──────────┐    ┌──────────┐
-│ Price   │    │ Settlement│   │  Market  │
-│ Update  │    │  Check    │   │ Refresh  │
-│ (1s)    │    │  (15s)    │   │  (60s)   │
-└────┬────┘    └──────────┘    └──────────┘
-     │
-     ▼
-┌─────────────────────────────────────────┐
-│ 1. Check Price Buffer (≥60 samples)     │
-│ 2. Check Price Staleness (<30s old)     │
-│ 3. Check Market Readiness               │
-│ 4. Check Time-to-Live (≥30s remaining)  │
-│ 5. Signal Detection (extreme market?)   │
-└─────────────────────────────────────────┘
-     │
-     ▼
-┌─────────────────────────────────────────┐
-│           Decision Pipeline             │
-│ - Market data valid?                    │
-│ - Spread check?                         │
-│ - Extreme market?                       │
-│ - Entry price in range?                 │
-│ - TTL sufficient for entry?             │
-│ - Balance > 0?                          │
-│ - Daily loss limit?                     │
-└─────────────────────────────────────────┘
-     │
-     ▼
-┌─────────────────────────────────────────┐
-│         Trade Execution                 │
-│ - Calculate position size               │
-│ - Validate shares > 0                   │
-│ - Execute order via CLOB                │
-│ - Record position in settler            │
-└─────────────────────────────────────────┘
-     │
-     ▼
-┌─────────────────────────────────────────┐
-│   TUI State Update                      │
-│ - BTC price, market info                │
-│ - Balance, PnL, stats                   │
-│ - Trade history, decision status        │
-└─────────────────────────────────────────┘
+Failure to authenticate, derive the wallet, or obtain the initial live balance aborts startup.
+
+## Data ownership
+
+| Component | Owns |
+| --- | --- |
+| `PriceSource` | Rolling Binance ticks and BTC trend calculation |
+| `MarketState` | Current Polymarket IDs, slug, and expiry |
+| `AccountState` | Available balance, PnL, W/L counters, daily PnL |
+| `Settler` | The current pending position |
+| `BotState` | Idle reason and live FAK retry state |
+| `TuiState` | Read-only presentation snapshot and recent rows |
+
+Shared mutable state uses `Arc<RwLock<_>>`. Shutdown uses one shared `AtomicBool` across the bot,
+background tasks, and TUI.
+
+## Decision boundary
+
+`bot.rs` owns I/O and orchestration. `pipeline/decider.rs` is deterministic business logic:
+
+```text
+DecideContext + AccountState + DeciderConfig → Decision::Pass | Decision::Trade
 ```
 
-## Module Organization
+The decider does not perform network calls or place orders. This keeps strategy tests fast and
+allows paper/live to share exactly the same decision.
 
-```
-src/
-├── main.rs                  # Entry point, tracing setup, TUI init
-├── bot.rs                   # Bot struct, main loop, order logic, trade recording
-├── config.rs                # Configuration definitions, validation, defaults
-├── state.rs                 # BotState (in-memory: idle reasons, FAK state)
-├── tasks.rs                 # Background tasks: settlement, market refresh, status, balance
-├── lib.rs                   # Library re-exports (config, data, pipeline, tui)
-├── cli.rs                   # CLI tools binary (polybot-tools)
-│
-├── data/                    # External data source clients
-│   ├── mod.rs               # Data module exports
-│   ├── binance.rs           # Binance WebSocket client
-│   ├── market_discovery.rs  # Gamma API integration
-│   └── polymarket.rs        # Polymarket CLOB client + RPC URL
-│
-├── pipeline/                # Trading pipeline stages
-│   ├── mod.rs               # Pipeline module exports
-│   ├── price_source.rs      # Stage 1: Price ingestion
-│   ├── decider.rs           # Stage 2: Signal detection + trade decision
-│   ├── executor.rs          # Stage 3: Order execution
-│   ├── settler.rs           # Stage 4: Settlement
-│   └── test_helpers.rs      # Test utilities (d() helper)
-│
-└── tui/                     # Terminal dashboard
-    ├── mod.rs               # TUI event loop
-    ├── state.rs             # TuiState (shared via Arc<RwLock>)
-    ├── ui.rs                # Layout and widget rendering
-    ├── event.rs             # Event handling stubs
-    └── keys.rs              # Key handling stubs
+## Execution boundary
+
+`pipeline/executor.rs` converts a trade decision into an `OrderResult`.
+
+- The candidate price receives configured slippage and is rounded for CLOB compatibility.
+- The order amount is fixed in USDC rather than rounded up to whole shares.
+- Paper simulates a complete fill at the same maximum price.
+- Live submits a fixed-USDC FAK buy and records CLOB-reported cost and shares.
+- A rejected or zero-fill FAK produces no position.
+
+The main bot permits only one pending position globally. If Gamma resolution is delayed, that
+position also blocks entry into later market windows.
+
+## Settlement and redemption
+
+Gamma is the accounting source of truth for both modes. A market is settled only when:
+
+1. `umaResolutionStatus` contains `resolved`;
+2. `closed` is true; and
+3. one outcome price reaches `misc.resolution_price_threshold`.
+
+For a winning position:
+
+```text
+payout = filled_shares
+pnl    = payout - actual_cost
 ```
 
-## Concurrency Model
+For a losing position:
 
-### Async Task Structure
-```
-Main Task
-├── PriceSource Task
-│   └── WebSocket Client Task (reconnect loop)
-│   └── Price Consumer Task (buffer updates)
-├── Settlement Checker Task (15s interval)
-├── Market Refresher Task (60s interval)
-├── Signal Tick Task (1s interval)
-│   └── Decision → Execution → Settlement
-└── TUI Blocking Thread
-    └── 250ms render loop (reads TuiState via try_read)
+```text
+payout = 0
+pnl    = -actual_cost
 ```
 
-### Synchronization Primitives
-- **RwLock**: Used for shared state (balance, positions, market data, TUI state)
-- **broadcast channels**: Price tick distribution from exchange clients
-- **AtomicBool**: PriceSource start guard (prevent duplicate starts)
+In live mode, accounting settlement and on-chain redemption are separate steps. A win is queued for
+CTF redemption after Gamma resolution. The CLI redemption tools provide recovery for historical or
+exhausted automatic retries.
 
-### State Sharing Pattern
-```rust
-// Shared state wrapped in Arc<RwLock<T>>
-struct Bot {
-    account: Arc<RwLock<AccountState>>,
-    settler: Arc<RwLock<Settler>>,
-    market_state: Arc<RwLock<MarketState>>,
-    price_source: Arc<PriceSource>,
-    tui_state: Arc<RwLock<TuiState>>,
-}
+## Persistence
+
+```text
+logs/<mode>/balance
+logs/<mode>/pending_positions.json
+logs/<mode>/trades.csv
 ```
 
-## Error Handling Strategy
+Balance and pending-position files use write-to-temp plus rename. A corrupt pending-position file
+fails startup rather than silently dropping an open position.
 
-### Error Categories
-1. **Transient Errors**: Network timeouts, temporary API failures
-   - Action: Retry with exponential backoff
-   - Example: WebSocket disconnections
+## Background tasks
 
-2. **Permanent Errors**: Invalid configuration, invalid symbols
-   - Action: Log error and terminate/fail fast
-   - Example: Binance -1121 (invalid symbol)
+| Task | Default interval | Responsibility |
+| --- | ---: | --- |
+| Trading tick | 1 second | Quotes, decision, execution, UI snapshot |
+| Settlement | 15 seconds | Resolution, PnL, persistence, redemption |
+| Market refresh | 60 seconds | Rotate to the active five-minute market |
+| Status | 10 seconds | Headless/debug runtime summary |
 
-3. **Business Logic Errors**: Insufficient balance, no extreme signal
-   - Action: Skip trade, log reason
-   - Example: Balance zero, not extreme market
-
-### Error Propagation
-- `anyhow::Result` for top-level error handling
-- Custom error types for domain-specific failures
-- Structured logging with context (tracing crate)
-
-## Performance Considerations
-
-### Hot Path Optimizations
-1. **Lock-free reads**: Latest price accessed via read lock (no contention)
-2. **Zero-allocation**: Price updates use pre-allocated buffer
-
-### Memory Management
-- Fixed-size price buffer (circular queue, 1000 ticks default)
-- Streaming JSON parsing (no full document materialization)
-- Efficient decimal arithmetic (rust_decimal crate)
-
-### Resource Limits
-- WebSocket buffer: 1000 price ticks
-- Broadcast channel: 1000 message backlog
-- HTTP timeouts: 10-30 seconds depending on operation
-
-## Security Considerations
-
-### Secret Management
-- Private keys stored in `SecretString` (zero-on-drop)
-- Environment variable loading from `.env` file
-- No secrets in configuration files or logs
-
-### Input Validation
-- Configuration validation on startup
-- Price range validation (prevent degenerate orders)
-- Symbol format validation
-
-### Safe Defaults
-- Fixed position sizing for simplicity
-- Balance-based trade rejection
+The Binance WebSocket has its own reconnect loop and receiver task.

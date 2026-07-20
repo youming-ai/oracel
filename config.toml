@@ -1,12 +1,13 @@
 # Polymarket 5m Bot Configuration
 # Durations in milliseconds unless noted (secs suffix).
 
-[market]
-stale_threshold_ms = 30000          # max BTC price age before skipping (ms)
-min_ttl_ms = 30000                  # min remaining market TTL to enter (ms)
+[trading]
+mode = "paper"                      # "paper" or "live"
+paper_starting_balance = 100.0
 
 [polyclob]
 gamma_api_url = "https://gamma-api.polymarket.com"
+gamma_http_secs = 10
 
 [strategy]
 extreme_threshold = 0.95            # trade when yes/no ≥95% or ≤5%
@@ -19,6 +20,7 @@ btc_trend_window_s = 30             # BTC trend lookback (s). 0=off
 btc_trend_min_pct = 0.05            # min BTC % change for trend signal
 circuit_breaker_window = 50         # sliding-window trade count. 0=off
 circuit_breaker_min_win_rate = 0.05 # min win rate to keep trading
+slippage_tolerance = 0.01           # 1% above the CLOB buy quote
 
 [risk]
 max_fak_retries = 3                 # FAK retries per market window
@@ -33,27 +35,12 @@ settlement_check_secs = 15          # settlement poll interval (s)
 
 [price_source]
 symbol = "BTCUSDT"
+stale_threshold_ms = 30000          # max BTC price age before skipping (ms)
 buffer_max = 1000                   # max price ticks retained
 buffer_min_ticks = 60               # min ticks before trading starts
 
-[execution]
-slippage_tolerance = 0.01           # 1% slippage on top of mid-price
-
-[timeouts]
-gamma_http_secs = 10
-ws_connect_secs = 10
-ws_max_backoff_secs = 60            # doubles on each retry
-clob_price_secs = 10
-clob_auth_secs = 15
-clob_order_secs = 15
-rpc_connect_secs = 30
-rpc_redeem_secs = 30
-balance_query_secs = 10
-
 [redeem]
 max_retries = 10
-delay_secs = 5                      # between redemption txns (s)
-concurrency = 5                     # CLI scan parallelism
 
 [misc]
 trade_log_flush_secs = 30

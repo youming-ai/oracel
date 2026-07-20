@@ -37,15 +37,10 @@ struct PriceTick {
     timestamp_ms: i64,
 }
 
-pub struct PriceClient {
-    inner: Arc<BinanceClient>,
-}
-
 pub struct PriceSource {
-    client: PriceClient,
+    client: Arc<BinanceClient>,
     buffer: Arc<RwLock<VecDeque<PriceTick>>>,
     max: usize,
-    started: std::sync::atomic::AtomicBool,
 }
 
 pub struct PriceSourceHandles {
@@ -55,15 +50,10 @@ pub struct PriceSourceHandles {
 
 impl PriceSource {
     pub fn new(symbol: &str, max: usize) -> Self {
-        let client = PriceClient {
-            inner: Arc::new(BinanceClient::new(symbol)),
-        };
-
         Self {
-            client,
+            client: Arc::new(BinanceClient::new(symbol)),
             buffer: Arc::new(RwLock::new(VecDeque::with_capacity(max))),
             max,
-            started: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -104,16 +94,7 @@ impl PriceSource {
     }
 
     pub async fn start(&self, shutdown: Arc<AtomicBool>) -> PriceSourceHandles {
-        if self.started.swap(true, Ordering::SeqCst) {
-            tracing::warn!("[PRICE] PriceSource already started, skipping");
-            return PriceSourceHandles {
-                ws_handle: tokio::spawn(async {}),
-                receiver_handle: tokio::spawn(async {}),
-            };
-        }
-
-        let client = &self.client;
-        let ws_client = client.inner.clone();
+        let ws_client = self.client.clone();
         let ws_handle = tokio::spawn(async move {
             if let Err(e) = ws_client.start_ticker_ws().await {
                 tracing::error!("[WS] Binance WS stopped: {}", e);
@@ -122,7 +103,7 @@ impl PriceSource {
         let receiver_handle = Self::spawn_receiver(
             self.buffer.clone(),
             self.max,
-            client.inner.subscribe(),
+            self.client.subscribe(),
             "Binance",
             shutdown,
         );

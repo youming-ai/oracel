@@ -124,7 +124,7 @@ pub(crate) fn start_settlement_checker(
     discovery: Arc<MarketDiscovery>,
     redeemer: Option<Arc<CtfRedeemer>>,
     log_dir: String,
-    trade_log: Option<TradeLogHandle>,
+    trade_log: TradeLogHandle,
     shutdown: Arc<AtomicBool>,
     settlement_check_secs: u64,
     redeem_max_retries: u32,
@@ -241,15 +241,16 @@ pub(crate) fn start_settlement_checker(
                         .write()
                         .await
                         .settle_latest(r.direction.as_str(), r.won, r.pnl);
-                    if let (Some(tl), Some(btc_price)) = (&trade_log, settlement_btc_price) {
-                        tl.log_settlement(
-                            r.won,
-                            r.direction.as_str(),
-                            r.pnl,
-                            r.entry_btc_price,
-                            btc_price,
-                        )
-                        .await;
+                    if let Some(btc_price) = settlement_btc_price {
+                        trade_log
+                            .log_settlement(
+                                r.won,
+                                r.direction.as_str(),
+                                r.pnl,
+                                r.entry_btc_price,
+                                btc_price,
+                            )
+                            .await;
                     }
                 }
 

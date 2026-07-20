@@ -1,7 +1,7 @@
 //! Stage 4: Order Executor
 //! Places FAK orders (paper or live) with slippage tolerance.
 
-use crate::config::{ExecutionConfig, TradingMode};
+use crate::config::TradingMode;
 use crate::data::polymarket::AuthenticatedPolyClient;
 use crate::pipeline::decider::Decision;
 use crate::pipeline::decider::Direction;
@@ -23,7 +23,7 @@ pub struct OrderResult {
 pub struct Executor {
     mode: TradingMode,
     auth_client: Option<AuthenticatedPolyClient>,
-    execution_config: ExecutionConfig,
+    slippage_tolerance: Decimal,
 }
 
 pub struct ExecuteContext<'a> {
@@ -40,12 +40,12 @@ impl Executor {
     pub fn new(
         mode: TradingMode,
         auth_client: Option<AuthenticatedPolyClient>,
-        execution_config: ExecutionConfig,
+        slippage_tolerance: Decimal,
     ) -> Self {
         Self {
             mode,
             auth_client,
-            execution_config,
+            slippage_tolerance,
         }
     }
 
@@ -69,7 +69,7 @@ impl Executor {
                 }
 
                 // Apply slippage tolerance: bid slightly higher for better fill
-                let slippage = self.execution_config.slippage_tolerance;
+                let slippage = self.slippage_tolerance;
                 let price = if slippage > Decimal::ZERO {
                     let adjusted = mid_price * (Decimal::ONE + slippage);
                     // Cap at 0.99 to avoid extreme prices
@@ -190,16 +190,15 @@ impl Executor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ExecutionConfig;
     use crate::pipeline::test_helpers::d;
 
-    fn default_exec_config() -> ExecutionConfig {
-        ExecutionConfig::default()
+    fn default_slippage() -> Decimal {
+        d("0.01")
     }
 
     #[tokio::test]
     async fn test_execute_tracks_filled_shares_and_effective_cost() {
-        let executor = Executor::new(TradingMode::Paper, None, default_exec_config());
+        let executor = Executor::new(TradingMode::Paper, None, default_slippage());
         let decision = Decision::Trade {
             direction: Direction::Up,
             size_usdc: d("5.00"),
@@ -229,7 +228,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_returns_none_when_price_missing() {
-        let executor = Executor::new(TradingMode::Paper, None, default_exec_config());
+        let executor = Executor::new(TradingMode::Paper, None, default_slippage());
         let decision = Decision::Trade {
             direction: Direction::Up,
             size_usdc: d("5.00"),

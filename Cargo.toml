@@ -2,7 +2,7 @@
 name = "polymarket-5m-bot"
 version = "0.3.0"
 edition = "2021"
-description = "Automated trading bot for Polymarket BTC 5m markets - Chainlink oracle strategy"
+description = "Contrarian trading bot for Polymarket BTC 5-minute markets"
 license = "MIT"
 default-run = "polybot"
 
@@ -38,8 +38,6 @@ alloy = { version = "1.6", default-features = false, features = ["signer-local",
 dotenvy = "0.15"
 secrecy = "0.10"
 rustls = { version = "0.23", features = ["ring"] }
-crossbeam = "0.8"
-rand = "0.9"
 ratatui = "0.30"
 crossterm = "0.29"
 

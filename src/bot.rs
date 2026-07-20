@@ -49,7 +49,7 @@ pub(crate) struct Bot {
     balance_checker: Option<BalanceChecker>,
     market_state: Arc<RwLock<MarketState>>,
     shutdown: Arc<AtomicBool>,
-    trade_log: Option<TradeLog>,
+    trade_log: TradeLog,
     tui_state: Arc<RwLock<TuiState>>,
 }
 
@@ -67,9 +67,8 @@ impl Bot {
 
         let discovery_cfg = DiscoveryConfig {
             gamma_api_url: config.polyclob.gamma_api_url.clone(),
-            gamma_http_timeout: std::time::Duration::from_secs(config.timeouts.gamma_http_secs),
+            gamma_http_timeout: std::time::Duration::from_secs(config.polyclob.gamma_http_secs),
             market_search_windows: config.misc.market_search_windows,
-            resolution_price_threshold: config.misc.resolution_price_threshold,
         };
         let discovery = Arc::new(MarketDiscovery::new(discovery_cfg));
 
@@ -89,7 +88,11 @@ impl Bot {
             None
         };
 
-        let executor = Executor::new(config.trading.mode, auth_client, config.execution.clone());
+        let executor = Executor::new(
+            config.trading.mode,
+            auth_client,
+            config.strategy.slippage_tolerance,
+        );
 
         let redeemer = if config.trading.mode.is_live()
             && !config.trading.private_key.expose_secret().is_empty()
@@ -182,17 +185,9 @@ impl Bot {
         }
         let account = AccountState::new(initial_balance);
 
-        // Initialize trade log writer for all modes
-        let trade_log = match TradeLog::open(&log_dir) {
-            Ok(tl) => {
-                tracing::debug!("[INIT] TradeLog opened for {} mode", config.trading.mode);
-                Some(tl)
-            }
-            Err(e) => {
-                tracing::warn!("[INIT] Failed to open trade log: {}", e);
-                None
-            }
-        };
+        let trade_log = TradeLog::open(&log_dir)
+            .map_err(|e| anyhow::anyhow!("[INIT] Failed to open trade log: {}", e))?;
+        tracing::debug!("[INIT] TradeLog opened for {} mode", config.trading.mode);
 
         Ok(Self {
             config,
@@ -257,7 +252,7 @@ impl Bot {
 
         tokio::pin!(shutdown_signal);
 
-        let trade_log_handle = self.trade_log.as_ref().map(|tl| tl.clone_handle());
+        let trade_log_handle = self.trade_log.clone_handle();
         let mut settlement_handle = tasks::start_settlement_checker(
             self.settler.clone(),
             self.account.clone(),
@@ -304,9 +299,7 @@ impl Bot {
                     }
                 }
                 _ = flush_tick.tick() => {
-                    if let Some(ref tl) = self.trade_log {
-                        tl.flush().await;
-                    }
+                    self.trade_log.flush().await;
                 }
                 signal = &mut shutdown_signal => {
                     tracing::info!("[BOT] Received {}, shutting down...", signal);
@@ -368,9 +361,7 @@ impl Bot {
         if let Err(e) = self.settler.read().await.persist(&self.log_dir).await {
             tracing::error!("[STATE] Failed to persist pending positions: {}", e);
         }
-        if let Some(ref tl) = self.trade_log {
-            tl.flush().await;
-        }
+        self.trade_log.flush().await;
 
         Ok(())
     }
@@ -468,7 +459,7 @@ impl Bot {
             return Ok(());
         }
 
-        let stale_threshold_ms = self.config.market.stale_threshold_ms;
+        let stale_threshold_ms = self.config.price_source.stale_threshold_ms;
         if let Some(last_ts) = self.price_source.last_tick_ms().await {
             let age = Utc::now().timestamp_millis() - last_ts;
             if age > stale_threshold_ms {
@@ -493,27 +484,10 @@ impl Bot {
             return Ok(());
         }
 
-        let min_ttl_ms = self.config.market.min_ttl_ms;
-        if mkt.settlement_ms > 0 {
-            let remaining = mkt.settlement_ms - Utc::now().timestamp_millis();
-            if remaining < min_ttl_ms {
-                self.tui_state
-                    .write()
-                    .await
-                    .set_decision("IDLE: ttl_too_short".to_string());
-                let detail = format!("remaining={}s", remaining.max(0) / 1000);
-                self.state
-                    .write()
-                    .await
-                    .log_idle_change("ttl_too_short", &detail);
-                return Ok(());
-            }
-        }
-
         // Fetch both prices in parallel
         let (yes_result, no_result) = join!(
-            self.polymarket.fetch_mid_price(&mkt.token_yes),
-            self.polymarket.fetch_mid_price(&mkt.token_no),
+            self.polymarket.fetch_buy_price(&mkt.token_yes),
+            self.polymarket.fetch_buy_price(&mkt.token_no),
         );
 
         let (poly_yes_dec, poly_no_dec) = match (yes_result, no_result) {
@@ -720,9 +694,8 @@ impl Bot {
                     let bal = self.account.read().await.balance;
                     util::write_balance(&self.log_dir, bal).await;
 
-                    // Write to buffered trade log
-                    if let Some(ref tl) = self.trade_log {
-                        tl.log_entry(
+                    self.trade_log
+                        .log_entry(
                             order.direction.as_str(),
                             &order.order_id,
                             order.entry_price,
@@ -735,7 +708,6 @@ impl Bot {
                             *payoff_ratio,
                         )
                         .await;
-                    }
                 }
             }
         }
