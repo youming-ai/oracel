@@ -653,8 +653,23 @@ impl Config {
         let zero = Decimal::ZERO;
         let one = Decimal::ONE;
 
-        if self.polling.signal_interval_ms == 0 {
-            anyhow::bail!("polling.signal_interval_ms must be > 0");
+        if self.trading.paper_starting_balance <= zero {
+            anyhow::bail!("trading.paper_starting_balance must be > 0");
+        }
+        if self.market.stale_threshold_ms <= 0 || self.market.min_ttl_ms < 0 {
+            anyhow::bail!(
+                "market thresholds must satisfy stale_threshold_ms > 0 and min_ttl_ms >= 0"
+            );
+        }
+        if self.polyclob.gamma_api_url.trim().is_empty() {
+            anyhow::bail!("polyclob.gamma_api_url must not be empty");
+        }
+        if self.polling.signal_interval_ms == 0
+            || self.polling.status_interval_ms == 0
+            || self.polling.market_refresh_secs == 0
+            || self.polling.settlement_check_secs == 0
+        {
+            anyhow::bail!("all polling intervals must be > 0");
         }
         if !(zero < self.strategy.extreme_threshold && self.strategy.extreme_threshold < one) {
             anyhow::bail!("strategy.extreme_threshold must be in (0, 1)");
@@ -676,8 +691,8 @@ impl Config {
                 self.strategy.extreme_threshold
             );
         }
-        if self.strategy.position_size_usdc <= zero {
-            anyhow::bail!("strategy.position_size_usdc must be > 0");
+        if self.strategy.position_size_usdc < one {
+            anyhow::bail!("strategy.position_size_usdc must be >= 1 USDC");
         }
         if !(zero < self.strategy.min_entry_price
             && self.strategy.min_entry_price < self.strategy.max_entry_price
@@ -690,8 +705,11 @@ impl Config {
         if self.strategy.min_ttl_for_entry_ms == 0 {
             anyhow::bail!("strategy.min_ttl_for_entry_ms must be > 0");
         }
-        if self.strategy.circuit_breaker_window > 0
-            && self.strategy.circuit_breaker_min_win_rate > one
+        if self.strategy.btc_trend_min_pct < zero {
+            anyhow::bail!("strategy.btc_trend_min_pct must be >= 0");
+        }
+        if self.strategy.circuit_breaker_min_win_rate < zero
+            || self.strategy.circuit_breaker_min_win_rate > one
         {
             anyhow::bail!("strategy.circuit_breaker_min_win_rate must be in [0, 1]");
         }
@@ -710,8 +728,8 @@ impl Config {
                 self.price_source.symbol
             );
         }
-        if self.price_source.buffer_max == 0 {
-            anyhow::bail!("price_source.buffer_max must be > 0");
+        if self.price_source.buffer_max == 0 || self.price_source.buffer_min_ticks == 0 {
+            anyhow::bail!("price source buffer sizes must be > 0");
         }
         if self.price_source.buffer_min_ticks > self.price_source.buffer_max {
             anyhow::bail!(
@@ -719,6 +737,35 @@ impl Config {
                 self.price_source.buffer_min_ticks,
                 self.price_source.buffer_max
             );
+        }
+        if self.execution.slippage_tolerance < zero || self.execution.slippage_tolerance >= one {
+            anyhow::bail!("execution.slippage_tolerance must be in [0, 1)");
+        }
+        if self.risk.daily_loss_limit_usdc < zero || self.risk.max_fak_retries == 0 {
+            anyhow::bail!(
+                "risk.daily_loss_limit_usdc must be >= 0 and max_fak_retries must be > 0"
+            );
+        }
+        let timeout_values = [
+            self.timeouts.gamma_http_secs,
+            self.timeouts.ws_connect_secs,
+            self.timeouts.ws_max_backoff_secs,
+            self.timeouts.clob_price_secs,
+            self.timeouts.clob_auth_secs,
+            self.timeouts.clob_order_secs,
+            self.timeouts.rpc_connect_secs,
+            self.timeouts.rpc_redeem_secs,
+            self.timeouts.balance_query_secs,
+        ];
+        if timeout_values.contains(&0) {
+            anyhow::bail!("all timeout values must be > 0");
+        }
+        if self.redeem.concurrency == 0
+            || self.misc.trade_log_flush_secs == 0
+            || self.misc.shutdown_timeout_secs == 0
+            || self.misc.market_search_windows == 0
+        {
+            anyhow::bail!("redeem concurrency and misc intervals/counts must be > 0");
         }
         if self.misc.resolution_price_threshold <= 0.0 || self.misc.resolution_price_threshold > 1.0
         {

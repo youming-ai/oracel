@@ -8,8 +8,8 @@ An automated trading bot for Polymarket BTC 5-minute up/down markets. It monitor
 - Buy `UP` when the market becomes extremely bearish (≤5%)
 - Fair value assumption: `0.50` for a 5-minute binary outcome
 - Only trade when edge and entry filters pass
-- Position size: 1% of balance per trade, $1 minimum
-- Risk warnings are logged for cooldown, loss streaks, and daily loss; only zero balance blocks trading
+- Fixed position size from `strategy.position_size_usdc`, with a $1 order minimum
+- Daily-loss and sliding-window circuit breakers can block new entries
 
 See [docs/STRATEGY.md](docs/STRATEGY.md) for the full strategy logic, decision flow, and risk controls.
 
@@ -34,10 +34,9 @@ Polymarket CLOB REST ─────► Yes/No mid prices
                          ┌─────────┴─────────┐
                          │     Pipeline       │
                           │  1. PriceSource    │  BTC price history (Binance WS)
-                         │  2. Signal         │  Extreme market detection
-                         │  3. Decider        │  Edge, entry filters, zero-balance guard
-                         │  4. Executor       │  Paper UUID / Live FAK order
-                         │  5. Settler        │  Expiry settlement + PnL
+                         │  2. Decider        │  Signal, edge and risk filters
+                         │  3. Executor       │  Paper UUID / Live FAK order
+                         │  4. Settler        │  Expiry settlement + PnL
                          └─────────┬─────────┘
                                    │
                    ┌───────────────┼───────────────┐
@@ -62,7 +61,7 @@ The main loop runs four concurrent tasks:
 
 ```text
 src/
-├── main.rs                  # Entry point, tracing setup, CLI
+├── main.rs                  # Bot entry point and tracing setup
 ├── bot.rs                   # Bot struct, main loop, order logic, trade recording
 ├── config.rs                # Config definitions, defaults, validation
 ├── state.rs                 # BotState (in-memory only: idle reasons, FAK state)
@@ -77,19 +76,10 @@ src/
 └── pipeline/
     ├── mod.rs               # Pipeline module
     ├── price_source.rs      # BTC price buffer (Binance WS)
-    ├── signal.rs            # Extreme market detection
-    ├── decider.rs           # Trade decision logic, entry filters
+    ├── decider.rs           # Signal detection, risk and entry filters
     ├── executor.rs          # Paper/live order execution
     ├── settler.rs           # Position settlement and PnL calculation
     └── test_helpers.rs      # Test utilities
-
-dashboard/                   # Real-time web dashboard (Bun + React)
-├── src/
-├── package.json
-└── vite.config.ts
-
-deploy/
-└── polybot.service          # systemd service template
 
 logs/                        # Generated at runtime (gitignored)
 ├── paper/                   # Paper mode data
@@ -108,38 +98,37 @@ logs/                        # Generated at runtime (gitignored)
 # 1. Build
 cargo build --release
 
-# 2. Create config
-cp config.example.json config.json
+# 2. Review config.toml (paper mode is the default)
+$EDITOR config.toml
 
-# 3. Run in paper mode (default)
+# 3. Run in paper mode
 cargo run --release
 
-# 4. Monitor (web dashboard)
-cd dashboard && BOT_MODE=live bun run dev   # or omit BOT_MODE for paper
+# 4. Use the terminal dashboard; press q or Esc to stop cleanly
 ```
 
 ## CLI
 
 ```bash
-# Run the bot (mode determined by config.json)
-cargo run --release
+# Run the bot (mode determined by config.toml)
+cargo run --release --bin polybot
 
 # Derive Polymarket CLOB API credentials from PRIVATE_KEY
 # Prints to terminal only, does not persist to disk
-cargo run --release -- --derive-keys
+cargo run --release --bin polybot-tools -- --derive-keys
 
 # Scan the last 24 hours of markets and redeem winning positions on-chain
-cargo run --release -- --redeem-all
+cargo run --release --bin polybot-tools -- --redeem-all
 
 # Redeem a specific market by slug
-cargo run --release -- --redeem btc-updown-5m-1773926700
+cargo run --release --bin polybot-tools -- --redeem btc-updown-5m-1773926700
 ```
 
 ## Runtime Modes
 
 ### Paper
 
-- Default mode (`trading.mode = "paper"` in `config.json`)
+- Default mode (`trading.mode = "paper"` in `config.toml`; omitted also defaults to paper)
 - Does not require `PRIVATE_KEY`
 - Generates a local UUID as the order ID instead of placing a real order
 - Settlement uses Gamma API market resolution
@@ -147,7 +136,7 @@ cargo run --release -- --redeem btc-updown-5m-1773926700
 
 ### Live
 
-- Set `trading.mode` to `"live"` in `config.json`
+- Set `trading.mode` to `"live"` in `config.toml`
 - Requires `PRIVATE_KEY` in `.env`
 - Authenticates with the Polymarket CLOB and places real FAK limit orders
 - Balance is synced from the on-chain USDC wallet every tick
@@ -162,11 +151,12 @@ The program reads `.env` from the repository root at startup.
 | Variable | Required | Description |
 | --- | --- | --- |
 | `PRIVATE_KEY` | Live mode | Wallet private key for CLOB authentication and CTF redemption |
-| `ALCHEMY_KEY` | Optional | Alchemy API key for Polygon RPC; improves reliability for Chainlink queries and on-chain operations |
+| `ALCHEMY_KEY` | Optional | Alchemy API key for Polygon RPC; improves reliability for on-chain operations |
+| `POLYBOT_HEADLESS` | Optional | Disable the TUI for services and automated runtime tests |
 
 ## Configuration
 
-Trading mode and all strategy parameters are configured in `config.json`. See `config.example.json` for a sample and `src/config.rs` for code defaults.
+Trading mode and all strategy parameters are configured in `config.toml`; see `src/config.rs` for code defaults.
 
 | Field | Default | Description |
 | --- | --- | --- |
@@ -190,13 +180,10 @@ Trading mode and all strategy parameters are configured in `config.json`. See `c
 
 The bot uses Binance WebSocket for real-time BTC price updates via the `price_source` config section:
 
-```json
-{
-  "price_source": {
-    "source": "binance",
-    "symbol": "BTCUSDT"
-  }
-}
+```toml
+[price_source]
+source = "binance"
+symbol = "BTCUSDT"
 ```
 
 Available sources:
@@ -237,26 +224,11 @@ Log tag reference:
 | `[STATUS]` | Periodic summary (mode, BTC, balance, PnL, streak, pending, TTL) |
 | `[RISK]` | Risk warning triggered (cooldown, loss streak, daily loss); zero balance still blocks |
 
-Terminal monitoring:
-
-```bash
-# Web dashboard (from dashboard/ directory)
-cd dashboard && bun run dev          # paper mode
-BOT_MODE=live bun run dev            # live mode
-```
+The terminal dashboard starts automatically with `polybot`; press `q` or `Esc` to stop.
 
 ## Deployment
 
-The repository includes `deploy/polybot.service`, a systemd service template.
-
-```bash
-# Edit paths in polybot.service to match your install location, then:
-sudo cp deploy/polybot.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now polybot
-```
-
-The bot handles `SIGINT` and `SIGTERM` for graceful shutdown: it persists state and balance to disk before exiting.
+Set `POLYBOT_HEADLESS=1` when running under a service manager. The bot handles `SIGINT` and `SIGTERM` for graceful shutdown and persists balance and pending positions before exiting.
 
 ## Safety Features
 

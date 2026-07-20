@@ -3,7 +3,11 @@
 use chrono::Utc;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
+use std::io::ErrorKind;
+use std::path::Path;
 use std::sync::Arc;
+
+use anyhow::Context;
 
 use crate::pipeline::decider::Direction;
 
@@ -46,6 +50,38 @@ impl Settler {
         Self {
             pending: HashMap::new(),
         }
+    }
+
+    pub async fn load(log_dir: &str) -> anyhow::Result<Self> {
+        let path = Path::new(log_dir).join("pending_positions.json");
+        let content = match tokio::fs::read(&path).await {
+            Ok(content) => content,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Self::new()),
+            Err(error) => return Err(error).context("failed to read pending position state"),
+        };
+        let positions: Vec<PendingPosition> =
+            serde_json::from_slice(&content).context("failed to parse pending position state")?;
+        let mut settler = Self::new();
+        for position in positions {
+            settler.add_position(position);
+        }
+        Ok(settler)
+    }
+
+    pub async fn persist(&self, log_dir: &str) -> anyhow::Result<()> {
+        let path = Path::new(log_dir);
+        let tmp = path.join("pending_positions.json.tmp");
+        let dst = path.join("pending_positions.json");
+        let positions: Vec<&PendingPosition> = self.pending.values().collect();
+        let content = serde_json::to_vec_pretty(&positions)
+            .context("failed to serialize pending positions")?;
+        tokio::fs::write(&tmp, content)
+            .await
+            .context("failed to write pending position state")?;
+        tokio::fs::rename(&tmp, &dst)
+            .await
+            .context("failed to replace pending position state")?;
+        Ok(())
     }
 
     pub fn add_position(&mut self, pos: PendingPosition) {
@@ -258,6 +294,35 @@ mod tests {
 
         assert_eq!(result.payout, d("55.0"));
         assert_eq!(result.pnl, d("42.5"));
+    }
+
+    #[tokio::test]
+    async fn test_pending_positions_persist_across_restart() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut settler = Settler::new();
+        settler.add_position(sample_pending());
+        settler
+            .persist(dir.path().to_str().expect("utf-8 path"))
+            .await
+            .expect("persist pending position");
+
+        let restored = Settler::load(dir.path().to_str().expect("utf-8 path"))
+            .await
+            .expect("restore pending position");
+
+        assert_eq!(restored.pending_count(), 1);
+        assert_eq!(restored.due_positions()[0].condition_id.as_ref(), "cid");
+    }
+
+    #[tokio::test]
+    async fn test_load_rejects_corrupt_pending_state() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("pending_positions.json"), "not-json")
+            .expect("write corrupt state");
+
+        let result = Settler::load(dir.path().to_str().expect("utf-8 path")).await;
+
+        assert!(result.is_err());
     }
 
     #[test]

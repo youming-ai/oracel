@@ -420,80 +420,9 @@ shutdown.store(true, Ordering::Relaxed);
 
 ---
 
-### `src/pipeline/signal.rs`
-
-Signal detection module for extreme market sentiment.
-
-#### Key Structures
-
-**`Signal`** - Detected market signal
-```rust
-pub enum Signal {
-    Up,    // Market extremely bearish, buy UP
-    Down,  // Market extremely bullish, buy DOWN
-}
-```
-
-**`SignalComputer`** - Signal computation logic
-```rust
-pub struct SignalComputer {
-    extreme_threshold: Decimal,
-    fair_value: Decimal,
-}
-```
-
-#### Signal Detection Algorithm
-
-```rust
-fn compute_signal(&self, yes_price: Decimal, no_price: Decimal) -> Option<Signal> {
-    let total = yes_price + no_price;
-    let mkt_up = yes_price / total;
-    
-    if mkt_up > self.extreme_threshold {
-        Some(Signal::Down)  // Market bullish → buy cheap DOWN
-    } else if mkt_up < (Decimal::ONE - self.extreme_threshold) {
-        Some(Signal::Up)    // Market bearish → buy cheap UP
-    } else {
-        None  // Balanced
-    }
-}
-```
-
-#### Pre-Filter Checks
-
-Before signal computation:
-1. Price buffer has ≥60 samples
-2. Latest tick is <30 seconds old
-3. Market tokens discovered
-4. ≥30 seconds until settlement
-5. Market data available (yes/no prices > 0.01)
-
-#### Usage Example
-
-```rust
-let computer = SignalComputer::new(
-    decimal("0.95"),  // extreme_threshold
-    decimal("0.50"),  // fair_value
-);
-
-let signal = computer.compute_signal(
-    decimal("0.85"),  // yes price
-    decimal("0.15"),  // no price
-);
-
-match signal {
-    Some(Signal::Up) => println!("Signal: Buy UP"),
-    Some(Signal::Down) => println!("Signal: Buy DOWN"),
-    None => println!("No signal (balanced market)"),
-}
-
-// The decider wraps signal into a Decision:
-// Decision::Trade { direction, size_usdc, edge, payoff_ratio } or Decision::Pass(reason)
-```
-
----
-
 ### `src/pipeline/decider.rs`
+
+Signal detection, trade decision logic, and risk management are combined in this stage.
 
 Trade decision logic and risk management.
 

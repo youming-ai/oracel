@@ -46,6 +46,15 @@ crossterm = "0.29"
 [dev-dependencies]
 tempfile = "3"
 
+# Temporary upstream compatibility patches:
+# - alloy-primitives and syn-solidity use maintained `pastey` instead of `paste`.
+# - ruint drops unused legacy ark-ff 0.3/0.4/0.5 integrations that pull
+#   unmaintained transitive macros.
+[patch.crates-io]
+alloy-primitives = { path = "vendor/alloy-primitives" }
+ruint = { path = "vendor/ruint" }
+syn-solidity = { path = "vendor/syn-solidity" }
+
 [profile.release]
 opt-level = 3
 lto = "thin"

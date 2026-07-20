@@ -9,7 +9,7 @@ use futures_util::stream::{self, StreamExt};
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::{LocalSigner, Normal, Signer as _};
 use polymarket_client_sdk::clob;
-use polymarket_client_sdk::clob::types::{request::PriceRequest, OrderType, Side};
+use polymarket_client_sdk::clob::types::{request::PriceRequest, Amount, OrderType, Side};
 use polymarket_client_sdk::ctf;
 use polymarket_client_sdk::ctf::types::RedeemPositionsRequest;
 use polymarket_client_sdk::types::{address, Decimal, U256};
@@ -113,23 +113,28 @@ impl AuthenticatedPolyClient {
         Ok(Self { client, signer })
     }
 
+    /// Place an order and return `(order_id, filled_shares, actual_cost)`.
+    /// For BUY orders the CLOB response reports USDC in `making_amount` and
+    /// outcome-token shares in `taking_amount`.
     pub async fn place_order(
         &self,
         token_id: &str,
         side: &str,
         price: Decimal,
-        size: Decimal,
-    ) -> Result<String> {
+        amount_usdc: Decimal,
+    ) -> Result<(String, Decimal, Decimal)> {
         let tid = U256::from_str(token_id).context("Invalid token_id")?;
         let sdk_side = if side == "BUY" { Side::Buy } else { Side::Sell };
-        // price is already rounded to 2dp and size already truncated by the caller
+        // A market BUY with an explicit price is a fixed-USDC FAK order where
+        // `price` acts as the maximum accepted price. This avoids whole-share
+        // rounding that could spend more than the configured position budget.
         let order = self
             .client
-            .limit_order()
+            .market_order()
             .token_id(tid)
             .side(sdk_side)
             .price(price)
-            .size(size)
+            .amount(Amount::usdc(amount_usdc).context("Invalid USDC order amount")?)
             .order_type(OrderType::FAK)
             .build()
             .await
@@ -146,7 +151,20 @@ impl AuthenticatedPolyClient {
             .map_err(|_| anyhow::anyhow!("Failed to post order: timed out after 15s"))?
             .context("Failed to post order")?;
 
-        Ok(result.order_id)
+        if !result.success {
+            anyhow::bail!(
+                "CLOB rejected order: {}",
+                result.error_msg.as_deref().unwrap_or("unknown error")
+            );
+        }
+        if sdk_side != Side::Buy {
+            anyhow::bail!("Only BUY fill accounting is currently supported");
+        }
+        if result.taking_amount <= Decimal::ZERO || result.making_amount <= Decimal::ZERO {
+            anyhow::bail!("FAK order was not matched");
+        }
+
+        Ok((result.order_id, result.taking_amount, result.making_amount))
     }
 }
 

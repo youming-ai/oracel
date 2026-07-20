@@ -26,8 +26,14 @@ use pipeline::settler::{PendingPosition, Settler};
 
 use crate::state::{BotState, MarketState};
 use crate::tasks;
-use polymarket_5m_bot::tui::state::TuiState;
+use polymarket_5m_bot::tui::state::{TradeRow, TuiState};
 use polymarket_5m_bot::util;
+
+async fn wait_for_shutdown(shutdown: Arc<AtomicBool>) {
+    while !shutdown.load(Ordering::Acquire) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
 
 pub(crate) struct Bot {
     config: Config,
@@ -167,7 +173,13 @@ impl Bot {
             None
         };
 
-        let settler = Settler::new();
+        let settler = Settler::load(&log_dir).await?;
+        if settler.pending_count() > 0 {
+            tracing::info!(
+                "[INIT] Restored {} pending position(s)",
+                settler.pending_count()
+            );
+        }
         let account = AccountState::new(initial_balance);
 
         // Initialize trade log writer for all modes
@@ -199,6 +211,10 @@ impl Bot {
             trade_log,
             tui_state,
         })
+    }
+
+    pub(crate) fn shutdown_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.shutdown)
     }
 
     async fn load_balance(log_dir: &str) -> Option<Decimal> {
@@ -254,6 +270,7 @@ impl Bot {
             self.config.polling.settlement_check_secs,
             self.config.redeem.max_retries,
             self.config.misc.resolution_price_threshold,
+            self.tui_state.clone(),
         );
         let mut refresher_handle = tasks::start_market_refresher(
             self.discovery.clone(),
@@ -293,6 +310,10 @@ impl Bot {
                 }
                 signal = &mut shutdown_signal => {
                     tracing::info!("[BOT] Received {}, shutting down...", signal);
+                    break;
+                }
+                _ = wait_for_shutdown(self.shutdown.clone()) => {
+                    tracing::info!("[BOT] Shutdown requested by TUI");
                     break;
                 }
                 result = &mut settlement_handle => {
@@ -343,7 +364,10 @@ impl Bot {
         )
         .await;
 
-        // Final flush of trade log on shutdown
+        // Final persistence and flush on shutdown.
+        if let Err(e) = self.settler.read().await.persist(&self.log_dir).await {
+            tracing::error!("[STATE] Failed to persist pending positions: {}", e);
+        }
         if let Some(ref tl) = self.trade_log {
             tl.flush().await;
         }
@@ -421,9 +445,18 @@ impl Bot {
             Some(p) => p,
             None => return Ok(()),
         };
+        {
+            let mut tui = self.tui_state.write().await;
+            tui.set_btc_price(btc_price);
+            tui.update_market(&mkt.market_slug, mkt.settlement_ms);
+        }
 
         let buf_len = self.price_source.buffer_len().await;
         if buf_len < self.config.price_source.buffer_min_ticks {
+            self.tui_state
+                .write()
+                .await
+                .set_decision("IDLE: buffer_filling".to_string());
             let detail = format!(
                 "buffer={}/{}",
                 buf_len, self.config.price_source.buffer_min_ticks
@@ -439,12 +472,20 @@ impl Bot {
         if let Some(last_ts) = self.price_source.last_tick_ms().await {
             let age = Utc::now().timestamp_millis() - last_ts;
             if age > stale_threshold_ms {
+                self.tui_state
+                    .write()
+                    .await
+                    .set_decision("IDLE: stale_price".to_string());
                 tracing::warn!("[PRICE] BTC data stale ({}s), skipping trade", age / 1000);
                 return Ok(());
             }
         }
 
         if !mkt.is_ready() {
+            self.tui_state
+                .write()
+                .await
+                .set_decision("IDLE: market_not_ready".to_string());
             self.state
                 .write()
                 .await
@@ -456,6 +497,10 @@ impl Bot {
         if mkt.settlement_ms > 0 {
             let remaining = mkt.settlement_ms - Utc::now().timestamp_millis();
             if remaining < min_ttl_ms {
+                self.tui_state
+                    .write()
+                    .await
+                    .set_decision("IDLE: ttl_too_short".to_string());
                 let detail = format!("remaining={}s", remaining.max(0) / 1000);
                 self.state
                     .write()
@@ -514,6 +559,10 @@ impl Bot {
 
         match &decision {
             decider::Decision::Pass(reason) => {
+                self.tui_state
+                    .write()
+                    .await
+                    .set_decision(format!("PASS: {reason}"));
                 let mut st = self.state.write().await;
                 let category =
                     reason.trim_end_matches(|c: char| c.is_ascii_digit() || c == '%' || c == '_');
@@ -539,8 +588,18 @@ impl Bot {
                 payoff_ratio,
             } => {
                 if self.settler.read().await.pending_count() > 0 {
+                    self.tui_state
+                        .write()
+                        .await
+                        .set_decision("PASS: pending_position".to_string());
                     return Ok(());
                 }
+                self.tui_state.write().await.set_decision(format!(
+                    "TRADE {} edge={:.1}% payoff={:.1}x",
+                    direction.as_str(),
+                    *edge * util::decimal("100"),
+                    payoff_ratio
+                ));
 
                 let fak_backoff_ms = self.config.risk.fak_backoff_ms as i64;
                 {
@@ -630,16 +689,32 @@ impl Bot {
                         acc.record_trade(order.cost);
                     }
 
-                    self.settler.write().await.add_position(PendingPosition {
-                        direction: order.direction,
-                        size_usdc: order.size_usdc,
+                    {
+                        let mut settler = self.settler.write().await;
+                        settler.add_position(PendingPosition {
+                            direction: order.direction,
+                            size_usdc: order.size_usdc,
+                            entry_price: order.entry_price,
+                            filled_shares: order.filled_shares,
+                            cost: order.cost,
+                            settlement_time_ms: order.settlement_time_ms,
+                            entry_btc_price: order.entry_btc_price,
+                            condition_id: Arc::clone(&mkt.condition_id),
+                            market_slug: Arc::clone(&mkt.market_slug),
+                        });
+                        if let Err(e) = settler.persist(&self.log_dir).await {
+                            tracing::error!("[STATE] Failed to persist pending position: {}", e);
+                        }
+                    }
+
+                    self.tui_state.write().await.add_trade(TradeRow {
+                        time: Utc::now(),
+                        direction: order.direction.as_str().to_string(),
                         entry_price: order.entry_price,
-                        filled_shares: order.filled_shares,
                         cost: order.cost,
-                        settlement_time_ms: order.settlement_time_ms,
-                        entry_btc_price: order.entry_btc_price,
-                        condition_id: Arc::clone(&mkt.condition_id),
-                        market_slug: Arc::clone(&mkt.market_slug),
+                        edge: (*edge * util::decimal("100")).round_dp(1),
+                        result: "PENDING".to_string(),
+                        pnl: None,
                     });
 
                     let bal = self.account.read().await.balance;

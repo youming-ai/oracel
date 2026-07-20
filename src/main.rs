@@ -39,10 +39,7 @@ async fn main() -> Result<()> {
 
     let config_path = Path::new("config.toml");
     let config = if config_path.exists() {
-        Config::load(config_path).unwrap_or_else(|e| {
-            eprintln!("[INIT] Failed to load config: {}, using defaults", e);
-            Config::default()
-        })
+        Config::load(config_path)?
     } else {
         let cfg = Config::default();
         if let Err(e) = cfg.save(config_path) {
@@ -57,7 +54,7 @@ async fn main() -> Result<()> {
         anyhow::bail!("PRIVATE_KEY not set in .env — required for live trading");
     }
 
-    let log_dir = "logs".to_string();
+    let log_dir = format!("logs/{}", config.trading.mode);
     if let Err(e) = tokio::fs::create_dir_all(&log_dir).await {
         eprintln!("[INIT] Failed to create log dir {}: {}", log_dir, e);
         std::process::exit(1);
@@ -93,17 +90,29 @@ async fn main() -> Result<()> {
     }));
 
     let mut bot = Bot::new(config, log_dir, tui_state.clone()).await?;
+    let shutdown = bot.shutdown_handle();
 
-    // Spawn TUI on a blocking thread
-    let tui_handle = std::thread::spawn(move || {
-        if let Err(e) = tui::run(tui_state) {
-            eprintln!("TUI error: {}", e);
-        }
-    });
+    // Headless mode is intended for services and automated end-to-end tests.
+    // Interactive runs share one shutdown flag with the TUI, so q/Esc and OS
+    // signals terminate both sides cleanly.
+    let headless = std::env::var_os("POLYBOT_HEADLESS").is_some();
+    let tui_handle = if headless {
+        None
+    } else {
+        let tui_shutdown = shutdown.clone();
+        Some(std::thread::spawn(move || {
+            if let Err(e) = tui::run(tui_state, tui_shutdown) {
+                eprintln!("TUI error: {}", e);
+            }
+        }))
+    };
 
-    bot.run().await?;
+    let bot_result = bot.run().await;
+    shutdown.store(true, std::sync::atomic::Ordering::Release);
 
-    let _ = tui_handle.join();
+    if let Some(handle) = tui_handle {
+        let _ = handle.join();
+    }
 
-    Ok(())
+    bot_result
 }
