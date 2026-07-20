@@ -5,6 +5,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use futures_util::future::join_all;
 use polymarket_5m_bot::config;
+use polymarket_5m_bot::data::chainlink::ChainlinkSource;
 use polymarket_5m_bot::data::market_discovery::{
     infer_resolution_state, MarketDiscovery, ResolutionState,
 };
@@ -120,7 +121,7 @@ pub(crate) fn start_status_printer(
 pub(crate) fn start_settlement_checker(
     settler: Arc<RwLock<Settler>>,
     account: Arc<RwLock<AccountState>>,
-    price_source: Arc<PriceSource>,
+    chainlink_source: Arc<ChainlinkSource>,
     discovery: Arc<MarketDiscovery>,
     redeemer: Option<Arc<CtfRedeemer>>,
     log_dir: String,
@@ -211,7 +212,7 @@ pub(crate) fn start_settlement_checker(
                     }
                 }
             }
-            let settlement_btc_price = price_source.latest().await;
+            let settlement_btc_price = chainlink_source.latest().await.map(|tick| tick.price);
 
             if !results.is_empty() {
                 if let Err(e) = settler.read().await.persist(&log_dir).await {
@@ -244,6 +245,7 @@ pub(crate) fn start_settlement_checker(
                     if let Some(btc_price) = settlement_btc_price {
                         trade_log
                             .log_settlement(
+                                &r.market_slug,
                                 r.won,
                                 r.direction.as_str(),
                                 r.pnl,

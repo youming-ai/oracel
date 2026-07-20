@@ -1,5 +1,5 @@
 //! Stage 4: Order Executor
-//! Places FAK orders (paper or live) with slippage tolerance.
+//! Places value-capped FAK orders in paper or live mode.
 
 use crate::config::TradingMode;
 use crate::data::polymarket::AuthenticatedPolyClient;
@@ -23,30 +23,19 @@ pub struct OrderResult {
 pub struct Executor {
     mode: TradingMode,
     auth_client: Option<AuthenticatedPolyClient>,
-    slippage_tolerance: Decimal,
 }
 
 pub struct ExecuteContext<'a> {
     pub decision: &'a Decision,
     pub token_yes: &'a str,
     pub token_no: &'a str,
-    pub poly_yes: Option<Decimal>,
-    pub poly_no: Option<Decimal>,
     pub settlement_time_ms: i64,
     pub btc_price: Decimal,
 }
 
 impl Executor {
-    pub fn new(
-        mode: TradingMode,
-        auth_client: Option<AuthenticatedPolyClient>,
-        slippage_tolerance: Decimal,
-    ) -> Self {
-        Self {
-            mode,
-            auth_client,
-            slippage_tolerance,
-        }
+    pub fn new(mode: TradingMode, auth_client: Option<AuthenticatedPolyClient>) -> Self {
+        Self { mode, auth_client }
     }
 
     pub async fn execute(&self, ctx: &ExecuteContext<'_>) -> Option<OrderResult> {
@@ -55,50 +44,31 @@ impl Executor {
             Decision::Trade {
                 direction,
                 size_usdc,
-                edge: _,
-                payoff_ratio: _,
+                entry_price,
+                order_limit_price,
+                ..
             } => {
-                let (token_id, mid_price) = match direction {
-                    Direction::Up => (ctx.token_yes, ctx.poly_yes?),
-                    Direction::Down => (ctx.token_no, ctx.poly_no?),
+                let token_id = match direction {
+                    Direction::Up => ctx.token_yes,
+                    Direction::Down => ctx.token_no,
                 };
-
-                if mid_price <= Decimal::new(1, 2) || mid_price >= Decimal::new(99, 2) {
-                    tracing::warn!("[EXEC] Extreme price {:.3}, skipping", mid_price);
+                if *entry_price <= Decimal::new(1, 2)
+                    || *entry_price >= Decimal::new(99, 2)
+                    || *order_limit_price < *entry_price
+                {
+                    tracing::warn!("[EXEC] Invalid value-capped quote {:.3}", entry_price);
                     return None;
                 }
 
-                // Apply slippage tolerance: bid slightly higher for better fill
-                let slippage = self.slippage_tolerance;
-                let price = if slippage > Decimal::ZERO {
-                    let adjusted = mid_price * (Decimal::ONE + slippage);
-                    // Cap at 0.99 to avoid extreme prices
-                    adjusted.min(Decimal::new(99, 2))
-                } else {
-                    mid_price
-                };
-
-                // Round price to 2dp for CLOB compatibility; use rounded price
-                // consistently for both order submission and cost accounting.
-                let price = price.round_dp(2);
-
-                let mut filled_shares = match Self::compute_filled_shares(*size_usdc, price) {
+                // Round down so the submitted limit never exceeds the value cap.
+                let price = order_limit_price
+                    .round_dp_with_strategy(2, rust_decimal::RoundingStrategy::ToNegativeInfinity);
+                let mut filled_shares = match Self::compute_filled_shares(*size_usdc, *entry_price)
+                {
                     Some(shares) => shares,
                     None => return None,
                 };
-                // Paper mode simulates a fully filled fixed-USDC market order.
-                // Live mode replaces these values with the CLOB response below.
                 let mut cost = *size_usdc;
-
-                // Log slippage if applied
-                if price != mid_price {
-                    tracing::debug!(
-                        "[EXEC] Slippage applied: {:.3} -> {:.3} (+{:.1}%)",
-                        mid_price,
-                        price,
-                        (slippage * Decimal::from(100)).round_dp(1)
-                    );
-                }
 
                 let order_id = if self.mode.is_live() {
                     match self.place_live_order(token_id, price, *size_usdc).await {
@@ -192,18 +162,17 @@ mod tests {
     use super::*;
     use crate::pipeline::test_helpers::d;
 
-    fn default_slippage() -> Decimal {
-        d("0.01")
-    }
-
     #[tokio::test]
     async fn test_execute_tracks_filled_shares_and_effective_cost() {
-        let executor = Executor::new(TradingMode::Paper, None, default_slippage());
+        let executor = Executor::new(TradingMode::Paper, None);
         let decision = Decision::Trade {
             direction: Direction::Up,
             size_usdc: d("5.00"),
             edge: d("0.20"),
             payoff_ratio: d("3.98"),
+            model_probability: d("0.80"),
+            entry_price: d("0.20"),
+            order_limit_price: d("0.21"),
         };
 
         let result = executor
@@ -211,29 +180,27 @@ mod tests {
                 decision: &decision,
                 token_yes: "yes",
                 token_no: "no",
-                poly_yes: Some(d("0.201")),
-                poly_no: Some(d("0.799")),
                 settlement_time_ms: 123,
                 btc_price: d("70000"),
             })
             .await
             .expect("expected paper order");
 
-        // Slippage 1%: price = 0.201 * 1.01 = 0.20301, rounded to 0.20
-        // floor(5.00 / 0.20) = 25 shares, cost = 25 × 0.20 = 5.00
         assert_eq!(result.filled_shares, d("25"));
         assert_eq!(result.cost, d("5.00"));
-        assert!(result.cost <= d("5.00"));
     }
 
     #[tokio::test]
-    async fn test_returns_none_when_price_missing() {
-        let executor = Executor::new(TradingMode::Paper, None, default_slippage());
+    async fn test_returns_none_when_limit_is_below_entry_quote() {
+        let executor = Executor::new(TradingMode::Paper, None);
         let decision = Decision::Trade {
             direction: Direction::Up,
             size_usdc: d("5.00"),
             edge: d("0.20"),
             payoff_ratio: d("3.98"),
+            model_probability: d("0.80"),
+            entry_price: d("0.21"),
+            order_limit_price: d("0.20"),
         };
 
         let result = executor
@@ -241,27 +208,23 @@ mod tests {
                 decision: &decision,
                 token_yes: "yes",
                 token_no: "no",
-                poly_yes: None,
-                poly_no: Some(d("0.80")),
                 settlement_time_ms: 123,
                 btc_price: d("70000"),
             })
             .await;
-
         assert!(result.is_none());
     }
 
-    #[tokio::test]
-    async fn test_compute_filled_shares_returns_none_for_tiny_orders() {
-        // Polymarket rejects order amounts below $1.
-        let result = Executor::compute_filled_shares(d("0.50"), d("0.60"));
-        assert!(result.is_none());
+    #[test]
+    fn test_compute_filled_shares_returns_none_for_tiny_orders() {
+        assert!(Executor::compute_filled_shares(d("0.50"), d("0.60")).is_none());
     }
 
-    #[tokio::test]
-    async fn test_compute_filled_shares_returns_some_for_valid_orders() {
-        // When size_usdc >= price, should return Some(shares)
-        let result = Executor::compute_filled_shares(d("5.00"), d("0.20"));
-        assert_eq!(result, Some(d("25")));
+    #[test]
+    fn test_compute_filled_shares_returns_some_for_valid_orders() {
+        assert_eq!(
+            Executor::compute_filled_shares(d("5.00"), d("0.20")),
+            Some(d("25"))
+        );
     }
 }

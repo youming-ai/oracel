@@ -31,6 +31,7 @@ pub struct SettlementResult {
     pub pnl: Decimal,
     pub won: bool,
     pub condition_id: String,
+    pub market_slug: String,
     pub entry_btc_price: Decimal,
 }
 
@@ -97,6 +98,10 @@ impl Settler {
 
     pub fn pending_count(&self) -> usize {
         self.pending.len()
+    }
+
+    pub fn has_condition(&self, condition_id: &str) -> bool {
+        self.pending.contains_key(condition_id)
     }
 
     pub fn due_positions(&self) -> Vec<PendingPosition> {
@@ -190,6 +195,7 @@ impl Settler {
             pnl,
             won,
             condition_id: pos.condition_id.to_string(),
+            market_slug: pos.market_slug.to_string(),
             entry_btc_price: pos.entry_btc_price,
         }
     }
