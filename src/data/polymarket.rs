@@ -73,7 +73,7 @@ impl PolymarketClient {
         })
     }
 
-    pub async fn fetch_mid_price(&self, token_id: &str) -> Result<rust_decimal::Decimal> {
+    pub async fn fetch_buy_price(&self, token_id: &str) -> Result<rust_decimal::Decimal> {
         let tid = U256::from_str(token_id).context("Invalid token_id")?;
         let req = PriceRequest::builder()
             .token_id(tid)

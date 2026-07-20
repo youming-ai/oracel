@@ -22,13 +22,13 @@ pub(crate) mod defaults {
     pub fn stale_threshold_ms() -> i64 {
         30_000
     }
-    pub fn min_ttl_ms() -> i64 {
-        30_000
-    }
 
     // ─── Polymarket CLOB ───
     pub fn gamma_api_url() -> String {
         "https://gamma-api.polymarket.com".to_string()
+    }
+    pub fn gamma_http_secs() -> u64 {
+        10
     }
 
     // ─── Strategy ───
@@ -104,44 +104,9 @@ pub(crate) mod defaults {
         60
     }
 
-    // ─── Timeouts ───
-    pub fn gamma_http_timeout_secs() -> u64 {
-        10
-    }
-    pub fn ws_connect_timeout_secs() -> u64 {
-        10
-    }
-    pub fn ws_max_backoff_secs() -> u64 {
-        60
-    }
-    pub fn clob_price_timeout_secs() -> u64 {
-        10
-    }
-    pub fn clob_auth_timeout_secs() -> u64 {
-        15
-    }
-    pub fn clob_order_timeout_secs() -> u64 {
-        15
-    }
-    pub fn rpc_connect_timeout_secs() -> u64 {
-        30
-    }
-    pub fn rpc_redeem_timeout_secs() -> u64 {
-        30
-    }
-    pub fn balance_query_timeout_secs() -> u64 {
-        10
-    }
-
     // ─── Redeem ───
     pub fn redeem_max_retries() -> u32 {
         10
-    }
-    pub fn redeem_delay_secs() -> u64 {
-        5
-    }
-    pub fn redeem_concurrency() -> usize {
-        5
     }
 
     // ─── Misc ───
@@ -158,20 +123,6 @@ pub(crate) mod defaults {
         0.999
     }
 
-    // ─── Time Windows ───
-    pub fn window1_start() -> u32 {
-        0
-    }
-    pub fn window1_end() -> u32 {
-        12
-    }
-    pub fn window2_start() -> u32 {
-        12
-    }
-    pub fn window2_end() -> u32 {
-        24
-    }
-
     pub fn private_key() -> SecretString {
         SecretString::new(String::new().into())
     }
@@ -180,11 +131,10 @@ pub(crate) mod defaults {
 // ─── Top-level Config ───
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
     pub trading: TradingConfig,
-    #[serde(default)]
-    pub market: MarketConfig,
     #[serde(default)]
     pub polyclob: PolymarketConfig,
     #[serde(default)]
@@ -196,18 +146,9 @@ pub struct Config {
     #[serde(default)]
     pub price_source: PriceSourceConfig,
     #[serde(default)]
-    pub execution: ExecutionConfig,
-    #[serde(default)]
-    pub timeouts: TimeoutConfig,
-    #[serde(default)]
     pub redeem: RedeemConfig,
     #[serde(default)]
     pub misc: MiscConfig,
-    /// Two time windows for trade log monitoring (UTC hours, 0-24).
-    /// Each window is a half-open interval [start_hour, end_hour).
-    /// Supports wrap-around (e.g. start=22, end=6 means 22:00-06:00 UTC).
-    #[serde(default)]
-    pub time_windows: TimeWindowsConfig,
 }
 
 // ─── Trading ───
@@ -240,6 +181,7 @@ impl std::fmt::Display for TradingMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TradingConfig {
     #[serde(default)]
     pub mode: TradingMode,
@@ -254,27 +196,21 @@ pub struct TradingConfig {
     pub private_key: SecretString,
 }
 
-// ─── Market ───
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MarketConfig {
-    #[serde(default = "defaults::stale_threshold_ms")]
-    pub stale_threshold_ms: i64,
-    #[serde(default = "defaults::min_ttl_ms")]
-    pub min_ttl_ms: i64,
-}
-
 // ─── Polymarket CLOB ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PolymarketConfig {
     #[serde(default = "defaults::gamma_api_url")]
     pub gamma_api_url: String,
+    #[serde(default = "defaults::gamma_http_secs")]
+    pub gamma_http_secs: u64,
 }
 
 // ─── Strategy ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StrategyConfig {
     #[serde(
         default = "defaults::extreme_threshold",
@@ -324,11 +260,18 @@ pub struct StrategyConfig {
         with = "rust_decimal::serde::float"
     )]
     pub circuit_breaker_min_win_rate: Decimal,
+    /// Maximum premium over the current CLOB buy quote.
+    #[serde(
+        default = "defaults::slippage_tolerance",
+        with = "rust_decimal::serde::float"
+    )]
+    pub slippage_tolerance: Decimal,
 }
 
 // ─── Risk ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RiskConfig {
     #[serde(default = "defaults::max_fak_retries")]
     pub max_fak_retries: u32,
@@ -345,6 +288,7 @@ pub struct RiskConfig {
 // ─── Polling ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PollingConfig {
     #[serde(default = "defaults::signal_interval_ms")]
     pub signal_interval_ms: u64,
@@ -358,43 +302,16 @@ pub struct PollingConfig {
     pub settlement_check_secs: u64,
 }
 
-// ─── Execution ───
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutionConfig {
-    /// Price slippage tolerance (e.g., 0.01 = 1%)
-    #[serde(
-        default = "defaults::slippage_tolerance",
-        with = "rust_decimal::serde::float"
-    )]
-    pub slippage_tolerance: Decimal,
-}
-
 // ─── Price Source ───
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PriceSourceType {
-    #[default]
-    Binance,
-    BinanceWs,
-}
-
-impl std::fmt::Display for PriceSourceType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Binance => write!(f, "binance"),
-            Self::BinanceWs => write!(f, "binance_ws"),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PriceSourceConfig {
-    #[serde(default)]
-    pub source: PriceSourceType,
     #[serde(default = "defaults::symbol")]
     pub symbol: String,
+    /// Maximum age of the latest Binance tick before trading stops.
+    #[serde(default = "defaults::stale_threshold_ms")]
+    pub stale_threshold_ms: i64,
     /// Maximum number of price ticks retained in the buffer.
     #[serde(default = "defaults::price_buffer_max")]
     pub buffer_max: usize,
@@ -403,57 +320,20 @@ pub struct PriceSourceConfig {
     pub buffer_min_ticks: usize,
 }
 
-// ─── Timeouts ───
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TimeoutConfig {
-    /// Gamma API HTTP request timeout (seconds).
-    #[serde(default = "defaults::gamma_http_timeout_secs")]
-    pub gamma_http_secs: u64,
-    /// WebSocket connect timeout (seconds).
-    #[serde(default = "defaults::ws_connect_timeout_secs")]
-    pub ws_connect_secs: u64,
-    /// WebSocket reconnect max backoff (seconds).
-    #[serde(default = "defaults::ws_max_backoff_secs")]
-    pub ws_max_backoff_secs: u64,
-    /// CLOB price query timeout (seconds).
-    #[serde(default = "defaults::clob_price_timeout_secs")]
-    pub clob_price_secs: u64,
-    /// CLOB authentication timeout (seconds).
-    #[serde(default = "defaults::clob_auth_timeout_secs")]
-    pub clob_auth_secs: u64,
-    /// CLOB order post timeout (seconds).
-    #[serde(default = "defaults::clob_order_timeout_secs")]
-    pub clob_order_secs: u64,
-    /// RPC connect timeout for balance/redeem queries (seconds).
-    #[serde(default = "defaults::rpc_connect_timeout_secs")]
-    pub rpc_connect_secs: u64,
-    /// RPC redeem transaction timeout (seconds).
-    #[serde(default = "defaults::rpc_redeem_timeout_secs")]
-    pub rpc_redeem_secs: u64,
-    /// USDC balanceOf query timeout (seconds).
-    #[serde(default = "defaults::balance_query_timeout_secs")]
-    pub balance_query_secs: u64,
-}
-
 // ─── Redeem ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RedeemConfig {
     /// Maximum retry attempts for on-chain redemption.
     #[serde(default = "defaults::redeem_max_retries")]
     pub max_retries: u32,
-    /// Delay between successive redemption transactions (seconds).
-    #[serde(default = "defaults::redeem_delay_secs")]
-    pub delay_secs: u64,
-    /// Concurrency limit for redeemable position scanning.
-    #[serde(default = "defaults::redeem_concurrency")]
-    pub concurrency: usize,
 }
 
 // ─── Misc ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MiscConfig {
     /// Trade log flush interval (seconds).
     #[serde(default = "defaults::trade_log_flush_secs")]
@@ -467,27 +347,6 @@ pub struct MiscConfig {
     /// Outcome price threshold to determine a winning resolution (0.0-1.0).
     #[serde(default = "defaults::resolution_price_threshold")]
     pub resolution_price_threshold: f64,
-}
-
-// ─── Time Windows ───
-
-/// Configuration for two monitoring time windows.
-/// Each window is a half-open interval [start_hour, end_hour) in UTC (0-24).
-/// Supports wrap-around midnight (e.g. start=22, end=6 means 22:00-06:00 UTC).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TimeWindowsConfig {
-    /// First monitoring window.
-    /// Defaults to [0, 12) — first half of the day.
-    #[serde(default = "defaults::window1_start")]
-    pub window1_start: u32,
-    #[serde(default = "defaults::window1_end")]
-    pub window1_end: u32,
-    /// Second monitoring window.
-    /// Defaults to [12, 24) — second half of the day.
-    #[serde(default = "defaults::window2_start")]
-    pub window2_start: u32,
-    #[serde(default = "defaults::window2_end")]
-    pub window2_end: u32,
 }
 
 fn is_valid_binance_symbol(symbol: &str) -> bool {
@@ -510,19 +369,11 @@ impl Default for TradingConfig {
     }
 }
 
-impl Default for MarketConfig {
-    fn default() -> Self {
-        Self {
-            stale_threshold_ms: defaults::stale_threshold_ms(),
-            min_ttl_ms: defaults::min_ttl_ms(),
-        }
-    }
-}
-
 impl Default for PolymarketConfig {
     fn default() -> Self {
         Self {
             gamma_api_url: defaults::gamma_api_url(),
+            gamma_http_secs: defaults::gamma_http_secs(),
         }
     }
 }
@@ -540,6 +391,7 @@ impl Default for StrategyConfig {
             btc_trend_min_pct: defaults::btc_trend_min_pct(),
             circuit_breaker_window: defaults::circuit_breaker_window(),
             circuit_breaker_min_win_rate: defaults::circuit_breaker_min_win_rate(),
+            slippage_tolerance: defaults::slippage_tolerance(),
         }
     }
 }
@@ -550,14 +402,6 @@ impl Default for RiskConfig {
             max_fak_retries: defaults::max_fak_retries(),
             fak_backoff_ms: defaults::fak_backoff_ms(),
             daily_loss_limit_usdc: defaults::daily_loss_limit(),
-        }
-    }
-}
-
-impl Default for ExecutionConfig {
-    fn default() -> Self {
-        Self {
-            slippage_tolerance: defaults::slippage_tolerance(),
         }
     }
 }
@@ -576,26 +420,10 @@ impl Default for PollingConfig {
 impl Default for PriceSourceConfig {
     fn default() -> Self {
         Self {
-            source: PriceSourceType::Binance,
             symbol: defaults::symbol(),
+            stale_threshold_ms: defaults::stale_threshold_ms(),
             buffer_max: defaults::price_buffer_max(),
             buffer_min_ticks: defaults::price_buffer_min_ticks(),
-        }
-    }
-}
-
-impl Default for TimeoutConfig {
-    fn default() -> Self {
-        Self {
-            gamma_http_secs: defaults::gamma_http_timeout_secs(),
-            ws_connect_secs: defaults::ws_connect_timeout_secs(),
-            ws_max_backoff_secs: defaults::ws_max_backoff_secs(),
-            clob_price_secs: defaults::clob_price_timeout_secs(),
-            clob_auth_secs: defaults::clob_auth_timeout_secs(),
-            clob_order_secs: defaults::clob_order_timeout_secs(),
-            rpc_connect_secs: defaults::rpc_connect_timeout_secs(),
-            rpc_redeem_secs: defaults::rpc_redeem_timeout_secs(),
-            balance_query_secs: defaults::balance_query_timeout_secs(),
         }
     }
 }
@@ -604,8 +432,6 @@ impl Default for RedeemConfig {
     fn default() -> Self {
         Self {
             max_retries: defaults::redeem_max_retries(),
-            delay_secs: defaults::redeem_delay_secs(),
-            concurrency: defaults::redeem_concurrency(),
         }
     }
 }
@@ -617,17 +443,6 @@ impl Default for MiscConfig {
             shutdown_timeout_secs: defaults::shutdown_timeout_secs(),
             market_search_windows: defaults::market_search_windows(),
             resolution_price_threshold: defaults::resolution_price_threshold(),
-        }
-    }
-}
-
-impl Default for TimeWindowsConfig {
-    fn default() -> Self {
-        Self {
-            window1_start: defaults::window1_start(),
-            window1_end: defaults::window1_end(),
-            window2_start: defaults::window2_start(),
-            window2_end: defaults::window2_end(),
         }
     }
 }
@@ -656,13 +471,11 @@ impl Config {
         if self.trading.paper_starting_balance <= zero {
             anyhow::bail!("trading.paper_starting_balance must be > 0");
         }
-        if self.market.stale_threshold_ms <= 0 || self.market.min_ttl_ms < 0 {
-            anyhow::bail!(
-                "market thresholds must satisfy stale_threshold_ms > 0 and min_ttl_ms >= 0"
-            );
+        if self.price_source.stale_threshold_ms <= 0 {
+            anyhow::bail!("price_source.stale_threshold_ms must be > 0");
         }
-        if self.polyclob.gamma_api_url.trim().is_empty() {
-            anyhow::bail!("polyclob.gamma_api_url must not be empty");
+        if self.polyclob.gamma_api_url.trim().is_empty() || self.polyclob.gamma_http_secs == 0 {
+            anyhow::bail!("polyclob URL must not be empty and gamma_http_secs must be > 0");
         }
         if self.polling.signal_interval_ms == 0
             || self.polling.status_interval_ms == 0
@@ -738,67 +551,27 @@ impl Config {
                 self.price_source.buffer_max
             );
         }
-        if self.execution.slippage_tolerance < zero || self.execution.slippage_tolerance >= one {
-            anyhow::bail!("execution.slippage_tolerance must be in [0, 1)");
+        if self.strategy.slippage_tolerance < zero || self.strategy.slippage_tolerance >= one {
+            anyhow::bail!("strategy.slippage_tolerance must be in [0, 1)");
         }
         if self.risk.daily_loss_limit_usdc < zero || self.risk.max_fak_retries == 0 {
             anyhow::bail!(
                 "risk.daily_loss_limit_usdc must be >= 0 and max_fak_retries must be > 0"
             );
         }
-        let timeout_values = [
-            self.timeouts.gamma_http_secs,
-            self.timeouts.ws_connect_secs,
-            self.timeouts.ws_max_backoff_secs,
-            self.timeouts.clob_price_secs,
-            self.timeouts.clob_auth_secs,
-            self.timeouts.clob_order_secs,
-            self.timeouts.rpc_connect_secs,
-            self.timeouts.rpc_redeem_secs,
-            self.timeouts.balance_query_secs,
-        ];
-        if timeout_values.contains(&0) {
-            anyhow::bail!("all timeout values must be > 0");
-        }
-        if self.redeem.concurrency == 0
+        if self.redeem.max_retries == 0
             || self.misc.trade_log_flush_secs == 0
             || self.misc.shutdown_timeout_secs == 0
             || self.misc.market_search_windows == 0
         {
-            anyhow::bail!("redeem concurrency and misc intervals/counts must be > 0");
+            anyhow::bail!("redeem retries and misc intervals/counts must be > 0");
         }
         if self.misc.resolution_price_threshold <= 0.0 || self.misc.resolution_price_threshold > 1.0
         {
             anyhow::bail!("misc.resolution_price_threshold must be in (0, 1]");
         }
 
-        // Validate time windows (start == end is valid — means 24h full-day window)
-        let tw = &self.time_windows;
-        if tw.window1_start > 24 || tw.window1_end > 24 {
-            anyhow::bail!(
-                "time_windows.window1 hours must be in 0-24 range (got start={}, end={})",
-                tw.window1_start,
-                tw.window1_end
-            );
-        }
-        if tw.window2_start > 24 || tw.window2_end > 24 {
-            anyhow::bail!(
-                "time_windows.window2 hours must be in 0-24 range (got start={}, end={})",
-                tw.window2_start,
-                tw.window2_end
-            );
-        }
-        if tw.window1_start == tw.window1_end && tw.window2_start == tw.window2_end {
-            anyhow::bail!("time_windows: at least one window must have non-zero duration");
-        }
-
         Ok(())
-    }
-
-    pub fn is_default_non_trading(&self) -> bool {
-        self.strategy.extreme_threshold == defaults::extreme_threshold()
-            && self.strategy.position_size_usdc == defaults::position_size_usdc()
-            && self.risk.daily_loss_limit_usdc == defaults::daily_loss_limit()
     }
 }
 
@@ -814,6 +587,19 @@ mod tests {
         cfg.polling.signal_interval_ms = 0;
 
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_rejects_removed_or_unknown_fields() {
+        let result = toml::from_str::<Config>(
+            r#"
+[market]
+stale_threshold_ms = 30000
+min_ttl_ms = 30000
+"#,
+        );
+
+        assert!(result.is_err());
     }
 
     #[test]
@@ -905,67 +691,6 @@ mod tests {
         let mut cfg = Config::default();
         cfg.price_source.buffer_min_ticks = 2000;
         assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn test_time_windows_accepts_defaults() {
-        let cfg = Config::default();
-        assert!(cfg.validate().is_ok());
-        assert_eq!(cfg.time_windows.window1_start, 0);
-        assert_eq!(cfg.time_windows.window1_end, 12);
-        assert_eq!(cfg.time_windows.window2_start, 12);
-        assert_eq!(cfg.time_windows.window2_end, 24);
-    }
-
-    #[test]
-    fn test_time_windows_rejects_hour_above_24() {
-        let mut cfg = Config::default();
-        cfg.time_windows.window1_start = 25;
-        let err = cfg.validate().expect_err("expected validation failure");
-        assert!(err.to_string().contains("window1"));
-    }
-
-    #[test]
-    fn test_time_windows_rejects_both_zero_duration() {
-        let mut cfg = Config::default();
-        cfg.time_windows.window1_start = 8;
-        cfg.time_windows.window1_end = 8;
-        cfg.time_windows.window2_start = 16;
-        cfg.time_windows.window2_end = 16;
-        let err = cfg.validate().expect_err("expected validation failure");
-        assert!(err.to_string().contains("non-zero duration"));
-    }
-
-    #[test]
-    fn test_time_windows_allows_wrap_around() {
-        let mut cfg = Config::default();
-        cfg.time_windows.window1_start = 22;
-        cfg.time_windows.window1_end = 6;
-        assert!(cfg.validate().is_ok());
-    }
-
-    #[test]
-    fn test_time_windows_allows_one_zero_duration_window() {
-        let mut cfg = Config::default();
-        cfg.time_windows.window1_start = 10;
-        cfg.time_windows.window1_end = 10;
-        // window2 still has non-zero duration
-        assert!(cfg.validate().is_ok());
-    }
-
-    #[test]
-    fn test_time_windows_toml_roundtrip() {
-        let toml_str = r#"
-window1_start = 6
-window1_end = 18
-window2_start = 18
-window2_end = 6
-"#;
-        let tw: TimeWindowsConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(tw.window1_start, 6);
-        assert_eq!(tw.window1_end, 18);
-        assert_eq!(tw.window2_start, 18);
-        assert_eq!(tw.window2_end, 6);
     }
 
     #[test]

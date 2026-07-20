@@ -1,207 +1,170 @@
 # Trading Strategy
 
-## 1. Core Idea
+## Strategy in one sentence
 
-The Polymarket BTC 5-minute market is a binary-outcome market: `UP` means BTC ends the window higher, and `DOWN` means it ends lower.
+When Polymarket becomes extremely confident in one BTC five-minute outcome, buy the cheaper opposite
+outcome, subject to liquidity, price, time, momentum, balance, and loss controls.
 
-The strategy does not try to predict short-term price direction directly. Instead, it exploits mispricing created by extreme market sentiment:
+This is a contrarian market-pricing strategy. Binance BTC data is a filter, not the primary signal.
 
-- Buy `DOWN` when the market becomes overly bullish (crowd too confident BTC goes up)
-- Buy `UP` when the market becomes overly bearish (crowd too confident BTC goes down)
-- Use `0.50` as the approximate fair value, since BTC is roughly equally likely to go up or down in any given 5-minute window
+## Inputs
 
-The edge comes from buying the cheap side of the market when the crowd overreacts:
+| Input | Use |
+| --- | --- |
+| Polymarket YES buy quote | Detect extreme UP sentiment and price an UP entry |
+| Polymarket NO buy quote | Detect extreme DOWN sentiment and price a DOWN entry |
+| Remaining market TTL | Reject entries too close to expiry |
+| Binance BTC trend | Reject trades fighting strong recent momentum |
+| Account state | Balance, daily loss, and rolling result controls |
 
-```text
-edge = fair_value - cheap_side_price
+The code uses raw CLOB buy quotes. It does not normalize YES and NO into a synthetic probability.
 
-Example: market prices YES at 0.88, NO at 0.12
-  → cheap side (NO/DOWN) = 0.12
-  → edge = 0.50 - 0.12 = 0.38 (38%)
-  → buy DOWN at 0.12, payout $1 per share if correct
-```
-
-## 2. Price Source
-
-The bot subscribes to the Binance WebSocket for the configured symbol (default `BTCUSDT`) at `wss://stream.binance.com:9443/ws`.
-
-Configuration in `config.toml`:
-```json
-{
-  "price_source": {
-    "symbol": "BTCUSDT"
-  }
-}
-```
-
-The bot maintains a rolling buffer of price ticks. WebSocket connections automatically reconnect on disconnection.
-
-## 3. Signal Detection
-
-The bot reads yes/no prices from the Polymarket CLOB and computes market bias:
+## Direction
 
 ```text
-mkt_up = yes_price / (yes_price + no_price)
-
-if mkt_up > extreme_threshold (default 0.95): create DOWN candidate
-if mkt_up < 1 - extreme_threshold (default 0.05): create UP candidate
-otherwise: no trade (market is balanced)
+YES > extreme_threshold  → candidate = buy DOWN at the NO quote
+NO  > extreme_threshold  → candidate = buy UP at the YES quote
+otherwise                → PASS not_extreme
 ```
 
-An extreme quote is only the first gate. It creates a candidate trade that must pass additional entry filters before execution.
+With the checked-in configuration, `extreme_threshold = 0.95`. The comparison is strict (`>`), not
+`>=`.
 
-### Spread Check
+## Decision gates
 
-The bot validates market liquidity by checking the spread.
+The decider evaluates gates in this order and returns immediately on the first failure:
 
 ```text
-if yes_price + no_price < 0.80:
-    skip trade (wide spread indicates unreliable mid prices)
+1. balance >= position_size_usdc
+2. daily loss limit not reached
+3. YES and NO quotes both exist and are > 0.01
+4. one raw quote is above extreme_threshold
+5. abs((YES + NO) - 1) <= 0.06
+6. opposite-side entry price is within [min_entry_price, max_entry_price]
+7. remaining TTL >= min_ttl_for_entry_ms
+8. Binance trend is not strongly against the candidate direction
+9. circuit-breaker win rate is not below its floor
 ```
 
-When the spread is too wide (>20%), mid prices are unreliable and the bot skips to avoid adverse fills.
+Outside the decider, execution also requires:
 
-## 4. Decision Flow
+- a warm Binance buffer;
+- a non-stale latest BTC tick;
+- a discovered Polymarket market;
+- no existing pending position; and
+- live FAK retry/backoff allowance.
 
-Every tick (default 1 second), the bot runs through the following gates in order. If any gate rejects, the tick exits early.
+## Price and payoff metrics
 
 ```text
-tick()
- │
- ├── 1. Buffer check: require ≥ 60 BTC price samples (~60 seconds of data)
- ├── 2. Staleness check: reject if latest price tick is older than 30 seconds
- ├── 3. Market readiness: skip if market token IDs have not been discovered yet
- ├── 4. Time-to-live: skip if < 30 seconds remain before settlement
- │
- └── decide()
-      ├── 5. Balance check: skip if balance ≤ 0
-      ├── 6. Market data: skip if yes or no price is missing or ≤ 0.01
-      ├── 7. Spread check: skip if yes + no < 0.80 (wide spread)
-      ├── 8. Extreme check: evaluate extreme threshold inside decide()
-      ├── 9. Candidate creation: extreme quote creates directional candidate
-      ├── 10. Entry price range: candidate quote must be within strategy min/max
-      ├── 11. Strategy TTL floor: candidate must satisfy min_ttl_for_entry_ms
-      ├── 12. Daily loss limit: skip if daily PnL exceeds loss limit
-      │
-      └── TRADE: size the position and execute only after all candidate filters pass
+edge         = fair_value - entry_price
+payoff_ratio = (1 - entry_price) / entry_price
 ```
 
-There is no separate pre-decide extreme gate in `tick()`: the extreme filter runs inside `decide()`, where a qualifying quote becomes a trade candidate and then passes the remaining entry filters.
+`edge` and `payoff_ratio` are recorded and displayed. There is currently no separate minimum-edge
+gate; the configured entry-price range indirectly constrains edge.
 
-The bot trades at most once per 5-minute settlement window.
+`fair_value = 0.50` is a strategy assumption, not an oracle-derived probability.
 
-## 5. Position Sizing
+## Momentum filter
 
-Position sizing starts from the configured target amount per trade:
+`PriceSource` compares the latest Binance price with the oldest available tick at or after the
+configured lookback cutoff:
 
 ```text
-shares = floor(position_size_usdc / entry_price)
-cost = shares * entry_price
-
-if cost < 1.0:
-    shares = ceil(1.0 / entry_price)
-    cost = shares * entry_price
+trend_pct = (latest - old) / old * 100
 ```
 
-Example at different entry prices:
+- DOWN candidate passes unless BTC is rising by more than `btc_trend_min_pct`.
+- UP candidate passes unless BTC is falling by more than `btc_trend_min_pct`.
+- Set `btc_trend_window_s = 0` to make the calculated trend zero and effectively disable the filter.
 
-| Entry Price | Configured Size | Initial floor shares | Final shares | Final cost | Win payout | Loss |
-| --- | --- | --- | --- | --- | --- | --- |
-| 0.08 | $1.0 | floor(1.0 / 0.08) = 12 | 13 (bumped) | $1.04 | $13 | -$1.04 |
-| 0.12 | $0.75 | floor(0.75 / 0.12) = 6 | 9 (bumped) | $1.08 | $9 | -$1.08 |
+Momentum never creates a trade on its own.
 
-Shares are floored to whole numbers so that the CLOB order amount stays within its 2-decimal-place precision limit. If the resulting cost is below $1, shares are bumped to `ceil(1 / entry_price)`, so final cost can exceed configured `position_size_usdc`. **Orders resulting in 0 shares at the initial floor step are rejected** to prevent phantom trades.
+## Position sizing and fills
 
-## 6. Risk Controls
+`position_size_usdc` is the maximum requested spend and must be at least 1 USDC.
 
-The bot implements basic risk controls:
+### Paper
 
-| Mechanism | Rule | Behavior |
-| --- | --- | --- |
-| One trade per window | At most one trade per 5-minute settlement window | Hard limit |
-| Zero balance guard | Reject trades when balance ≤ 0 | Hard block |
-| Daily loss limit gate | If `daily_loss_limit_usdc > 0` and `daily_pnl < -daily_loss_limit_usdc`, skip new trades | Hard block (`0` disables) |
-| FAK retries | Retry failed FAK orders up to `max_fak_retries` times with `fak_backoff_ms` delay | Automatic retry |
-
-**Note**: The bot focuses on capturing opportunities in the brief 5-minute window. Balance is the primary protection mechanism.
-
-## 7. Order Execution
-
-### Paper Mode
-
-- Does not send real orders to Polymarket
-- Generates a local UUID as the order ID
-- Applies the same slippage-adjusted buy price as live mode for simulated fills/costs
-- Tracks the same `filled_shares` and `cost` fields as live mode
-
-### Live Mode
-
-- Uses an authenticated Polymarket CLOB client (SDK-based)
-- Places a Fill-and-Kill (FAK) limit buy at the same slippage-adjusted price used in the executor: `buy_price = mid_price * (1 + slippage_tolerance)` (capped at `0.99`)
-- Computes `filled_shares = floor(size_usdc / price)` and sends that as the order size
-- **Zero-share guard**: If computed shares == 0, the order is rejected
-- Actual cost is `filled_shares × price`, which may be slightly less than `effective_size_usdc` due to floor truncation, or higher than configured `position_size_usdc` when the order is bumped to the $1 minimum
-- If the FAK order is rejected (no liquidity at the requested price), the trade is skipped gracefully
-- The on-chain USDC balance is re-queried every tick to keep local accounting in sync with the wallet
-
-### Extreme Price Guard
-
-Both modes skip execution if the target price is ≤ 0.01 or ≥ 0.99. This prevents placing orders at degenerate prices where the payout ratio collapses.
-
-## 8. Settlement
-
-Both paper and live modes use the Gamma API to check market resolution state. The settlement checker polls every 15 seconds for pending positions.
-
-Resolution detection:
 ```text
-1. umaResolutionStatus contains "resolved"
-2. closed == true
-3. outcomePrices shows one outcome at 1.0 and the other at 0.0
-
-if resolved and Up/Yes price == 1  → winner = UP
-if resolved and Down/No price == 1 → winner = DOWN
-otherwise → keep position pending and retry on next check
+requested cost = position_size_usdc
+shares         = truncate(position_size_usdc / max_buy_price, 4 decimals)
+entry price    = cost / shares
 ```
 
-Payout calculation:
+Paper assumes a complete fill. It does not model queue position, depth, fees, latency, or partial
+fills.
+
+### Live
+
+The executor submits a fixed-USDC FAK market buy with the slippage-adjusted price as its maximum
+price. It records `making_amount` as actual cost and `taking_amount` as actual filled shares from the
+CLOB response. Zero-fill and rejected FAK responses do not create positions.
+
+## Slippage
+
 ```text
-if won:
-    payout = filled_shares    (each share pays $1)
-    pnl = payout - cost
-else:
-    payout = 0
-    pnl = -cost
+max_buy_price = round_2dp(mid_quote * (1 + slippage_tolerance))
 ```
 
-Both modes append settlement results to `logs/<mode>/trades.csv`.
+The value is capped at `0.99`. Both modes reject target prices at or below `0.01` and at or above
+`0.99` before applying the order.
 
-## 9. Live-Mode Redemption
+The CLOB request explicitly asks for the BUY-side price. Strategy analysis should treat it as an
+executable quote, not a mathematically derived mid.
 
-In live mode, the bot initializes a CTF (Conditional Tokens Framework) redeemer that can redeem winning positions on-chain after resolution.
+## Risk controls
 
-Automatic flow:
+| Control | Current behavior |
+| --- | --- |
+| Position budget | Fixed USDC amount per entry |
+| Open-position limit | One pending position globally |
+| Daily loss | Blocks at or below the configured negative limit; `0` disables |
+| Momentum | Blocks entries against a strong Binance trend |
+| Spread | Blocks when YES + NO differs from 1 by more than 6% |
+| Entry range | Avoids prices outside the configured cheap-side range |
+| TTL | Requires enough time before market expiry |
+| Circuit breaker | Blocks when recent-result win rate is below the floor |
+| Live FAK retry | Per-market retry cap plus backoff |
 
-1. When a position settles as a win, it is queued for on-chain redemption
-2. The redeemer checks `payoutDenominator` and `balanceOf` on the CTF contract to confirm the position is redeemable
-3. If redeemable, it calls `redeemPositions` on-chain
-4. If not yet redeemable (resolution may take time to propagate), the redeemer retries up to 10 times (~5 minutes)
+The result history is kept in memory with a 200-result cap. W/L counters and circuit-breaker history
+are not restored after restart; balance and pending positions are restored.
 
-Manual redemption for historical markets:
+## Why the default strategy trades rarely
 
-```bash
-cargo run --release --bin polybot-tools -- --redeem-all
+The checked-in defaults require all of the following at once:
+
+- one side strictly above 95%;
+- the opposite side priced between 0.05 and 0.15;
+- at least 90 seconds remaining;
+- 60 Binance ticks already buffered; and
+- no conflicting BTC momentum.
+
+Extreme prices often occur late in a five-minute window, when the TTL gate already blocks entry.
+Zero paper trades over a short run is therefore expected and does not by itself indicate a runtime
+failure. Use `RUST_LOG=debug` to see the first failed gate.
+
+## Settlement
+
+Trading direction is settled from Gamma's official Polymarket resolution, not by comparing Binance
+prices locally.
+
+```text
+win:  payout = filled_shares; pnl = payout - cost
+loss: payout = 0;             pnl = -cost
 ```
 
-This scans the last 24 hours of 5-minute markets (288 windows) and attempts redemption for any positions held on-chain.
+Live winners additionally require on-chain CTF redemption before the wallet receives spendable USDC.
 
-## 10. State Management
+## Known model limitations
 
-Balance is persisted atomically to `logs/<mode>/balance`. Open positions are persisted atomically to `logs/<mode>/pending_positions.json`, restored on restart, and removed after settlement. This prevents a restart during a market window from losing paper PnL tracking or automatic live redemption.
+- The 0.50 fair-value assumption is not empirically calibrated in code.
+- Fees are not included in the decision edge.
+- Paper fills do not model order-book depth or partial execution.
+- A delayed settlement blocks trading in subsequent windows because only one global pending position
+  is allowed.
+- The circuit breaker uses the bounded in-memory result history and resets on restart.
+- Automatic redemption retries are not persisted after accounting settlement.
 
-## 11. Key Assumptions
-
-1. A 5-minute BTC window is approximately a coin flip (`fair_value = 0.50`), since short-term BTC price movements are dominated by noise rather than directional signal
-2. Extreme market sentiment (≥95% on one side) creates exploitable mispricing because the crowd overestimates the probability of a directional move
-3. Settlement is based on Polymarket's official resolution via Gamma API, ensuring accurate accounting in both paper and live modes
-4. Fixed position sizing keeps the strategy simple and predictable
-5. **Balance is the primary protection**: The bot rejects trades when balance is zero or negative
+These are explicit strategy changes for a later phase; they are not hidden configuration switches.

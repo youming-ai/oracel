@@ -74,20 +74,6 @@ impl TradeLog {
         }
     }
 
-    /// Log a settlement result (delegates to handle).
-    pub async fn log_settlement(
-        &self,
-        won: bool,
-        direction: &str,
-        pnl: Decimal,
-        entry_btc_price: Decimal,
-        current_btc_price: Decimal,
-    ) {
-        self.clone_handle()
-            .log_settlement(won, direction, pnl, entry_btc_price, current_btc_price)
-            .await;
-    }
-
     /// Flush buffered writes to disk.
     pub async fn flush(&self) {
         let mut w = self.writer.lock().await;
@@ -186,7 +172,8 @@ mod tests {
             d("19.0"),
         )
         .await;
-        log.log_settlement(true, "UP", d("20.0"), d("70000"), d("70500"))
+        log.clone_handle()
+            .log_settlement(true, "UP", d("20.0"), d("70000"), d("70500"))
             .await;
         log.flush().await;
 

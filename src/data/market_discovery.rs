@@ -59,7 +59,6 @@ pub struct DiscoveryConfig {
     pub gamma_api_url: String,
     pub gamma_http_timeout: std::time::Duration,
     pub market_search_windows: u32,
-    pub resolution_price_threshold: f64,
 }
 
 // ─── Market Discovery ───
