@@ -13,6 +13,7 @@ use polymarket_5m_bot::pipeline::decider::AccountState;
 use polymarket_5m_bot::pipeline::price_source::PriceSource;
 use polymarket_5m_bot::pipeline::settler::Settler;
 use polymarket_5m_bot::trade_log::TradeLogHandle;
+use polymarket_5m_bot::tui::state::TuiState;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use tokio::sync::RwLock;
@@ -128,6 +129,7 @@ pub(crate) fn start_settlement_checker(
     settlement_check_secs: u64,
     redeem_max_retries: u32,
     resolution_price_threshold: f64,
+    tui_state: Arc<RwLock<TuiState>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(settlement_check_secs));
@@ -212,6 +214,10 @@ pub(crate) fn start_settlement_checker(
             let settlement_btc_price = price_source.latest().await;
 
             if !results.is_empty() {
+                if let Err(e) = settler.read().await.persist(&log_dir).await {
+                    tracing::error!("[STATE] Failed to persist settled positions: {}", e);
+                }
+
                 let mut acc = account.write().await;
                 let today = Utc::now().format("%Y-%m-%d").to_string();
                 acc.reset_daily_if_needed(&today);
@@ -230,8 +236,12 @@ pub(crate) fn start_settlement_checker(
                 let bal = acc.balance;
                 drop(acc);
 
-                if let (Some(ref tl), Some(btc_price)) = (&trade_log, settlement_btc_price) {
-                    for r in &results {
+                for r in &results {
+                    tui_state
+                        .write()
+                        .await
+                        .settle_latest(r.direction.as_str(), r.won, r.pnl);
+                    if let (Some(tl), Some(btc_price)) = (&trade_log, settlement_btc_price) {
                         tl.log_settlement(
                             r.won,
                             r.direction.as_str(),

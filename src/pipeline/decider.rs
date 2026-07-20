@@ -174,11 +174,12 @@ pub struct DecideContext {
 }
 
 pub fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderConfig) -> Decision {
-    if account.balance <= Decimal::ZERO {
+    if account.balance < cfg.position_size_usdc {
         return Decision::Pass("insufficient_balance".into());
     }
 
-    if cfg.daily_loss_limit_usdc > Decimal::ZERO && account.daily_pnl < -cfg.daily_loss_limit_usdc {
+    if cfg.daily_loss_limit_usdc > Decimal::ZERO && account.daily_pnl <= -cfg.daily_loss_limit_usdc
+    {
         return Decision::Pass(format!(
             "daily_loss_limit_{}",
             integer_suffix(account.daily_pnl)
@@ -243,14 +244,18 @@ pub fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderConfig) 
         match base_direction {
             Direction::Down => {
                 if trend > threshold {
-                    let pct = (trend * util::decimal("100")).round_dp(1);
-                    return Decision::Pass(format!("btc_trend_against_down_{pct}%"));
+                    return Decision::Pass(format!(
+                        "btc_trend_against_down_{}%",
+                        trend.round_dp(2)
+                    ));
                 }
             }
             Direction::Up => {
                 if trend < -threshold {
-                    let pct = (trend.abs() * util::decimal("100")).round_dp(1);
-                    return Decision::Pass(format!("btc_trend_against_up_{pct}%"));
+                    return Decision::Pass(format!(
+                        "btc_trend_against_up_{}%",
+                        trend.abs().round_dp(2)
+                    ));
                 }
             }
         }
@@ -259,7 +264,7 @@ pub fn decide(ctx: &DecideContext, account: &AccountState, cfg: &DeciderConfig) 
     // --- Sliding window win-rate circuit breaker ---
     // If the last N trades have a win rate below the minimum, pause trading.
     let window = &account.recent_results;
-    if window.len() >= cfg.circuit_breaker_window as usize {
+    if cfg.circuit_breaker_window > 0 && window.len() >= cfg.circuit_breaker_window as usize {
         let wins_in_window = window.iter().filter(|&&w| w).count() as u32;
         let total_in_window = window.len() as u32;
         let win_rate = Decimal::from(wins_in_window) / Decimal::from(total_in_window);
@@ -365,6 +370,30 @@ mod tests {
             }
             Decision::Pass(reason) => panic!("expected trade but got pass: {}", reason),
         }
+    }
+
+    #[test]
+    fn test_disabled_circuit_breaker_does_not_divide_by_zero() {
+        let account = AccountState::new(d("1000"));
+        let cfg = DeciderConfig {
+            circuit_breaker_window: 0,
+            ..DeciderConfig::default()
+        };
+
+        assert!(matches!(
+            decide(&default_ctx(), &account, &cfg),
+            Decision::Trade { .. }
+        ));
+    }
+
+    #[test]
+    fn test_rejects_position_larger_than_balance() {
+        let account = AccountState::new(d("0.99"));
+
+        assert!(matches!(
+            decide(&default_ctx(), &account, &DeciderConfig::default()),
+            Decision::Pass(reason) if reason == "insufficient_balance"
+        ));
     }
 
     #[test]

@@ -1,0 +1,23 @@
+[Unit]
+Description=Polymarket BTC 5m Bot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=polybot
+Group=polybot
+WorkingDirectory=/home/polybot/oracel
+ExecStart=/home/polybot/oracel/target/release/polybot
+Environment=RUST_LOG=info
+Environment=POLYBOT_HEADLESS=1
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=15
+KillSignal=SIGTERM
+
+# Load PRIVATE_KEY and optional ALCHEMY_KEY without storing them in this file.
+EnvironmentFile=-/home/polybot/oracel/.env
+
+[Install]
+WantedBy=multi-user.target

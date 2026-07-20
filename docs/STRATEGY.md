@@ -196,7 +196,7 @@ This scans the last 24 hours of 5-minute markets (288 windows) and attempts rede
 
 ## 10. State Management
 
-The bot uses in-memory state only. Balance is persisted to `logs/<mode>/balance` (atomic write via tmp+rename). Since markets are 5-minute windows, any pending positions from a previous run will have already settled by the time the bot restarts — no state.json persistence is needed.
+Balance is persisted atomically to `logs/<mode>/balance`. Open positions are persisted atomically to `logs/<mode>/pending_positions.json`, restored on restart, and removed after settlement. This prevents a restart during a market window from losing paper PnL tracking or automatic live redemption.
 
 ## 11. Key Assumptions
 

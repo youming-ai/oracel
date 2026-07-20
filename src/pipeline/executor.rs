@@ -86,18 +86,9 @@ impl Executor {
                     Some(shares) => shares,
                     None => return None,
                 };
-                let mut cost = filled_shares * price;
-
-                // Polymarket requires minimum $1 order amount; bump shares to meet it
-                if cost < Decimal::ONE {
-                    filled_shares = (Decimal::ONE / price).ceil();
-                    cost = filled_shares * price;
-                    tracing::debug!(
-                        "[EXEC] Bumped to {} shares (cost={:.2}) to meet $1 minimum",
-                        filled_shares,
-                        cost
-                    );
-                }
+                // Paper mode simulates a fully filled fixed-USDC market order.
+                // Live mode replaces these values with the CLOB response below.
+                let mut cost = *size_usdc;
 
                 // Log slippage if applied
                 if price != mid_price {
@@ -110,13 +101,17 @@ impl Executor {
                 }
 
                 let order_id = if self.mode.is_live() {
-                    match self.place_live_order(token_id, price, filled_shares).await {
-                        Ok(id) => {
+                    match self.place_live_order(token_id, price, *size_usdc).await {
+                        Ok((id, actual_shares, actual_cost)) => {
+                            filled_shares = actual_shares;
+                            cost = actual_cost;
+                            let actual_price = cost / filled_shares;
                             tracing::debug!(
-                                "[EXEC] filled id={} shares={} cost={:.2}",
+                                "[EXEC] filled id={} shares={} cost={:.2} avg={:.3}",
                                 id.get(..8).unwrap_or(&id),
                                 filled_shares,
                                 cost,
+                                actual_price,
                             );
                             id
                         }
@@ -141,11 +136,12 @@ impl Executor {
                     uuid::Uuid::new_v4().to_string()
                 };
 
+                let entry_price = cost / filled_shares;
                 Some(OrderResult {
                     order_id,
                     direction: *direction,
-                    size_usdc: *size_usdc,
-                    entry_price: price,
+                    size_usdc: cost,
+                    entry_price,
                     filled_shares,
                     cost,
                     settlement_time_ms: ctx.settlement_time_ms,
@@ -156,10 +152,13 @@ impl Executor {
     }
 
     fn compute_filled_shares(size_usdc: Decimal, price: Decimal) -> Option<Decimal> {
-        // Floor to whole shares so that maker_amount (= price × shares) stays
-        // within the CLOB's 2-decimal-place limit for market buy orders.
-        // Returns None if resulting shares would be 0 (reject tiny orders).
-        let shares = (size_usdc / price).floor();
+        // Match the SDK's fixed-USDC market-order precision: tick precision
+        // (normally 2) plus the 2-decimal lot-size precision.
+        if size_usdc < Decimal::ONE {
+            tracing::warn!("[EXEC] Order amount {} is below $1 minimum", size_usdc);
+            return None;
+        }
+        let shares = (size_usdc / price).trunc_with_scale(4);
         if shares > Decimal::ZERO {
             Some(shares)
         } else {
@@ -176,13 +175,15 @@ impl Executor {
         &self,
         token_id: &str,
         price: Decimal,
-        shares: Decimal,
-    ) -> Result<String> {
+        amount_usdc: Decimal,
+    ) -> Result<(String, Decimal, Decimal)> {
         let client = self
             .auth_client
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No authenticated client — run with PRIVATE_KEY set"))?;
-        client.place_order(token_id, "BUY", price, shares).await
+        client
+            .place_order(token_id, "BUY", price, amount_usdc)
+            .await
     }
 }
 
@@ -253,7 +254,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_compute_filled_shares_returns_none_for_tiny_orders() {
-        // When size_usdc < price, floor(size/price) = 0, should return None
+        // Polymarket rejects order amounts below $1.
         let result = Executor::compute_filled_shares(d("0.50"), d("0.60"));
         assert!(result.is_none());
     }
@@ -262,6 +263,6 @@ mod tests {
     async fn test_compute_filled_shares_returns_some_for_valid_orders() {
         // When size_usdc >= price, should return Some(shares)
         let result = Executor::compute_filled_shares(d("5.00"), d("0.20"));
-        assert_eq!(result, Some(d("25"))); // floor(5/0.2) = 25
+        assert_eq!(result, Some(d("25")));
     }
 }

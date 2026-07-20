@@ -92,6 +92,18 @@ impl TuiState {
         }
     }
 
+    pub fn settle_latest(&mut self, direction: &str, won: bool, pnl: Decimal) {
+        if let Some(trade) = self
+            .recent_trades
+            .iter_mut()
+            .rev()
+            .find(|trade| trade.direction == direction && trade.result == "PENDING")
+        {
+            trade.result = if won { "WIN" } else { "LOSS" }.to_string();
+            trade.pnl = Some(pnl);
+        }
+    }
+
     pub fn load_trades_from_csv(log_dir: &str) -> Vec<TradeRow> {
         let path = std::path::Path::new(log_dir).join("trades.csv");
         let content = match std::fs::read_to_string(&path) {
@@ -99,36 +111,64 @@ impl TuiState {
             Err(_) => return Vec::new(),
         };
 
-        let mut trades = Vec::new();
+        let mut state = Self::default();
         for line in content.lines().skip(1) {
             let fields: Vec<&str> = line.split(',').collect();
-            if fields.len() < 8 {
-                continue;
-            }
-            if fields[1] != "ENTRY" {
+            if fields.len() < 3 {
                 continue;
             }
 
-            let time = chrono::DateTime::parse_from_rfc3339(fields[0])
-                .ok()
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or(Utc::now());
-
-            trades.push(TradeRow {
-                time,
-                direction: fields[2].to_string(),
-                entry_price: fields[4].parse().unwrap_or_default(),
-                cost: fields[5].parse().unwrap_or_default(),
-                edge: fields[6].parse().unwrap_or_default(),
-                result: "PENDING".to_string(),
-                pnl: None,
-            });
+            match fields[1] {
+                "ENTRY" if fields.len() >= 8 => {
+                    let time = chrono::DateTime::parse_from_rfc3339(fields[0])
+                        .ok()
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(Utc::now);
+                    state.add_trade(TradeRow {
+                        time,
+                        direction: fields[2].to_string(),
+                        entry_price: fields[4].parse().unwrap_or_default(),
+                        cost: fields[5].parse().unwrap_or_default(),
+                        edge: fields[6].parse().unwrap_or_default(),
+                        result: "PENDING".to_string(),
+                        pnl: None,
+                    });
+                }
+                result @ ("WIN" | "LOSS") if fields.len() >= 5 => {
+                    state.settle_latest(
+                        fields[2],
+                        result == "WIN",
+                        fields[4].parse().unwrap_or_default(),
+                    );
+                }
+                _ => {}
+            }
         }
+        state.recent_trades
+    }
+}
 
-        let len = trades.len();
-        if len > 200 {
-            trades.drain(0..len - 200);
-        }
-        trades
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_csv_applies_settlement_to_entry() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("trades.csv"),
+            concat!(
+                "timestamp,type,direction,order_id,entry_price,cost,edge,balance,remaining_ms,yes_price,no_price,payoff_ratio\n",
+                "2026-01-01T00:00:00Z,ENTRY,UP,12345678,0.05,1.00,45.0,99.00,120s,0.05,0.95,19.0x\n",
+                "2026-01-01T00:05:00Z,WIN,UP,,+19.00,70000,70100\n",
+            ),
+        )
+        .expect("write CSV");
+
+        let rows = TuiState::load_trades_from_csv(dir.path().to_str().expect("utf-8 path"));
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].result, "WIN");
+        assert_eq!(rows[0].pnl, Some(Decimal::from(19)));
     }
 }

@@ -282,9 +282,9 @@ EOF
 
 ### Recovery
 
-The bot uses in-memory state only. On restart:
-- Balance synced from chain
-- Pending positions: 5-minute markets settle before any realistic restart, so no persistence needed
+On restart:
+- Paper balance is restored from `logs/paper/balance`; live balance is synced on-chain.
+- Pending positions are restored from `logs/<mode>/pending_positions.json` and continue through settlement.
 
 ### Critical Files to Backup
 
@@ -293,7 +293,8 @@ The bot uses in-memory state only. On restart:
 tar czf polybot_backup_$(date +%Y%m%d).tar.gz \
   config.toml \
   .env \
-  logs/balance
+  logs/paper/balance \
+  logs/paper/pending_positions.json
 ```
 
 ---
