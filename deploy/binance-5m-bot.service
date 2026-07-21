@@ -1,0 +1,23 @@
+[Unit]
+Description=Binance Prediction BTC 5m Bot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=binancebot
+Group=binancebot
+WorkingDirectory=/home/binancebot/oracel
+ExecStart=/home/binancebot/oracel/target/release/binance-5m-bot
+Environment=RUST_LOG=info
+Environment=BINANCE_5M_HEADLESS=1
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=20
+KillSignal=SIGTERM
+
+# Load BINANCE_API_KEY and BINANCE_API_SECRET without storing them in this file.
+EnvironmentFile=-/home/binancebot/oracel/.env
+
+[Install]
+WantedBy=multi-user.target

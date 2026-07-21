@@ -4,31 +4,25 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::Utc;
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
-use secrecy::ExposeSecret;
 use tokio::join;
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::RwLock;
 use tokio::time::{interval, Duration};
 
-use polymarket_5m_bot::trade_log::TradeLog;
-use polymarket_5m_bot::{config, data, pipeline};
-
-use config::Config;
-use data::chainlink::ChainlinkSource;
-use data::market_discovery::{DiscoveryConfig, MarketDiscovery};
-use data::polymarket::{AuthenticatedPolyClient, BalanceChecker, CtfRedeemer, PolymarketClient};
-use pipeline::decider::{self, AccountState, DeciderConfig};
-use pipeline::executor::{ExecuteContext, Executor};
-use pipeline::price_source::PriceSource;
-use pipeline::settler::{PendingPosition, Settler};
+use binance_5m_bot::config::Config;
+use binance_5m_bot::data::binance_prediction::BinancePredictionClient;
+use binance_5m_bot::pipeline::decider::{self, AccountState, DeciderConfig, Decision};
+use binance_5m_bot::pipeline::executor::{ExecuteContext, ExecutionOutcome, Executor};
+use binance_5m_bot::pipeline::price_source::PriceSource;
+use binance_5m_bot::pipeline::settler::{PendingPosition, Settler};
+use binance_5m_bot::trade_log::TradeLog;
+use binance_5m_bot::tui::state::{TradeRow, TuiState};
+use binance_5m_bot::util;
 
 use crate::state::{BotState, MarketState};
 use crate::tasks;
-use polymarket_5m_bot::tui::state::{TradeRow, TuiState};
-use polymarket_5m_bot::util;
 
 async fn wait_for_shutdown(shutdown: Arc<AtomicBool>) {
     while !shutdown.load(Ordering::Acquire) {
@@ -40,19 +34,16 @@ pub(crate) struct Bot {
     config: Config,
     log_dir: String,
     price_source: Arc<PriceSource>,
-    chainlink_source: Arc<ChainlinkSource>,
-    polymarket: Arc<PolymarketClient>,
-    discovery: Arc<MarketDiscovery>,
+    prediction: Arc<BinancePredictionClient>,
     state: Arc<RwLock<BotState>>,
     account: Arc<RwLock<AccountState>>,
     settler: Arc<RwLock<Settler>>,
     executor: Executor,
-    redeemer: Option<Arc<CtfRedeemer>>,
-    balance_checker: Option<BalanceChecker>,
     market_state: Arc<RwLock<MarketState>>,
     shutdown: Arc<AtomicBool>,
     trade_log: TradeLog,
     tui_state: Arc<RwLock<TuiState>>,
+    last_live_balance_refresh_ms: i64,
 }
 
 impl Bot {
@@ -65,149 +56,54 @@ impl Bot {
             &config.price_source.symbol,
             config.price_source.buffer_max,
         ));
-        let chainlink_capacity = usize::try_from(config.strategy.volatility_lookback_secs)
-            .unwrap_or(900)
-            .saturating_add(600);
-        let chainlink_source = Arc::new(ChainlinkSource::new(chainlink_capacity));
-        let polymarket = Arc::new(PolymarketClient::new()?);
-
-        let discovery_cfg = DiscoveryConfig {
-            gamma_api_url: config.polyclob.gamma_api_url.clone(),
-            gamma_http_timeout: std::time::Duration::from_secs(config.polyclob.gamma_http_secs),
-            market_search_windows: config.misc.market_search_windows,
-        };
-        let discovery = Arc::new(MarketDiscovery::new(discovery_cfg));
-
-        let auth_client = if config.trading.mode.is_live()
-            && !config.trading.private_key.expose_secret().is_empty()
-        {
-            match AuthenticatedPolyClient::new(config.trading.private_key.expose_secret()).await {
-                Ok(c) => {
-                    tracing::debug!("[INIT] Authenticated with Polymarket CLOB");
-                    Some(c)
-                }
-                Err(e) => {
-                    anyhow::bail!("[INIT] CLOB auth failed: {} — cannot run in live mode", e);
-                }
-            }
-        } else {
-            None
-        };
-
-        let executor = Executor::new(config.trading.mode, auth_client);
-
-        let redeemer = if config.trading.mode.is_live()
-            && !config.trading.private_key.expose_secret().is_empty()
-        {
-            let rpc = data::polymarket::rpc_url(config.trading.mode);
-            tracing::debug!("[INIT] CTF redeemer enabled for on-chain redemption");
-            Some(Arc::new(CtfRedeemer::new(
-                config.trading.private_key.expose_secret().to_owned(),
-                rpc,
-            )))
-        } else {
-            None
-        };
-
+        let prediction = Arc::new(
+            BinancePredictionClient::connect(
+                &config.binance_prediction,
+                config.trading.mode.is_live(),
+            )
+            .await?,
+        );
         let initial_balance = if config.trading.mode.is_paper() {
             Self::load_balance(&log_dir)
                 .await
                 .unwrap_or(config.trading.paper_starting_balance)
         } else {
-            let rpc = data::polymarket::rpc_url(config.trading.mode);
-            if let Some(ref r) = redeemer {
-                let wallet = r
-                    .wallet_address()
-                    .map_err(|e| anyhow::anyhow!("[INIT] Wallet derivation failed: {}", e))?;
-                let bc = data::polymarket::BalanceChecker::new(wallet, rpc.clone())
-                    .await
-                    .map_err(|e| anyhow::anyhow!("[INIT] BalanceChecker creation failed: {}", e))?;
-                let on_chain = bc
-                    .balance()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("[INIT] Balance query failed: {}", e))?;
-                // On-chain balance may be zero if funds are locked in positions.
-                // Fall back to persisted balance file so we don't lose track of
-                // working capital across restarts.
-                if on_chain > Decimal::ZERO {
-                    on_chain
-                } else {
-                    let saved = Self::load_balance(&log_dir).await;
-                    if let Some(saved_bal) = saved {
-                        tracing::debug!(
-                            "[INIT] On-chain balance is $0, restored ${:.2} from balance file",
-                            saved_bal
-                        );
-                        saved_bal
-                    } else {
-                        on_chain
-                    }
-                }
-            } else {
-                anyhow::bail!("[INIT] Live mode requires redeemer for balance query")
-            }
+            prediction.payment_balance().await?
         };
-        tracing::debug!("[INIT] Starting balance: ${:.2}", initial_balance);
+        tracing::info!(
+            "[INIT] Binance Prediction {} balance: {:.2} USDT",
+            config.trading.mode,
+            initial_balance
+        );
         util::write_balance(&log_dir, initial_balance).await;
 
-        let balance_checker = if config.trading.mode.is_live() {
-            if let Some(ref r) = redeemer {
-                match r.wallet_address() {
-                    Ok(wallet) => {
-                        let rpc = data::polymarket::rpc_url(config.trading.mode);
-                        match BalanceChecker::new(wallet, rpc).await {
-                            Ok(checker) => {
-                                tracing::debug!("[INIT] BalanceChecker connected");
-                                Some(checker)
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "[INIT] BalanceChecker init failed: {}, will retry on next tick",
-                                    e
-                                );
-                                None
-                            }
-                        }
-                    }
-                    Err(_) => None,
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
         let settler = Settler::load(&log_dir).await?;
+        let restored_awaiting_execution = !settler.awaiting_reconciliation().is_empty();
         if settler.pending_count() > 0 {
-            tracing::info!(
-                "[INIT] Restored {} pending position(s)",
+            tracing::warn!(
+                "[INIT] restored {} Binance Prediction pending order(s)/position(s)",
                 settler.pending_count()
             );
         }
-        let account = AccountState::new(initial_balance);
-
         let trade_log = TradeLog::open(&log_dir)
-            .map_err(|e| anyhow::anyhow!("[INIT] Failed to open trade log: {}", e))?;
-        tracing::debug!("[INIT] TradeLog opened for {} mode", config.trading.mode);
-
+            .map_err(|error| anyhow::anyhow!("failed to open Binance trade log: {error}"))?;
         Ok(Self {
+            executor: Executor::new(config.trading.mode, Arc::clone(&prediction)),
             config,
             log_dir,
             price_source,
-            chainlink_source,
-            polymarket,
-            discovery,
-            state: Arc::new(RwLock::new(BotState::new())),
-            account: Arc::new(RwLock::new(account)),
+            prediction,
+            state: Arc::new(RwLock::new(BotState {
+                execution_halted: restored_awaiting_execution,
+                ..BotState::new()
+            })),
+            account: Arc::new(RwLock::new(AccountState::new(initial_balance))),
             settler: Arc::new(RwLock::new(settler)),
-            executor,
-            redeemer,
-            balance_checker,
             market_state: Arc::new(RwLock::new(MarketState::default())),
             shutdown: Arc::new(AtomicBool::new(false)),
             trade_log,
             tui_state,
+            last_live_balance_refresh_ms: 0,
         })
     }
 
@@ -216,32 +112,32 @@ impl Bot {
     }
 
     async fn load_balance(log_dir: &str) -> Option<Decimal> {
-        let content = tokio::fs::read_to_string(Path::new(log_dir).join("balance"))
+        tokio::fs::read_to_string(Path::new(log_dir).join("balance"))
             .await
-            .ok()?;
-        content.trim().parse().ok()
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
     }
 
     pub(crate) async fn run(&mut self) -> Result<()> {
-        tracing::debug!(
-            "[INIT] mode={} interval={}ms",
+        tracing::info!(
+            "[INIT] venue=binance_prediction mode={} symbol={} interval={}ms",
             self.config.trading.mode,
-            self.config.polling.signal_interval_ms
+            self.config.price_source.symbol,
+            self.config.polling.signal_interval_ms,
         );
-
         self.refresh_market().await;
-        let price_handles = self.price_source.clone().start(self.shutdown.clone()).await;
-        let chainlink_handle = self
-            .chainlink_source
+        let price_handles = self
+            .price_source
             .clone()
-            .start(self.shutdown.clone())
+            .start(Arc::clone(&self.shutdown))
             .await;
 
         #[cfg(unix)]
         let mut sigint = signal(SignalKind::interrupt())?;
         #[cfg(unix)]
         let mut sigterm = signal(SignalKind::terminate())?;
-
         #[cfg(unix)]
         let shutdown_signal = async {
             tokio::select! {
@@ -249,107 +145,85 @@ impl Bot {
                 _ = sigterm.recv() => "SIGTERM",
             }
         };
-
         #[cfg(not(unix))]
         let shutdown_signal = async {
-            tokio::signal::ctrl_c()
-                .await
-                .expect("failed to listen for ctrl-c");
+            tokio::signal::ctrl_c().await?;
             "SIGINT"
         };
-
         tokio::pin!(shutdown_signal);
 
-        let trade_log_handle = self.trade_log.clone_handle();
         let mut settlement_handle = tasks::start_settlement_checker(
-            self.settler.clone(),
-            self.account.clone(),
-            self.chainlink_source.clone(),
-            self.discovery.clone(),
-            self.redeemer.clone(),
+            self.config.trading.mode,
+            Arc::clone(&self.prediction),
+            Arc::clone(&self.settler),
+            Arc::clone(&self.account),
+            Arc::clone(&self.price_source),
             self.log_dir.clone(),
-            trade_log_handle,
-            self.shutdown.clone(),
+            self.trade_log.clone_handle(),
+            Arc::clone(&self.shutdown),
             self.config.polling.settlement_check_secs,
-            self.config.redeem.max_retries,
-            self.config.misc.resolution_price_threshold,
-            self.tui_state.clone(),
+            Arc::clone(&self.tui_state),
         );
         let mut refresher_handle = tasks::start_market_refresher(
-            self.discovery.clone(),
-            self.market_state.clone(),
-            self.shutdown.clone(),
+            Arc::clone(&self.prediction),
+            Arc::clone(&self.market_state),
+            Arc::clone(&self.shutdown),
             self.config.polling.market_refresh_secs,
         );
         let mut status_handle = tasks::start_status_printer(
-            self.price_source.clone(),
-            self.account.clone(),
-            self.settler.clone(),
-            self.market_state.clone(),
+            Arc::clone(&self.price_source),
+            Arc::clone(&self.account),
+            Arc::clone(&self.settler),
+            Arc::clone(&self.market_state),
             self.config.trading.mode,
             self.config.polling.status_interval_ms,
-            self.shutdown.clone(),
+            Arc::clone(&self.shutdown),
         );
         let mut settlement_done = false;
         let mut refresher_done = false;
         let mut status_done = false;
-
         let mut tick = interval(Duration::from_millis(
             self.config.polling.signal_interval_ms,
         ));
-        let mut flush_tick = interval(Duration::from_secs(self.config.misc.trade_log_flush_secs));
+        let mut flush = interval(Duration::from_secs(self.config.misc.trade_log_flush_secs));
 
         loop {
             tokio::select! {
                 _ = tick.tick() => {
-                    if let Err(e) = self.tick().await {
-                        tracing::error!("[BOT] Tick error: {}", e);
+                    if let Err(error) = self.tick().await {
+                        tracing::error!("[BOT] tick error: {error:#}");
                     }
                 }
-                _ = flush_tick.tick() => {
-                    self.trade_log.flush().await;
-                }
+                _ = flush.tick() => self.trade_log.flush().await,
                 signal = &mut shutdown_signal => {
-                    tracing::info!("[BOT] Received {}, shutting down...", signal);
+                    tracing::info!("[BOT] received {signal}, shutting down");
                     break;
                 }
-                _ = wait_for_shutdown(self.shutdown.clone()) => {
-                    tracing::info!("[BOT] Shutdown requested by TUI");
+                _ = wait_for_shutdown(Arc::clone(&self.shutdown)) => {
+                    tracing::info!("[BOT] shutdown requested by TUI");
                     break;
                 }
                 result = &mut settlement_handle => {
                     settlement_done = true;
-                    match result {
-                        Ok(()) => tracing::error!("[BOT] Settlement checker exited unexpectedly"),
-                        Err(e) => tracing::error!("[BOT] Settlement checker panicked: {}", e),
-                    }
+                    tracing::error!("[BOT] settlement task stopped: {result:?}");
                     break;
                 }
                 result = &mut refresher_handle => {
                     refresher_done = true;
-                    match result {
-                        Ok(()) => tracing::error!("[BOT] Market refresher exited unexpectedly"),
-                        Err(e) => tracing::error!("[BOT] Market refresher panicked: {}", e),
-                    }
+                    tracing::error!("[BOT] market refresher stopped: {result:?}");
                     break;
                 }
                 result = &mut status_handle => {
                     status_done = true;
-                    match result {
-                        Ok(()) => tracing::error!("[BOT] Status printer exited unexpectedly"),
-                        Err(e) => tracing::error!("[BOT] Status printer panicked: {}", e),
-                    }
+                    tracing::error!("[BOT] status task stopped: {result:?}");
                     break;
                 }
             }
         }
 
         self.shutdown.store(true, Ordering::Release);
-
         price_handles.ws_handle.abort();
         price_handles.receiver_handle.abort();
-        chainlink_handle.abort();
-
         let _ = tokio::time::timeout(
             Duration::from_secs(self.config.misc.shutdown_timeout_secs),
             async {
@@ -365,389 +239,345 @@ impl Bot {
             },
         )
         .await;
-
-        // Final persistence and flush on shutdown.
-        if let Err(e) = self.settler.read().await.persist(&self.log_dir).await {
-            tracing::error!("[STATE] Failed to persist pending positions: {}", e);
+        if let Err(error) = self.settler.read().await.persist(&self.log_dir).await {
+            tracing::error!("[STATE] failed to persist Binance positions on shutdown: {error:#}");
         }
         self.trade_log.flush().await;
-
         Ok(())
     }
 
-    fn decider_cfg(&self) -> DeciderConfig {
+    fn decider_config(&self) -> DeciderConfig {
         DeciderConfig::from(&self.config)
     }
 
-    async fn tick(&mut self) -> Result<()> {
-        // Live mode: query on-chain USDC balance each tick.
-        // If the BalanceChecker was not created at init (e.g. RPC timeout),
-        // attempt to reconnect lazily so live mode always reflects on-chain state.
-        if self.config.trading.mode.is_live() {
-            if self.balance_checker.is_none() {
-                if let Some(ref r) = self.redeemer {
-                    if let Ok(wallet) = r.wallet_address() {
-                        let rpc = data::polymarket::rpc_url(self.config.trading.mode);
-                        match BalanceChecker::new(wallet, rpc).await {
-                            Ok(checker) => {
-                                tracing::info!("[BAL] BalanceChecker reconnected");
-                                self.balance_checker = Some(checker);
-                            }
-                            Err(e) => {
-                                tracing::debug!(
-                                    "[BAL] BalanceChecker reconnect failed: {}, will retry",
-                                    e
-                                );
-                            }
-                        }
-                    }
-                }
+    async fn refresh_live_balance_if_due(&mut self, now_ms: i64) {
+        if self.config.trading.mode.is_paper()
+            || now_ms.saturating_sub(self.last_live_balance_refresh_ms)
+                < self.config.polling.status_interval_ms as i64
+        {
+            return;
+        }
+        self.last_live_balance_refresh_ms = now_ms;
+        match self.prediction.payment_balance().await {
+            Ok(balance) => {
+                self.account.write().await.balance = balance;
+                util::write_balance(&self.log_dir, balance).await;
             }
-
-            if let Some(ref checker) = self.balance_checker {
-                match checker.balance().await {
-                    Ok(on_chain_bal) => {
-                        let mut account = self.account.write().await;
-                        account.balance = on_chain_bal;
-                        drop(account); // Release lock early
-
-                        util::write_balance(&self.log_dir, on_chain_bal).await;
-                        tracing::debug!("[BALANCE] Wrote balance: ${:.2}", on_chain_bal);
-                    }
-                    Err(e) => {
-                        tracing::warn!("[BAL] Failed to query on-chain USDC balance: {}", e);
-                    }
-                }
+            Err(error) => {
+                tracing::warn!("[BAL] Binance Prediction balance refresh failed: {error:#}")
             }
         }
+    }
 
-        // Update TUI with current account state (must happen before any early
-        // returns so balance is always visible, even during buffer_filling or
-        // other idle states).
+    async fn tick(&mut self) -> Result<()> {
+        let now_ms = Utc::now().timestamp_millis();
+        self.refresh_live_balance_if_due(now_ms).await;
+
         {
-            let acc = self.account.read().await;
+            let account = self.account.read().await;
             let pending = self.settler.read().await.pending_count();
             let mut tui = self.tui_state.write().await;
             tui.update_from_account(
-                acc.balance,
-                acc.pnl(),
-                acc.total_wins,
-                acc.total_losses,
-                acc.consecutive_wins,
-                acc.consecutive_losses,
+                account.balance,
+                account.pnl(),
+                account.total_wins,
+                account.total_losses,
+                account.consecutive_wins,
+                account.consecutive_losses,
             );
             tui.set_pending_count(pending);
         }
 
-        let mkt = self.market_state.read().await.clone();
-
         let btc_price = match self.price_source.latest().await {
-            Some(p) => p,
+            Some(price) => price,
             None => return Ok(()),
         };
+        let market = self.market_state.read().await.active.clone();
         {
             let mut tui = self.tui_state.write().await;
             tui.set_btc_price(btc_price);
-            tui.update_market(&mkt.market_slug, mkt.settlement_ms);
+            if let Some(market) = &market {
+                tui.update_market(&market.slug, market.end_ms);
+            }
         }
 
-        let buf_len = self.price_source.buffer_len().await;
-        if buf_len < self.config.price_source.buffer_min_ticks {
-            self.tui_state
-                .write()
-                .await
-                .set_decision("IDLE: buffer_filling".to_string());
-            let detail = format!(
-                "buffer={}/{}",
-                buf_len, self.config.price_source.buffer_min_ticks
-            );
-            self.state
-                .write()
-                .await
-                .log_idle_change("buffer_filling", &detail);
+        let buffer_len = self.price_source.buffer_len().await;
+        if buffer_len < self.config.price_source.buffer_min_ticks {
+            self.idle(
+                "buffer_filling",
+                &format!(
+                    "buffer={buffer_len}/{}",
+                    self.config.price_source.buffer_min_ticks
+                ),
+            )
+            .await;
             return Ok(());
         }
+        if self
+            .price_source
+            .last_tick_ms()
+            .await
+            .is_some_and(|tick_ms| {
+                now_ms.saturating_sub(tick_ms) > self.config.price_source.stale_threshold_ms
+            })
+        {
+            self.idle(
+                "stale_binance_price",
+                "waiting for BTCUSDT WebSocket update",
+            )
+            .await;
+            return Ok(());
+        }
+        let Some(market) = market else {
+            self.idle(
+                "market_not_ready",
+                "waiting for Binance Prediction discovery",
+            )
+            .await;
+            return Ok(());
+        };
 
-        let stale_threshold_ms = self.config.price_source.stale_threshold_ms;
-        if let Some(last_ts) = self.price_source.last_tick_ms().await {
-            let age = Utc::now().timestamp_millis() - last_ts;
-            if age > stale_threshold_ms {
+        {
+            let awaiting = self.settler.read().await.awaiting_reconciliation();
+            let mut state = self.state.write().await;
+            if state.execution_halted && awaiting.is_empty() {
+                state.execution_halted = false;
+                tracing::info!("[EXEC] Binance order reconciliation completed; resuming entries");
+            }
+            if state.execution_halted {
                 self.tui_state
                     .write()
                     .await
-                    .set_decision("IDLE: stale_price".to_string());
-                tracing::warn!("[PRICE] BTC data stale ({}s), skipping trade", age / 1000);
+                    .set_decision("HALTED: awaiting Binance order reconciliation".into());
                 return Ok(());
             }
         }
 
-        if !mkt.is_ready() {
-            self.tui_state
-                .write()
-                .await
-                .set_decision("IDLE: market_not_ready".to_string());
-            self.state
-                .write()
-                .await
-                .log_idle_change("market_not_ready", "waiting for token IDs");
-            return Ok(());
-        }
-
-        let quote_size = self.config.strategy.position_size_usdc;
+        let order_size = self.config.strategy.position_size_usdt;
         let (up_result, down_result) = join!(
-            self.polymarket.fetch_buy_quote(&mkt.token_yes, quote_size),
-            self.polymarket.fetch_buy_quote(&mkt.token_no, quote_size),
+            self.prediction
+                .fetch_buy_quote(&market, decider::Direction::Up, order_size),
+            self.prediction
+                .fetch_buy_quote(&market, decider::Direction::Down, order_size),
         );
         let up_quote = up_result
-            .inspect_err(|error| tracing::warn!("[BOOK] UP quote failed: {}", error))
+            .inspect_err(|error| tracing::debug!("[BOOK] UP quote unavailable: {error:#}"))
             .ok();
         let down_quote = down_result
-            .inspect_err(|error| tracing::warn!("[BOOK] DOWN quote failed: {}", error))
+            .inspect_err(|error| tracing::debug!("[BOOK] DOWN quote unavailable: {error:#}"))
             .ok();
-        let poly_yes_dec = up_quote.map(|quote| quote.effective_price);
-        let poly_no_dec = down_quote.map(|quote| quote.effective_price);
-        tracing::debug!(
-            "[BOOK] UP={:.3} DOWN={:.3} | buffer={}",
-            poly_yes_dec.unwrap_or_default(),
-            poly_no_dec.unwrap_or_default(),
-            buf_len
-        );
-        let settlement_ms = mkt.settlement_ms;
-
-        let today = Utc::now().format("%Y-%m-%d").to_string();
-        {
-            let mut acc = self.account.write().await;
-            acc.reset_daily_if_needed(&today);
-        }
-        let account_read = self.account.read().await.clone();
-        let decider_cfg = self.decider_cfg();
-        let remaining_ms = (settlement_ms - Utc::now().timestamp_millis()).max(0);
-
-        let now_ms = Utc::now().timestamp_millis();
-        let chainlink_tick = self.chainlink_source.latest().await.filter(|tick| {
-            now_ms.saturating_sub(tick.timestamp_ms)
-                <= self.config.strategy.oracle_stale_threshold_ms
-        });
-        let window_start_ms = settlement_ms.saturating_sub(300_000);
-        let chainlink_open = self.chainlink_source.opening_price(window_start_ms).await;
-        let sigma_per_second = self
-            .chainlink_source
-            .realized_sigma_per_second(
-                self.config.strategy.volatility_lookback_secs,
-                self.config.strategy.min_volatility_samples,
-            )
-            .await;
         let quote_is_fresh = |timestamp_ms: i64| {
             now_ms.saturating_sub(timestamp_ms)
                 <= self.config.strategy.order_book_stale_threshold_ms
         };
-        let decide_ctx = decider::DecideContext {
+        let remaining_ms = (market.end_ms - now_ms).max(0);
+        let context = decider::DecideContext {
             now_ms,
+            market_fee_rate_bps: Some(market.fee_rate_bps),
             up_quote: up_quote.filter(|quote| quote_is_fresh(quote.timestamp_ms)),
             down_quote: down_quote.filter(|quote| quote_is_fresh(quote.timestamp_ms)),
             remaining_ms,
-            chainlink_open,
-            chainlink_current: chainlink_tick.map(|tick| tick.price),
-            sigma_per_second,
+            reference_price: Some(market.reference_price),
+            current_price: Some(btc_price),
+            sigma_per_second: self
+                .price_source
+                .realized_sigma_per_second(
+                    self.config.strategy.volatility_lookback_secs,
+                    self.config.strategy.min_volatility_samples,
+                )
+                .await,
             binance_trend_15s_pct: self.price_source.trend_pct(15).await,
             binance_trend_30s_pct: self.price_source.trend_pct(30).await,
         };
-
-        let mut decision = decider::decide(&decide_ctx, &account_read, &decider_cfg);
-        if matches!(decision, decider::Decision::Trade { .. }) {
-            let settler = self.settler.read().await;
-            if settler.has_condition(&mkt.condition_id) {
-                decision = decider::Decision::Pass("market_already_traded".into());
-            } else if settler.pending_count() >= self.config.strategy.max_unsettled_positions {
-                decision = decider::Decision::Pass("max_unsettled_positions".into());
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        self.account.write().await.reset_daily_if_needed(&today);
+        let account = self.account.read().await.clone();
+        let mut decision = decider::decide(&context, &account, &self.decider_config());
+        if matches!(decision, Decision::Trade { .. }) {
+            let tracker = self.settler.read().await;
+            if tracker.has_market(market.market_topic_id) {
+                decision = Decision::Pass("market_already_traded".into());
+            } else if tracker.pending_count() >= self.config.strategy.max_unsettled_positions {
+                decision = Decision::Pass("max_unsettled_positions".into());
             }
         }
         self.trade_log
-            .log_observation(&mkt.market_slug, btc_price, &decide_ctx, &decision)
+            .log_observation(&market, btc_price, &context, &decision)
             .await;
 
         match &decision {
-            decider::Decision::Pass(reason) => {
-                self.tui_state
-                    .write()
-                    .await
-                    .set_decision(format!("PASS: {reason}"));
-                let mut st = self.state.write().await;
-                let category =
-                    reason.trim_end_matches(|c: char| c.is_ascii_digit() || c == '%' || c == '_');
-                let prev_cat = st
-                    .last_no_trade_reason
-                    .trim_end_matches(|c: char| c.is_ascii_digit() || c == '%' || c == '_');
-                let changed = category != prev_cat;
-                if changed {
-                    st.last_no_trade_reason = reason.clone();
-                }
-                if changed {
-                    tracing::debug!(
-                        "[SKIP] {} | BTC=${:.0}",
-                        reason,
-                        btc_price.to_f64().unwrap_or(0.0)
-                    );
-                }
-            }
-            decider::Decision::Trade {
+            Decision::Pass(reason) => self.record_pass(reason, btc_price).await,
+            Decision::Trade {
                 direction,
                 edge,
-                payoff_ratio,
                 model_probability,
+                payoff_ratio,
                 entry_price,
+                size_usdt,
                 ..
             } => {
                 self.tui_state.write().await.set_decision(format!(
                     "TRADE {} p={:.1}% edge={:.1}%",
                     direction.as_str(),
-                    *model_probability * util::decimal("100"),
-                    *edge * util::decimal("100"),
+                    *model_probability * Decimal::from(100),
+                    *edge * Decimal::from(100),
                 ));
-
-                let fak_backoff_ms = self.config.risk.fak_backoff_ms as i64;
-                {
-                    let st = self.state.read().await;
-                    if st.fak_market_ms == settlement_ms
-                        && st.fak_rejections >= self.config.risk.max_fak_retries
-                    {
-                        return Ok(());
-                    }
-                    if st.last_fak_rejection_ms > 0 {
-                        let elapsed =
-                            chrono::Utc::now().timestamp_millis() - st.last_fak_rejection_ms;
-                        if elapsed < fak_backoff_ms {
-                            tracing::debug!(
-                                "[FAK] backoff {}ms remaining",
-                                fak_backoff_ms - elapsed
-                            );
-                            return Ok(());
-                        }
-                    }
-                }
-
-                let cheap_price = *entry_price;
-
                 tracing::info!(
-                    "[TRADE] {} @ {:.3} edge={:.0}% payoff={:.1}x BTC=${:.0}",
+                    "[TRADE] Binance {} @ {:.3} p={:.1}% edge={:.1}% BTC=${:.0}",
                     direction.as_str(),
-                    cheap_price,
-                    (*edge * util::decimal("100")).round_dp(0),
-                    payoff_ratio,
-                    btc_price.to_f64().unwrap_or(0.0),
+                    *entry_price,
+                    *model_probability * Decimal::from(100),
+                    *edge * Decimal::from(100),
+                    btc_price,
                 );
-
-                let order = self
+                match self
                     .executor
                     .execute(&ExecuteContext {
                         decision: &decision,
-                        token_yes: &mkt.token_yes,
-                        token_no: &mkt.token_no,
-                        settlement_time_ms: settlement_ms,
-                        btc_price: chainlink_tick.map(|tick| tick.price).unwrap_or(btc_price),
+                        market: &market,
+                        btc_price,
                     })
-                    .await;
-
-                if order.is_none() && self.config.trading.mode.is_live() {
-                    let mut st = self.state.write().await;
-                    st.last_fak_rejection_ms = chrono::Utc::now().timestamp_millis();
-                    if st.fak_market_ms != settlement_ms {
-                        st.fak_rejections = 0;
-                        st.fak_market_ms = settlement_ms;
+                    .await
+                {
+                    Ok(ExecutionOutcome::Filled(order)) => {
+                        let total_cost = order.total_cost();
+                        let balance = {
+                            let mut account = self.account.write().await;
+                            account.record_trade(total_cost);
+                            account.balance
+                        };
+                        let position = PendingPosition::from_filled(&market, order.clone());
+                        self.settler.write().await.add(position);
+                        if let Err(error) = self.settler.read().await.persist(&self.log_dir).await {
+                            tracing::error!(
+                                "[STATE] failed to persist Binance position: {error:#}"
+                            );
+                        }
+                        if self.config.trading.mode.is_paper() {
+                            util::write_balance(&self.log_dir, balance).await;
+                        }
+                        self.trade_log
+                            .log_entry(
+                                &market,
+                                &order,
+                                *edge,
+                                balance,
+                                remaining_ms,
+                                context.up_quote,
+                                context.down_quote,
+                                *payoff_ratio,
+                            )
+                            .await;
+                        self.tui_state.write().await.add_trade(TradeRow {
+                            time: Utc::now(),
+                            market_topic_id: market.market_topic_id.to_string(),
+                            direction: order.direction.as_str().to_string(),
+                            entry_price: order.entry_price,
+                            cost: total_cost,
+                            edge: *edge * Decimal::from(100),
+                            result: "PENDING".into(),
+                            pnl: None,
+                        });
                     }
-                    st.fak_rejections += 1;
-                    let max = self.config.risk.max_fak_retries;
-                    if st.fak_rejections >= max {
-                        tracing::warn!(
-                            "[EXEC] {} FAK rejections, giving up on this market window",
-                            st.fak_rejections
+                    Ok(ExecutionOutcome::AwaitingReconciliation { order_id }) => {
+                        self.settler
+                            .write()
+                            .await
+                            .add(PendingPosition::awaiting_reconciliation(
+                                &market,
+                                *direction,
+                                *size_usdt,
+                                order_id.clone(),
+                                btc_price,
+                            ));
+                        if let Err(error) = self.settler.read().await.persist(&self.log_dir).await {
+                            tracing::error!(
+                                "[STATE] failed to persist uncertain Binance order: {error:#}"
+                            );
+                        }
+                        self.state.write().await.execution_halted = true;
+                        self.tui_state
+                            .write()
+                            .await
+                            .set_decision("HALTED: Binance order awaiting reconciliation".into());
+                        tracing::error!(
+                            "[EXEC] Binance order {} accepted but fill status is unknown; entries halted",
+                            order_id
                         );
                     }
-                }
-
-                if let Some(order) = order {
-                    {
-                        let mut acc = self.account.write().await;
-                        let today = Utc::now().format("%Y-%m-%d").to_string();
-                        acc.reset_daily_if_needed(&today);
-                        acc.record_trade(order.cost);
+                    Ok(ExecutionOutcome::Unfilled) => {
+                        self.tui_state
+                            .write()
+                            .await
+                            .set_decision("PASS: Binance FOK unfilled".into());
                     }
-
-                    {
-                        let mut settler = self.settler.write().await;
-                        settler.add_position(PendingPosition {
-                            direction: order.direction,
-                            size_usdc: order.size_usdc,
-                            entry_price: order.entry_price,
-                            filled_shares: order.filled_shares,
-                            cost: order.cost,
-                            settlement_time_ms: order.settlement_time_ms,
-                            entry_btc_price: order.entry_btc_price,
-                            condition_id: Arc::clone(&mkt.condition_id),
-                            market_slug: Arc::clone(&mkt.market_slug),
-                        });
-                        if let Err(e) = settler.persist(&self.log_dir).await {
-                            tracing::error!("[STATE] Failed to persist pending position: {}", e);
+                    Err(error) => {
+                        if self.config.trading.mode.is_live() {
+                            self.state.write().await.execution_halted = true;
+                            self.tui_state
+                                .write()
+                                .await
+                                .set_decision("HALTED: Binance execution error".into());
+                            tracing::error!(
+                                "[EXEC] Binance live execution error; entries halted for safety: {error:#}"
+                            );
+                        } else {
+                            tracing::warn!("[EXEC] Binance paper execution error: {error:#}");
                         }
                     }
-
-                    self.tui_state.write().await.add_trade(TradeRow {
-                        time: Utc::now(),
-                        direction: order.direction.as_str().to_string(),
-                        entry_price: order.entry_price,
-                        cost: order.cost,
-                        edge: (*edge * util::decimal("100")).round_dp(1),
-                        result: "PENDING".to_string(),
-                        pnl: None,
-                    });
-
-                    let bal = self.account.read().await.balance;
-                    util::write_balance(&self.log_dir, bal).await;
-
-                    self.trade_log
-                        .log_entry(
-                            order.direction.as_str(),
-                            &order.order_id,
-                            order.entry_price,
-                            order.cost,
-                            (*edge * util::decimal("100")).round_dp(1),
-                            bal,
-                            remaining_ms,
-                            poly_yes_dec,
-                            poly_no_dec,
-                            *payoff_ratio,
-                        )
-                        .await;
                 }
             }
         }
-
-        // Account stats are updated at the top of tick() so they show
-        // immediately on startup, even during buffer_filling or idle states.
-
         Ok(())
     }
 
+    async fn idle(&self, reason: &str, detail: &str) {
+        self.tui_state
+            .write()
+            .await
+            .set_decision(format!("IDLE: {reason}"));
+        self.state.write().await.log_idle_change(reason, detail);
+    }
+
+    async fn record_pass(&self, reason: &str, btc_price: Decimal) {
+        self.tui_state
+            .write()
+            .await
+            .set_decision(format!("PASS: {reason}"));
+        let mut state = self.state.write().await;
+        let category = reason.trim_end_matches(|character: char| {
+            character.is_ascii_digit() || character == '%' || character == '_' || character == '.'
+        });
+        let previous = state
+            .last_no_trade_reason
+            .trim_end_matches(|character: char| {
+                character.is_ascii_digit()
+                    || character == '%'
+                    || character == '_'
+                    || character == '.'
+            });
+        if category != previous {
+            state.last_no_trade_reason = reason.to_string();
+            tracing::debug!("[SKIP] {reason} | BTC=${btc_price:.0}");
+        }
+    }
+
     async fn refresh_market(&self) {
-        match self.discovery.discover().await {
-            Ok(active) => {
-                tracing::debug!(
-                    "[MKT] {} ends {} cid={}",
-                    active.market.slug,
-                    active.end_date,
-                    &active.condition_id.get(..8).unwrap_or(&active.condition_id)
+        match self
+            .prediction
+            .discover_active_market(Utc::now().timestamp_millis())
+            .await
+        {
+            Ok(market) => {
+                tracing::info!(
+                    "[MKT] Binance Prediction {} topic={} ends={}",
+                    market.slug,
+                    market.market_topic_id,
+                    market.end_ms,
                 );
-                *self.market_state.write().await = MarketState {
-                    token_yes: active.token_id_yes.into(),
-                    token_no: active.token_id_no.into(),
-                    condition_id: active.condition_id.into(),
-                    market_slug: active.market.slug.into(),
-                    settlement_ms: active.end_date.timestamp_millis(),
-                };
+                self.market_state.write().await.active = Some(market);
             }
-            Err(e) => {
-                tracing::warn!("[MKT] discovery failed: {}", e);
-            }
+            Err(error) => tracing::warn!("[MKT] Binance Prediction discovery failed: {error:#}"),
         }
     }
 }

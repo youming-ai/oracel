@@ -13,7 +13,7 @@ use tokio::sync::RwLock;
 
 use crate::data::binance::BinanceClient;
 
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, MathematicalOps};
 
 /// Uniform ticker update shared across all price source backends.
 #[derive(Debug, Clone, Copy)]
@@ -91,6 +91,44 @@ impl PriceSource {
             return None;
         }
         Some((latest.price - old.price) / old.price * Decimal::from(100))
+    }
+
+    /// Estimate one-second realized volatility from Binance BTCUSDT returns.
+    /// Gaps are normalized by elapsed time, so reconnects do not inflate sigma.
+    pub async fn realized_sigma_per_second(
+        &self,
+        lookback_secs: u64,
+        min_samples: usize,
+    ) -> Option<Decimal> {
+        let buffer = self.buffer.read().await;
+        let latest = buffer.back()?;
+        let lookback_ms = i64::try_from(lookback_secs).ok()?.saturating_mul(1_000);
+        let cutoff_ms = latest.timestamp_ms.saturating_sub(lookback_ms);
+        let ticks: Vec<_> = buffer
+            .iter()
+            .filter(|tick| tick.timestamp_ms >= cutoff_ms)
+            .collect();
+        if ticks.len() <= min_samples {
+            return None;
+        }
+        let mut squared_returns = Decimal::ZERO;
+        let mut elapsed_ms = 0_i64;
+        let mut samples = 0_usize;
+        for pair in ticks.windows(2) {
+            let interval_ms = pair[1].timestamp_ms.saturating_sub(pair[0].timestamp_ms);
+            if pair[0].price <= Decimal::ZERO || interval_ms <= 0 {
+                continue;
+            }
+            let price_return = (pair[1].price - pair[0].price) / pair[0].price;
+            squared_returns += price_return * price_return;
+            elapsed_ms = elapsed_ms.saturating_add(interval_ms);
+            samples += 1;
+        }
+        if samples < min_samples || elapsed_ms <= 0 {
+            return None;
+        }
+        let elapsed_seconds = Decimal::from(elapsed_ms) / Decimal::from(1_000);
+        (squared_returns / elapsed_seconds).sqrt()
     }
 
     pub async fn start(&self, shutdown: Arc<AtomicBool>) -> PriceSourceHandles {

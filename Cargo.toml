@@ -1,26 +1,30 @@
 [package]
-name = "polymarket-5m-bot"
+name = "binance-5m-bot"
 version = "0.3.0"
 edition = "2021"
-description = "Contrarian trading bot for Polymarket BTC 5-minute markets"
+description = "Binance Prediction BTC five-minute value-momentum trading bot"
 license = "MIT"
-default-run = "polybot"
+default-run = "binance-5m-bot"
 
 [[bin]]
-name = "polybot"
+name = "binance-5m-bot"
 path = "src/main.rs"
 
 [[bin]]
-name = "polybot-tools"
+name = "binance-5m-tools"
 path = "src/cli.rs"
 
 [lib]
-name = "polymarket_5m_bot"
+name = "binance_5m_bot"
 path = "src/lib.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+url = "2"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -34,8 +38,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 futures-util = "0.3"
 rust_decimal = { version = "1", features = ["maths", "serde", "serde-with-float"] }
 binance-sdk = { version = "61.0.0", default-features = false, features = ["rustls-tls", "w3w_prediction"] }
-polymarket-client-sdk = { version = "0.4", features = ["clob", "ctf"] }
-alloy = { version = "1.6", default-features = false, features = ["signer-local", "signers", "contract", "providers", "provider-http", "transports", "transport-http"] }
 dotenvy = "0.15"
 secrecy = "0.10"
 rustls = { version = "0.23", features = ["ring"] }
@@ -45,14 +47,6 @@ crossterm = "0.29"
 [dev-dependencies]
 tempfile = "3"
 
-# Temporary upstream compatibility patches:
-# - alloy-primitives and syn-solidity use maintained `pastey` instead of `paste`.
-# - ruint drops unused legacy ark-ff 0.3/0.4/0.5 integrations that pull
-#   unmaintained transitive macros.
-[patch.crates-io]
-alloy-primitives = { path = "vendor/alloy-primitives" }
-ruint = { path = "vendor/ruint" }
-syn-solidity = { path = "vendor/syn-solidity" }
 
 [profile.release]
 opt-level = 3

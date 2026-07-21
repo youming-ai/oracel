@@ -1,167 +1,165 @@
-# Trading Flow
+# Binance Prediction Trading Flow
 
-Paper and live mode share market data, probability modeling, risk gates, position persistence, and
-settlement. Only order submission, balance source, and redemption differ.
+Both Paper and Live mode use Binance data, the same decision model, risk gates, persisted state, and
+settlement flow. Only fill simulation versus authenticated order submission differs.
 
 ## End-to-end flow
 
 ```text
 Startup
-  ├─ load and validate config.toml
-  ├─ select logs/paper or logs/live
-  ├─ initialize Binance, Chainlink RTDS, Gamma, and CLOB
-  ├─ restore balance and pending_positions.json
-  └─ live: authenticate CLOB and initialize Polygon clients
+  ├─ load config.toml and Binance API credentials from .env
+  ├─ validate Binance Prediction settings and Paper/Live guardrails
+  ├─ select logs/binance/paper or logs/binance/live
+  ├─ initialize Binance BTCUSDT WebSocket and Prediction REST client
+  ├─ Paper: restore simulated balance
+  ├─ Live: select Prediction Wallet and query configured USDT payment balance
+  └─ restore pending_positions.json
         │
         ▼
 Background data
-  ├─ Chainlink RTDS ─────────► authoritative BTC/USD buffer
-  ├─ Binance WebSocket ──────► low-latency BTCUSDT buffer
-  └─ Gamma discovery ────────► market IDs, tokens, slug, and expiry
+  ├─ Binance BTCUSDT WebSocket ───► rolling spot-price buffer
+  └─ Binance Prediction REST ─────► active market, reference price, outcome tokens, books
         │
         ▼
-Trading tick
-  ├─ require warm and fresh Binance data
-  ├─ identify exact Chainlink opening/current values
-  ├─ estimate realized volatility and normalized oracle distance
-  ├─ fetch both CLOB order books and walk asks for the fixed-USDC amount
-  ├─ estimate UP/DOWN probability and apply value, momentum, liquidity, and risk gates
-  ├─ append the evaluation to observations.csv
-  └─ Paper fill or value-capped live FAK
+One-second trading tick
+  ├─ require warm, fresh BTCUSDT buffer
+  ├─ require active Binance BTC five-minute market
+  ├─ fetch UP and DOWN Prediction order books concurrently
+  ├─ calculate volatility, normalized move, probability, and net edge
+  ├─ write every evaluation to observations.csv
+  ├─ enforce market/position/risk limits
+  └─ Paper fill or Binance MARKET/FOK order
         │
         ▼
 Position state
-  ├─ deduct actual cost
-  ├─ append ENTRY to trades.csv
-  └─ atomically persist pending_positions.json
+  ├─ append ENTRY to trades.csv after a confirmed fill
+  ├─ atomically persist pending_positions.json
+  └─ accepted-but-unconfirmed live order → persist + halt new entries
         │
         ▼
 Settlement task
-  ├─ poll Gamma after expiry until officially resolved
-  ├─ calculate payout from filled shares
-  ├─ append WIN/LOSS and persist balance/positions
-  └─ live win: attempt on-chain CTF redemption
+  ├─ reconcile any accepted live order through Binance order history
+  ├─ Paper: read official Binance market end price
+  ├─ Live: read Binance settled-position history and actual PnL
+  ├─ append WIN/LOSS and outcomes.csv rows
+  └─ Live winner: submit Binance Prediction redeem request
 ```
 
-## Data components
+## Components
 
 | Component | Responsibility |
 | --- | --- |
-| `data::chainlink::ChainlinkSource` | RTDS reconnect loop, authoritative history, opening price, realized volatility |
-| `pipeline::price_source::PriceSource` | Binance buffer and 15s/30s trend calculation |
-| `data::polymarket::PolymarketClient` | Full CLOB books and fixed-USDC executable buy quotes |
-| `data::market_discovery::MarketDiscovery` | Gamma market rotation and official resolution inference |
-| `MarketState` | Current token IDs, condition, slug, and expiry |
-| `AccountState` | Balance, PnL, W/L counters, and rolling outcomes |
-| `Settler` | Unresolved positions keyed by condition ID |
-| `TradeLog` | Accounting ledger plus model-observation dataset |
+| `data::binance::BinanceClient` | BTCUSDT ticker WebSocket and reconnect loop |
+| `pipeline::price_source::PriceSource` | Rolling spot ticks, trend, and realized volatility |
+| `data::binance_prediction::BinancePredictionClient` | Prediction wallet, market discovery, books, quotes, orders, positions, settlement, redeem |
+| `MarketState` | Active Binance Prediction topic, token IDs, reference price, expiry |
+| `pipeline::decider` | Deterministic Decimal-only probability and risk decisions |
+| `pipeline::executor` | Paper fill or model-checked Binance `MARKET/FOK` execution |
+| `pipeline::settler` | Atomic persistence of accepted orders and open positions |
+| `TradeLog` | Accounting ledger plus model observations/outcome labels |
 
-Shared state uses `Arc<RwLock<_>>`; shutdown uses a shared `AtomicBool`.
+Shared state is protected by `Arc<RwLock<_>>`; all background work observes one `AtomicBool`
+shutdown flag.
 
-## Deterministic decision boundary
+## Binance market discovery
 
-`bot.rs` performs network I/O and constructs a context. `pipeline/decider.rs` remains deterministic:
+The client combines the Binance Prediction market list and BTC semantic search, then verifies full
+market detail before accepting a candidate:
+
+- `symbol == BTCUSDT`
+- `variantData.type == CRYPTO_UP_DOWN`
+- `variantData.priceFeedProvider == BINANCE`
+- `variantData.priceFeedSymbol == BTCUSDT`
+- duration is within one minute of the configured 300-second interval
+- the current time falls in its start/end interval
+- one active, unambiguous UP token and one active, unambiguous DOWN token exist
+
+The final condition matters: the bot refuses a market if Binance's response does not make its outcome
+mapping unambiguous. It never guesses token direction.
+
+## Decision boundary
+
+`bot.rs` owns I/O. `pipeline::decider` is deterministic and has no network calls:
 
 ```text
 DecideContext + AccountState + DeciderConfig
-    -> Decision::Pass(reason)
-    -> Decision::Trade {
-         direction,
-         model_probability,
-         entry_price,
-         order_limit_price,
-         edge,
-         size
-       }
+  → Pass(reason)
+  → Trade(direction, probability, effective entry price, maximum acceptable price, size)
 ```
 
-The decider contains Decimal-only probability math and no network calls. Paper and live therefore
-make the same decision from the same inputs.
+The context contains the Prediction market opening/reference price, current Binance spot price,
+volatility, 15s/30s spot trends, and executable books. Paper and Live therefore make identical
+strategy decisions.
 
-## CLOB quote boundary
+## Order-book and quote boundary
 
-For each outcome, `fetch_buy_quote`:
+For each token, `fetch_buy_quote`:
 
-1. fetches the complete order-book summary;
+1. requests the official Binance Prediction order book;
 2. sorts asks from cheapest to most expensive;
-3. walks enough levels to spend the configured fixed-USDC amount;
-4. calculates effective average price and the worst required level;
-5. reports selected-side spread, best-ask notional, and book timestamp.
+3. walks enough levels to spend the fixed USDT amount;
+4. calculates weighted effective price, worst required level, selected-side spread, and top-level
+   depth;
+5. rejects an empty or too-shallow book.
 
-A book without enough total asks returns an error. The decider separately enforces freshness,
-selected-side spread, top-level depth, and model value.
+For Live execution the executor requests a Binance `MARKET` quote, verifies its token, wallet,
+amount, order type, slippage, expiry, and `minReceive` value against the model maximum, then sends a
+`MARKET/FOK` order. The order is not blindly retried.
 
-## Execution boundary
+## Live order reconciliation
 
-`pipeline/executor.rs` accepts the model's maximum value-preserving price.
+A live order acknowledgement is not treated as proof of a fill. The executor queries Binance order
+history for actual paid USDT, shares, and fees.
 
-- Paper records a complete fixed-USDC fill at the weighted executable quote.
-- Live rounds the model price cap down and submits a fixed-USDC FAK.
-- Live accounting uses CLOB-reported `making_amount` and `taking_amount` only.
-- Zero fills and rejected FAKs do not create positions.
+```text
+FILLED                → create an open position using actual amounts
+REJECTED/CANCELED/... → no position
+not visible in time   → persist AwaitingReconciliation and halt all new entries
+```
 
-There is no unconditional slippage multiplier.
+The settlement task keeps reconciling persisted uncertain orders. Restart recovery retains the halt
+until that state is resolved, preventing accidental duplicate exposure.
 
-## Position concurrency
-
-The condition ID is the uniqueness key, so the same market can never be entered twice. Up to
-`strategy.max_unsettled_positions` different conditions may remain unresolved. The default of two
-allows a delayed Gamma result without allowing duplicate exposure in one five-minute window.
-
-## Startup by mode
+## Settlement and redemption
 
 ### Paper
 
-- No private key or authenticated CLOB client.
-- Restores `logs/paper/balance` and `logs/paper/pending_positions.json`.
-- Uses live public market/oracle data and order-book depth.
+After expiry, the bot re-reads Binance market detail. Once the official `variantData.endPrice` is
+available, it compares it with `startPrice`:
+
+```text
+endPrice >= startPrice → UP
+endPrice <  startPrice → DOWN
+```
+
+The Paper payout is filled shares for a winning token and zero otherwise. Simulated market fee uses
+Binance's advertised `feeRateBps`.
 
 ### Live
 
-- Requires `PRIVATE_KEY` and successful CLOB authentication.
-- Queries Polygon USDC and initializes CTF redemption.
-- Requires `trading.allow_uncalibrated_model_live = true` while the baseline model remains
-  uncalibrated.
-
-Authentication, wallet derivation, or initial balance failure aborts startup.
-
-## Settlement
-
-Gamma remains the accounting source of truth. Resolution requires:
-
-1. `umaResolutionStatus` contains `resolved`;
-2. `closed` is true; and
-3. one outcome reaches `misc.resolution_price_threshold`.
-
-```text
-win:  payout = filled_shares; pnl = payout - actual_cost
-loss: payout = 0;             pnl = -actual_cost
-```
-
-Live accounting settlement and on-chain redemption are separate. Failed automatic redemption can be
-recovered with `polybot-tools`.
+The bot reads Binance settled-position history for its exact market topic and token. Binance-reported
+`isWinner`, `claimAmount`, and `pnl` are the accounting source of truth. A winning, unredeemed token
+is submitted to the Binance batch-redeem endpoint once; a failed recovery can be explicitly retried
+with `binance-5m-tools --redeem <token-id>`.
 
 ## Persistence and logs
 
 ```text
-logs/<mode>/
+logs/binance/<mode>/
 ├── bot.log.YYYY-MM-DD
-├── trades.csv                # entries and accounting settlements
-├── observations.csv          # every strategy evaluation after warm-up
-├── outcomes.csv              # official outcomes keyed by market slug for calibration
+├── trades.csv                # fill and settlement accounting
+├── observations.csv          # every model evaluation after warm-up
+├── outcomes.csv              # official labels keyed by Prediction market topic
 ├── balance                   # atomic replacement
 └── pending_positions.json    # atomic replacement and restart recovery
 ```
-
-A corrupt pending-position file fails startup rather than discarding exposure.
 
 ## Background tasks
 
 | Task | Default | Responsibility |
 | --- | ---: | --- |
-| Trading tick | 1s | Books, probability, decision, observation, execution |
-| Settlement | 15s | Gamma resolution, PnL, persistence, redemption |
-| Market refresh | 60s | Rotate active five-minute market |
-| Status | 10s | Runtime summary |
-| Binance WebSocket | continuous | Reconnect and ingest exchange ticks |
-| Chainlink RTDS | continuous | Reconnect and ingest authoritative ticks/history |
+| Trading tick | 1 second | Spot state, books, decision, observation, entry |
+| Market refresh | 15 seconds | Discover/rotate active Binance BTC five-minute market |
+| Settlement | 15 seconds | Reconcile orders, settle positions, redeem winners |
+| Status | 10 seconds | Runtime summary |
+| BTCUSDT WebSocket | Continuous | Reconnect and ingest Binance spot ticks |

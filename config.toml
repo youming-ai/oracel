@@ -1,58 +1,60 @@
-# Polymarket 5m Bot Configuration
-# Durations in milliseconds unless noted (secs suffix).
+# Binance Prediction BTC 5-minute Bot Configuration
+# API credentials belong in .env, never in this file.
 
 [trading]
-mode = "paper"                      # "paper" or "live"
-paper_starting_balance = 100.0
-allow_uncalibrated_model_live = false # must be explicitly acknowledged for live mode
+mode = "paper"                       # "paper" or "live"
+paper_starting_balance = 100.0        # USDT
+allow_uncalibrated_model_live = false # explicit acknowledgement required for live
 
-[polyclob]
-gamma_api_url = "https://gamma-api.polymarket.com"
-gamma_http_secs = 10
+[binance_prediction]
+# Leave wallet fields unset when exactly one Prediction Wallet is registered.
+# Set both fields when the account has multiple wallets.
+# wallet_id = ""
+# wallet_address = ""
+payment_account = "spot"             # "spot" or "funding"
+funding_source = "cex"                # "cex" or "mpc"
+api_timeout_ms = 10000
+market_duration_ms = 300000            # BTC Prediction five-minute window
+market_discovery_limit = 50
+quote_slippage_bps = 25                # Market/FOK quote tolerance: 0.25%
+order_reconciliation_attempts = 5
+order_reconciliation_delay_ms = 1000
 
 [strategy]
-position_size_usdc = 1.0            # fixed-USDC order size
-min_entry_ttl_ms = 75000            # do not enter in the final 75s
-max_entry_ttl_ms = 150000           # observe the first half of each window
-min_normalized_move = 0.60          # minimum oracle distance / remaining volatility
-min_net_edge = 0.05                 # required edge after conservative buffers
-model_uncertainty = 0.03            # probability-model safety margin
-fee_buffer = 0.02                   # conservative fee/cost probability margin
-max_spread = 0.03                   # selected outcome bid/ask spread
-min_depth_multiple = 5.0            # best-ask notional / position size
-volatility_lookback_secs = 900      # Chainlink realized-volatility lookback
-min_volatility_samples = 120        # observations required before modeling
-oracle_stale_threshold_ms = 5000    # maximum Chainlink tick age
+position_size_usdt = 2.0               # Binance MARKET/FOK minimum is about 1.5 USDT
+min_entry_ttl_ms = 75000               # no entry in final 75 seconds
+max_entry_ttl_ms = 150000              # observe first half of each window
+min_normalized_move = 0.60
+min_net_edge = 0.05
+model_uncertainty = 0.03
+fee_buffer = 0.02
+max_spread = 0.03
+min_depth_multiple = 5.0
+volatility_lookback_secs = 900
+min_volatility_samples = 120
 order_book_stale_threshold_ms = 8000
-max_unsettled_positions = 2         # tolerate delayed Gamma settlement
+max_unsettled_positions = 2
 circuit_breaker_window = 50
 circuit_breaker_min_win_rate = 0.05
 
 [risk]
-max_fak_retries = 3                 # FAK retries per market window
-fak_backoff_ms = 1000               # backoff after FAK rejection (ms)
+daily_loss_limit_usdt = 5.0
 max_consecutive_losses = 3
-loss_cooldown_ms = 1800000           # 30-minute pause after the loss streak trips
+loss_cooldown_ms = 1800000             # 30 minutes
 max_trades_per_day = 8
-daily_loss_limit_usdc = 5.0         # 5% of the default $100 paper balance
 
 [polling]
-signal_interval_ms = 1000           # main tick interval (ms)
-status_interval_ms = 10000          # status log interval (ms)
-market_refresh_secs = 60            # market discovery refresh (s)
-settlement_check_secs = 15          # settlement poll interval (s)
+signal_interval_ms = 1000
+status_interval_ms = 10000
+market_refresh_secs = 15
+settlement_check_secs = 15
 
 [price_source]
 symbol = "BTCUSDT"
-stale_threshold_ms = 3000           # max Binance tick age before skipping (ms)
-buffer_max = 1000                   # max price ticks retained
-buffer_min_ticks = 60               # min ticks before trading starts
-
-[redeem]
-max_retries = 10
+stale_threshold_ms = 3000
+buffer_max = 2000
+buffer_min_ticks = 120
 
 [misc]
 trade_log_flush_secs = 30
-shutdown_timeout_secs = 5           # graceful shutdown wait (s)
-market_search_windows = 5           # future 5m windows to search
-resolution_price_threshold = 0.999  # winning resolution threshold
+shutdown_timeout_secs = 10

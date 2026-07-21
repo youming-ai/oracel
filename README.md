@@ -1,38 +1,69 @@
-# Polymarket BTC 5m Bot
+# Binance Prediction BTC 5m Bot
 
-Oracle-aligned value-momentum trader for Polymarket BTC five-minute UP/DOWN markets. Chainlink
-defines the opening/current reference, Binance confirms low-latency momentum, and executable CLOB
-order books determine whether a trade has enough conservative edge.
+A Paper-first Binance Prediction trader for BTC five-minute UP/DOWN markets.
 
-The bot has exactly two modes:
+- **Binance Prediction API** discovers markets, reads order books, requests quotes, places orders,
+  reconciles fills, reads settlement, and redeems winners.
+- **Binance BTCUSDT WebSocket** provides the low-latency spot price, momentum, and realized
+  volatility used by the model.
+- No third-party prediction exchange, oracle feed, EVM RPC, CLOB, or private-key wallet integration
+  is used.
 
-- **paper** — simulates fills and PnL without a private key
-- **live** — submits real FAK orders and redeems winning CTF positions
+The bot has two modes:
 
-See [Trading flow](docs/ARCHITECTURE.md) and [Strategy](docs/STRATEGY.md) for the authoritative
-behavior. `config.toml` is the authoritative configuration example.
+- **paper** — uses live Binance market data and books, simulates Binance fees/fills, and settles
+  from the official Binance Prediction market end price.
+- **live** — sends real Binance Prediction `MARKET/FOK` orders through the authenticated API and
+  redeems winning tokens through the same API.
+
+Read [Architecture](docs/ARCHITECTURE.md) and [Strategy](docs/STRATEGY.md) before running it.
+
+## Prerequisites
+
+1. A Binance account and API key allowed to access Binance Web3 Wallet Prediction endpoints.
+2. `BINANCE_API_KEY` and `BINANCE_API_SECRET` in `.env`.
+3. For live mode: a registered Binance Prediction Wallet and an enabled USDT Spot or Funding payment
+   account.
+4. Regional eligibility for Binance Prediction Trading.
+
+Create `.env` from `.env.example`; never commit the real file.
+
+```env
+BINANCE_API_KEY=
+BINANCE_API_SECRET=
+
+# Optional only if more than one Prediction Wallet is registered
+BINANCE_PREDICTION_WALLET_ID=
+BINANCE_PREDICTION_WALLET_ADDRESS=
+```
+
+Validate access before running the bot:
+
+```bash
+cargo run --release --bin binance-5m-tools -- --check
+```
+
+This command reads wallets, the configured USDT payment balance, and the active BTC five-minute
+market. It never places an order.
 
 ## Quick start
 
 ```bash
-# Validate, build, and test
 cargo build --locked
 cargo test --locked
 
-# Paper mode is the checked-in default
-cargo run --release --bin polybot
+# The checked-in configuration is Paper mode.
+cargo run --release --bin binance-5m-bot
+
+# Service/log-only operation
+BINANCE_5M_HEADLESS=1 cargo run --release --bin binance-5m-bot
 ```
 
-The terminal dashboard starts automatically. Press `q` or `Esc` to stop. For a service or log-only
-run:
-
-```bash
-POLYBOT_HEADLESS=1 cargo run --release --bin polybot
-```
+Press `q` or `Esc` to stop the dashboard.
 
 ## Live mode
 
-The probability baseline is intentionally Paper-first. Live mode requires both settings:
+Live mode is deliberately guarded while the probability baseline remains uncalibrated:
 
 ```toml
 [trading]
@@ -40,25 +71,24 @@ mode = "live"
 allow_uncalibrated_model_live = true
 ```
 
-Do not acknowledge this guard until the model has been calibrated from the observation dataset.
+Set both fields only after you have validated Binance API access and reviewed the Paper dataset.
+The default live order is a `$2` USDT `MARKET/FOK` order because Binance Prediction market orders
+require roughly `$1.50` minimum input.
 
-Create `.env` from `.env.example` and set `PRIVATE_KEY`. `ALCHEMY_KEY` is optional; without it the
-bot uses a public Polygon RPC endpoint.
+Before live trading:
 
-Before enabling live mode:
-
-1. Collect at least 2,000 windows and 200 realistic Paper fills.
-2. Validate walk-forward calibration, net PnL after costs, and drawdown.
-3. Verify the wallet address, USDC balance, approvals, and Polymarket access.
-4. Keep `position_size_usdc` at `$1` for initial live validation.
-5. Confirm `logs/live/` is writable and backed up.
+1. Run `binance-5m-tools --check` successfully.
+2. Confirm the returned wallet is the intended Prediction Wallet.
+3. Confirm `payment_account` (`spot` or `funding`) and `funding_source` (`cex` or `mpc`).
+4. Collect and evaluate Paper observations and outcomes.
+5. Keep `position_size_usdt` at the minimum safe size initially.
 
 ## Runtime files
 
-Mode-specific files prevent paper state from contaminating live state:
+Exchange-specific paths prevent old or unrelated state from being reused:
 
 ```text
-logs/
+logs/binance/
 ├── paper/
 │   ├── bot.log.YYYY-MM-DD
 │   ├── trades.csv
@@ -70,29 +100,28 @@ logs/
     └── ...
 ```
 
-Pending positions and balances are written atomically and restored after restart.
+`balance` and `pending_positions.json` use write-to-temp plus rename. Pending entries include
+accepted-but-not-yet-visible live orders so an uncertain submission cannot be silently retried.
 
-## Data sources
+## Data and execution sources
 
-| Source | Purpose |
+| Binance service | Purpose |
 | --- | --- |
-| Polymarket Chainlink RTDS | Authoritative BTC/USD opening/current values and volatility |
-| Binance WebSocket | Low-latency BTCUSDT momentum confirmation |
-| Polymarket Gamma API | Active-market discovery and official resolution |
-| Polymarket CLOB | Full order books, executable quote depth, and live FAK execution |
-| Polygon RPC | Live USDC balance and CTF redemption |
+| BTCUSDT WebSocket | Current spot price, 15s/30s momentum, realized volatility |
+| Prediction Market Detail | Five-minute reference/open price, official end price, outcome token mapping |
+| Prediction Order Book | Executable bids, asks, weighted fill price, and depth |
+| Prediction Get Quote / Place Order | Value-checked `MARKET/FOK` live execution |
+| Prediction Position APIs | Fill reconciliation and official live PnL/settlement |
+| Prediction Redeem API | Claim winning tokens |
 
 ## Tools
 
 ```bash
-# Derive CLOB credentials without writing secrets to disk
-cargo run --release --bin polybot-tools -- --derive-keys
+# Inspect API access, wallet, balance, and current BTC market
+cargo run --release --bin binance-5m-tools -- --check
 
-# Redeem one resolved market
-cargo run --release --bin polybot-tools -- --redeem <market-slug>
-
-# Scan the last 24 hours for redeemable positions
-cargo run --release --bin polybot-tools -- --redeem-all
+# Explicitly submit one redemption recovery request
+cargo run --release --bin binance-5m-tools -- --redeem <prediction-token-id>
 ```
 
 ## Development checks
@@ -109,21 +138,19 @@ cargo audit
 
 ```text
 src/
-├── main.rs                 # startup, logging, TUI/headless mode
-├── bot.rs                  # orchestration and one-second trading tick
-├── config.rs               # paper/live configuration and validation
-├── tasks.rs                # market refresh, status, settlement, redemption
-├── trade_log.rs            # shared CSV writer
+├── main.rs                       # startup, logging, dashboard/headless mode
+├── bot.rs                        # one-second Binance trading loop
+├── config.rs                     # Binance paper/live configuration and validation
+├── tasks.rs                      # market refresh, reconciliation, settlement, redemption
+├── trade_log.rs                  # accounting and model CSV writers
 ├── data/
-│   ├── binance.rs          # low-latency exchange WebSocket
-│   ├── chainlink.rs        # authoritative Polymarket RTDS feed
-│   ├── market_discovery.rs # Gamma discovery and resolution
-│   └── polymarket.rs       # CLOB and Polygon clients
+│   ├── binance.rs                # BTCUSDT WebSocket
+│   └── binance_prediction.rs     # official Prediction REST API
 ├── pipeline/
-│   ├── price_source.rs
-│   ├── decider.rs
-│   ├── executor.rs
-│   └── settler.rs
+│   ├── price_source.rs           # rolling spot price and volatility buffer
+│   ├── decider.rs                # deterministic probability/value gates
+│   ├── executor.rs               # Paper or Binance MARKET/FOK execution
+│   └── settler.rs                # persisted Binance order/position state
 └── tui/
 ```
 
@@ -131,9 +158,9 @@ src/
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `PRIVATE_KEY` | Live only | CLOB signing and CTF redemption |
-| `ALCHEMY_KEY` | No | Reliable Polygon RPC |
+| `BINANCE_API_KEY` | Yes | Signed Binance Prediction API access |
+| `BINANCE_API_SECRET` | Yes | Request signing secret |
+| `BINANCE_PREDICTION_WALLET_ID` | Live/multiple wallets | Explicit Prediction Wallet selection |
+| `BINANCE_PREDICTION_WALLET_ADDRESS` | Live/multiple wallets | Explicit Prediction Wallet selection |
 | `RUST_LOG` | No | Log level, for example `debug` |
-| `POLYBOT_HEADLESS` | No | Disable terminal UI when set |
-
-Never commit `.env`, private keys, API credentials, or runtime logs.
+| `BINANCE_5M_HEADLESS` | No | Disable terminal dashboard when set |
