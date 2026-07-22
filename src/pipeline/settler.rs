@@ -1,43 +1,109 @@
-//! Stage 5: Settler — track pending positions, settle at expiry.
+//! Binance Prediction position tracking, reconciliation, and settlement state.
 
-use chrono::Utc;
-use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::path::Path;
-use std::sync::Arc;
 
 use anyhow::Context;
+use chrono::Utc;
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 
+use crate::data::binance_prediction::ActivePredictionMarket;
 use crate::pipeline::decider::Direction;
+use crate::pipeline::executor::OrderResult;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionState {
+    AwaitingReconciliation,
+    Open,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingPosition {
+    pub execution_state: ExecutionState,
+    pub market_topic_id: i64,
+    pub market_id: i64,
+    pub token_id: String,
+    pub market_slug: String,
     pub direction: Direction,
-    pub size_usdc: Decimal,
+    pub order_id: String,
+    pub requested_usdt: Decimal,
     pub entry_price: Decimal,
     pub filled_shares: Decimal,
-    pub cost: Decimal,
+    pub trade_cost: Decimal,
+    pub fee: Decimal,
     pub settlement_time_ms: i64,
     pub entry_btc_price: Decimal,
-    pub condition_id: Arc<str>,
-    pub market_slug: Arc<str>,
+}
+
+impl PendingPosition {
+    pub fn from_filled(market: &ActivePredictionMarket, order: OrderResult) -> Self {
+        let token = market.token(order.direction);
+        Self {
+            execution_state: ExecutionState::Open,
+            market_topic_id: market.market_topic_id,
+            market_id: token.market_id,
+            token_id: token.token_id.clone(),
+            market_slug: market.slug.clone(),
+            direction: order.direction,
+            order_id: order.order_id,
+            requested_usdt: order.requested_usdt,
+            entry_price: order.entry_price,
+            filled_shares: order.filled_shares,
+            trade_cost: order.trade_cost,
+            fee: order.fee,
+            settlement_time_ms: order.settlement_time_ms,
+            entry_btc_price: order.entry_btc_price,
+        }
+    }
+
+    pub fn awaiting_reconciliation(
+        market: &ActivePredictionMarket,
+        direction: Direction,
+        requested_usdt: Decimal,
+        order_id: String,
+        entry_btc_price: Decimal,
+    ) -> Self {
+        let token = market.token(direction);
+        Self {
+            execution_state: ExecutionState::AwaitingReconciliation,
+            market_topic_id: market.market_topic_id,
+            market_id: token.market_id,
+            token_id: token.token_id.clone(),
+            market_slug: market.slug.clone(),
+            direction,
+            order_id,
+            requested_usdt,
+            entry_price: Decimal::ZERO,
+            filled_shares: Decimal::ZERO,
+            trade_cost: Decimal::ZERO,
+            fee: Decimal::ZERO,
+            settlement_time_ms: market.end_ms,
+            entry_btc_price,
+        }
+    }
+
+    pub fn total_cost(&self) -> Decimal {
+        self.trade_cost + self.fee
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct SettlementResult {
+    pub market_topic_id: i64,
+    pub market_slug: String,
+    pub token_id: String,
     pub direction: Direction,
     pub payout: Decimal,
     pub pnl: Decimal,
     pub won: bool,
-    pub condition_id: String,
-    pub market_slug: String,
     pub entry_btc_price: Decimal,
 }
 
 pub struct Settler {
-    /// condition_id -> PendingPosition for O(1) lookup
-    pending: HashMap<Arc<str>, PendingPosition>,
+    pending: HashMap<i64, PendingPosition>,
 }
 
 impl Default for Settler {
@@ -55,148 +121,158 @@ impl Settler {
 
     pub async fn load(log_dir: &str) -> anyhow::Result<Self> {
         let path = Path::new(log_dir).join("pending_positions.json");
-        let content = match tokio::fs::read(&path).await {
-            Ok(content) => content,
+        let bytes = match tokio::fs::read(&path).await {
+            Ok(bytes) => bytes,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Self::new()),
             Err(error) => return Err(error).context("failed to read pending position state"),
         };
         let positions: Vec<PendingPosition> =
-            serde_json::from_slice(&content).context("failed to parse pending position state")?;
-        let mut settler = Self::new();
+            serde_json::from_slice(&bytes).context("failed to parse pending position state")?;
+        let mut tracker = Self::new();
         for position in positions {
-            settler.add_position(position);
+            tracker.add(position);
         }
-        Ok(settler)
+        Ok(tracker)
     }
 
     pub async fn persist(&self, log_dir: &str) -> anyhow::Result<()> {
-        let path = Path::new(log_dir);
-        let tmp = path.join("pending_positions.json.tmp");
-        let dst = path.join("pending_positions.json");
-        let positions: Vec<&PendingPosition> = self.pending.values().collect();
-        let content = serde_json::to_vec_pretty(&positions)
-            .context("failed to serialize pending positions")?;
-        tokio::fs::write(&tmp, content)
+        let directory = Path::new(log_dir);
+        let temporary = directory.join("pending_positions.json.tmp");
+        let destination = directory.join("pending_positions.json");
+        let mut positions: Vec<_> = self.pending.values().collect();
+        positions.sort_by_key(|position| position.market_topic_id);
+        tokio::fs::write(
+            &temporary,
+            serde_json::to_vec_pretty(&positions)
+                .context("failed to serialize pending positions")?,
+        )
+        .await
+        .context("failed to write pending positions")?;
+        tokio::fs::rename(&temporary, &destination)
             .await
-            .context("failed to write pending position state")?;
-        tokio::fs::rename(&tmp, &dst)
-            .await
-            .context("failed to replace pending position state")?;
+            .context("failed to replace pending positions")?;
         Ok(())
     }
 
-    pub fn add_position(&mut self, pos: PendingPosition) {
-        if self.pending.contains_key(&pos.condition_id) {
+    pub fn add(&mut self, position: PendingPosition) {
+        if self.pending.contains_key(&position.market_topic_id) {
             tracing::warn!(
-                "[SETTLER] Attempted to add duplicate position for {}",
-                pos.condition_id
+                "[POSITION] duplicate Binance Prediction market {} ignored",
+                position.market_topic_id
             );
             return;
         }
-        self.pending.insert(Arc::clone(&pos.condition_id), pos);
+        self.pending.insert(position.market_topic_id, position);
     }
 
     pub fn pending_count(&self) -> usize {
         self.pending.len()
     }
 
-    pub fn has_condition(&self, condition_id: &str) -> bool {
-        self.pending.contains_key(condition_id)
+    pub fn has_market(&self, market_topic_id: i64) -> bool {
+        self.pending.contains_key(&market_topic_id)
     }
 
-    pub fn due_positions(&self) -> Vec<PendingPosition> {
-        let now = Utc::now().timestamp_millis();
+    pub fn awaiting_reconciliation(&self) -> Vec<PendingPosition> {
         self.pending
             .values()
-            .filter(|p| p.settlement_time_ms <= now)
+            .filter(|position| position.execution_state == ExecutionState::AwaitingReconciliation)
             .cloned()
             .collect()
     }
 
-    pub fn settle_by_slug(&mut self, slug: &str, won: bool) -> Option<SettlementResult> {
-        // Collect condition_ids of matching positions first
-        let matching_ids: Vec<Arc<str>> = self
-            .pending
+    pub fn due_positions(&self) -> Vec<PendingPosition> {
+        let now_ms = Utc::now().timestamp_millis();
+        self.pending
             .values()
-            .filter(|p| p.market_slug.as_ref() == slug)
-            .map(|p| Arc::clone(&p.condition_id))
-            .collect();
+            .filter(|position| {
+                position.execution_state == ExecutionState::Open
+                    && position.settlement_time_ms <= now_ms
+            })
+            .cloned()
+            .collect()
+    }
 
-        if matching_ids.is_empty() {
+    pub fn mark_filled(
+        &mut self,
+        market_topic_id: i64,
+        order: OrderResult,
+    ) -> Option<PendingPosition> {
+        let position = self.pending.get_mut(&market_topic_id)?;
+        if position.direction != order.direction
+            || order.filled_shares <= Decimal::ZERO
+            || order.trade_cost <= Decimal::ZERO
+        {
+            tracing::error!(
+                "[POSITION] Binance reconciliation mismatch for market {}",
+                market_topic_id
+            );
             return None;
         }
-
-        // Remove matching positions and collect them
-        let matching: Vec<PendingPosition> = matching_ids
-            .into_iter()
-            .filter_map(|id| self.pending.remove(&id))
-            .collect();
-
-        let combined = self.combine_positions(matching, slug);
-        Some(self.finish_settlement(combined, won))
+        position.execution_state = ExecutionState::Open;
+        position.entry_price = order.entry_price;
+        position.filled_shares = order.filled_shares;
+        position.trade_cost = order.trade_cost;
+        position.fee = order.fee;
+        position.order_id = order.order_id;
+        Some(position.clone())
     }
 
-    fn combine_positions(&self, positions: Vec<PendingPosition>, slug: &str) -> PendingPosition {
-        if positions.len() == 1 {
-            if let Some(position) = positions.into_iter().next() {
-                return position;
-            }
-            unreachable!("single-position combine must contain one position");
-        }
-
-        tracing::warn!(
-            "[SETTLER] Settling {} positions for {}",
-            positions.len(),
-            slug
-        );
-
-        let first = positions
-            .first()
-            .unwrap_or_else(|| unreachable!("combine_positions requires at least one position"));
-        PendingPosition {
-            direction: first.direction,
-            size_usdc: positions.iter().map(|p| p.size_usdc).sum(),
-            entry_price: {
-                let total_shares: Decimal = positions.iter().map(|p| p.filled_shares).sum();
-                if total_shares > Decimal::ZERO {
-                    positions.iter().map(|p| p.cost).sum::<Decimal>() / total_shares
-                } else {
-                    first.entry_price
-                }
-            },
-            filled_shares: positions.iter().map(|p| p.filled_shares).sum(),
-            cost: positions.iter().map(|p| p.cost).sum(),
-            settlement_time_ms: first.settlement_time_ms,
-            entry_btc_price: first.entry_btc_price,
-            condition_id: first.condition_id.clone(),
-            market_slug: first.market_slug.clone(),
-        }
+    pub fn remove_unfilled(&mut self, market_topic_id: i64) -> Option<PendingPosition> {
+        self.pending.remove(&market_topic_id)
     }
 
-    fn finish_settlement(&mut self, pos: PendingPosition, won: bool) -> SettlementResult {
+    pub fn settle_paper(
+        &mut self,
+        market_topic_id: i64,
+        winner: Direction,
+    ) -> Option<SettlementResult> {
+        let position = self.pending.remove(&market_topic_id)?;
+        debug_assert_eq!(position.execution_state, ExecutionState::Open);
+        let won = position.direction == winner;
         let payout = if won {
-            pos.filled_shares
+            position.filled_shares
         } else {
             Decimal::ZERO
         };
-        let pnl = payout - pos.cost;
+        let pnl = payout - position.total_cost();
+        Some(Self::settlement_result(position, won, payout, pnl))
+    }
 
+    pub fn settle_live(
+        &mut self,
+        market_topic_id: i64,
+        won: bool,
+        payout: Decimal,
+        pnl: Decimal,
+    ) -> Option<SettlementResult> {
+        let position = self.pending.remove(&market_topic_id)?;
+        debug_assert_eq!(position.execution_state, ExecutionState::Open);
+        Some(Self::settlement_result(position, won, payout, pnl))
+    }
+
+    fn settlement_result(
+        position: PendingPosition,
+        won: bool,
+        payout: Decimal,
+        pnl: Decimal,
+    ) -> SettlementResult {
         tracing::info!(
             "[SETTLED] {} {} stake={:.2} pnl={:+.2}",
             if won { "WIN" } else { "LOSS" },
-            pos.direction.as_str(),
-            pos.size_usdc.round_dp(2),
-            pnl.round_dp(2),
+            position.direction.as_str(),
+            position.total_cost(),
+            pnl,
         );
-
         SettlementResult {
-            direction: pos.direction,
+            market_topic_id: position.market_topic_id,
+            market_slug: position.market_slug,
+            token_id: position.token_id,
+            direction: position.direction,
             payout,
             pnl,
             won,
-            condition_id: pos.condition_id.to_string(),
-            market_slug: pos.market_slug.to_string(),
-            entry_btc_price: pos.entry_btc_price,
+            entry_btc_price: position.entry_btc_price,
         }
     }
 }
@@ -206,163 +282,92 @@ mod tests {
     use super::*;
     use crate::pipeline::test_helpers::d;
 
-    fn sample_pending() -> PendingPosition {
-        PendingPosition {
+    fn market() -> ActivePredictionMarket {
+        ActivePredictionMarket {
+            market_topic_id: 7,
+            vendor: "PREDICT_FUN".into(),
+            slug: "btc-five-minute-7".into(),
+            title: "BTC 5m".into(),
+            start_ms: 0,
+            end_ms: 1,
+            reference_price: d("64000"),
+            fee_rate_bps: 200,
+            up: crate::data::binance_prediction::MarketToken {
+                market_id: 42,
+                token_id: "up-token".into(),
+            },
+            down: crate::data::binance_prediction::MarketToken {
+                market_id: 42,
+                token_id: "down-token".into(),
+            },
+        }
+    }
+
+    fn order() -> OrderResult {
+        OrderResult {
+            order_id: "order".into(),
             direction: Direction::Up,
-            size_usdc: d("5.0"),
-            entry_price: d("0.20"),
-            filled_shares: d("25.00"),
-            cost: d("5.0"),
-            settlement_time_ms: 0,
-            entry_btc_price: d("70000"),
-            condition_id: "cid".into(),
-            market_slug: "btc-updown-5m-1".into(),
+            requested_usdt: d("2"),
+            entry_price: d("0.5"),
+            filled_shares: d("4"),
+            trade_cost: d("2"),
+            fee: d("0.04"),
+            settlement_time_ms: 1,
+            entry_btc_price: d("64000"),
         }
     }
 
     #[test]
-    fn test_settle_by_slug_win() {
-        let mut settler = Settler::new();
-        settler.add_position(sample_pending());
-
-        let result = settler.settle_by_slug("btc-updown-5m-1", true).unwrap();
-
+    fn settles_paper_using_filled_shares_and_fee_inclusive_cost() {
+        let mut tracker = Settler::new();
+        tracker.add(PendingPosition::from_filled(&market(), order()));
+        let result = tracker.settle_paper(7, Direction::Up).unwrap();
         assert!(result.won);
-        assert_eq!(result.payout, d("25.0"));
-        assert_eq!(result.pnl, d("20.0"));
-        assert_eq!(settler.pending_count(), 0);
+        assert_eq!(result.payout, d("4"));
+        assert_eq!(result.pnl, d("1.96"));
+        assert_eq!(tracker.pending_count(), 0);
     }
 
     #[test]
-    fn test_settlement_uses_filled_shares_for_payout() {
-        let mut settler = Settler::new();
-        let mut pos = sample_pending();
-        pos.filled_shares = d("24.99");
-        settler.add_position(pos);
-
-        let result = settler.settle_by_slug("btc-updown-5m-1", true).unwrap();
-
-        assert_eq!(result.payout, d("24.99"));
-        assert_eq!(result.pnl, d("19.99"));
-    }
-
-    #[test]
-    fn test_settle_by_slug_none_when_empty() {
-        let mut settler = Settler::new();
-        assert!(settler.settle_by_slug("nonexistent", true).is_none());
-    }
-
-    #[test]
-    fn test_add_position_prevents_duplicates() {
-        let mut settler = Settler::new();
-        let pos1 = sample_pending();
-        let mut pos2 = sample_pending();
-        pos2.size_usdc = d("10.0");
-
-        settler.add_position(pos1);
-        settler.add_position(pos2);
-
-        assert_eq!(settler.pending_count(), 1);
-    }
-
-    #[test]
-    fn test_settle_by_slug_removes_all_duplicates() {
-        let mut settler = Settler::new();
-        let pos1 = sample_pending();
-        let mut pos2 = sample_pending();
-        pos2.condition_id = "cid2".into();
-
-        settler.add_position(pos1);
-        settler.add_position(pos2);
-        assert_eq!(settler.pending_count(), 2);
-
-        let result = settler.settle_by_slug("btc-updown-5m-1", true).unwrap();
-
-        assert_eq!(settler.pending_count(), 0);
-        assert_eq!(result.payout, d("50.0"));
-        assert_eq!(result.pnl, d("40.0"));
-    }
-
-    #[test]
-    fn test_settle_by_slug_combines_cost_and_shares() {
-        let mut settler = Settler::new();
-        let pos1 = sample_pending();
-        let mut pos2 = sample_pending();
-        pos2.condition_id = "cid2".into();
-        pos2.size_usdc = d("7.5");
-        pos2.filled_shares = d("30.0");
-        pos2.cost = d("7.5");
-
-        settler.add_position(pos1);
-        settler.add_position(pos2);
-
-        let result = settler.settle_by_slug("btc-updown-5m-1", true).unwrap();
-
-        assert_eq!(result.payout, d("55.0"));
-        assert_eq!(result.pnl, d("42.5"));
+    fn awaiting_execution_blocks_duplicate_market_until_reconciled() {
+        let mut tracker = Settler::new();
+        tracker.add(PendingPosition::awaiting_reconciliation(
+            &market(),
+            Direction::Up,
+            d("2"),
+            "order".into(),
+            d("64000"),
+        ));
+        assert!(tracker.has_market(7));
+        assert_eq!(tracker.awaiting_reconciliation().len(), 1);
+        let filled = tracker.mark_filled(7, order()).unwrap();
+        assert_eq!(filled.execution_state, ExecutionState::Open);
+        assert!(tracker.awaiting_reconciliation().is_empty());
     }
 
     #[tokio::test]
-    async fn test_pending_positions_persist_across_restart() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut settler = Settler::new();
-        settler.add_position(sample_pending());
-        settler
-            .persist(dir.path().to_str().expect("utf-8 path"))
+    async fn pending_positions_survive_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut tracker = Settler::new();
+        tracker.add(PendingPosition::from_filled(&market(), order()));
+        tracker
+            .persist(directory.path().to_str().unwrap())
             .await
-            .expect("persist pending position");
-
-        let restored = Settler::load(dir.path().to_str().expect("utf-8 path"))
+            .unwrap();
+        let restored = Settler::load(directory.path().to_str().unwrap())
             .await
-            .expect("restore pending position");
-
-        assert_eq!(restored.pending_count(), 1);
-        assert_eq!(restored.due_positions()[0].condition_id.as_ref(), "cid");
+            .unwrap();
+        assert!(restored.has_market(7));
     }
 
     #[tokio::test]
-    async fn test_load_rejects_corrupt_pending_state() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        std::fs::write(dir.path().join("pending_positions.json"), "not-json")
-            .expect("write corrupt state");
-
-        let result = Settler::load(dir.path().to_str().expect("utf-8 path")).await;
-
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_combine_positions_weighted_entry_price_value() {
-        // 25 shares at 0.20 + 30 shares at 0.10 → weighted = 8.0 / 55 ≈ 0.1454
-        // The combined position should NOT have entry_price = 0.20 (first only)
-        let mut settler = Settler::new();
-
-        let pos1 = PendingPosition {
-            direction: Direction::Up,
-            size_usdc: d("5.0"),
-            entry_price: d("0.20"),
-            filled_shares: d("25.0"),
-            cost: d("5.0"),
-            settlement_time_ms: 0,
-            entry_btc_price: d("70000"),
-            condition_id: "cid1".into(),
-            market_slug: "slug".into(),
-        };
-        let pos2 = PendingPosition {
-            direction: Direction::Up,
-            size_usdc: d("3.0"),
-            entry_price: d("0.10"),
-            filled_shares: d("30.0"),
-            cost: d("3.0"),
-            settlement_time_ms: 0,
-            entry_btc_price: d("70000"),
-            condition_id: "cid2".into(),
-            market_slug: "slug".into(),
-        };
-
-        settler.add_position(pos1);
-        settler.add_position(pos2);
-        let result = settler.settle_by_slug("slug", true).unwrap();
-        assert_eq!(result.pnl, d("47.0")); // 55 - 8 = 47
+    async fn corrupt_pending_state_fails_startup() {
+        let directory = tempfile::tempdir().unwrap();
+        tokio::fs::write(directory.path().join("pending_positions.json"), b"not-json")
+            .await
+            .unwrap();
+        assert!(Settler::load(directory.path().to_str().unwrap())
+            .await
+            .is_err());
     }
 }

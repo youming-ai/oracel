@@ -1,101 +1,110 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Project
 
-Rust trading bot for Polymarket BTC 5-minute up/down binary markets. Monitors live BTC prices via WebSocket, fetches market quotes from Polymarket CLOB, and bets against extreme market sentiment. Includes a ratatui terminal dashboard.
+Rust Binance Prediction BTC five-minute UP/DOWN trading bot with a ratatui dashboard.
 
-Two binaries: `polybot` (main bot) and `polybot-tools` (CLI utilities for key derivation and position redemption).
+The bot uses only Binance services:
 
-## Build & Development Commands
+- Binance BTCUSDT WebSocket for spot price, momentum, and volatility.
+- Binance Web3 Wallet Prediction REST API for market discovery, order books, quotes, orders,
+  positions, settlement, and redemption.
+
+Binaries:
+
+- `binance-5m-bot` — main Paper/Live bot
+- `binance-5m-tools` — API diagnostics and manual redemption recovery
+
+## Commands
 
 ```bash
-# Build
-cargo build                    # debug
-cargo build --release          # release (opt-level=3, lto=thin)
-
-# Test
-cargo test                     # all tests
-cargo test test_trade_when_extreme_bullish   # single test by name
-cargo test --lib pipeline::decider           # tests in a module
-
-# Lint & Format
+cargo build --locked
+cargo test --locked
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo fmt --all -- --check     # check formatting
-cargo fmt                      # apply formatting
-
-# Full CI check (run before committing)
-cargo build --locked && cargo test --locked && cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo fmt --all -- --check
-
-# Security audit
+cargo fmt --all -- --check
+cargo fmt
 cargo audit
+
+# Full local gate
+cargo build --locked && cargo test --locked && cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo fmt --all -- --check && cargo audit
+
+# Verify Binance account/API access; never places an order
+cargo run --release --bin binance-5m-tools -- --check
+
+# Paper bot
+BINANCE_5M_HEADLESS=1 cargo run --release --bin binance-5m-bot
 ```
 
 ## Architecture
 
-### 4-Stage Trading Pipeline
+### Pipeline
 
-The bot runs a linear pipeline each tick (`bot.rs:tick()`):
+1. `pipeline/price_source.rs` — Binance BTCUSDT WebSocket rolling buffer
+2. `pipeline/decider.rs` — deterministic probability/value/risk decision
+3. `pipeline/executor.rs` — Paper fill or Binance Prediction MARKET/FOK order
+4. `pipeline/settler.rs` — persisted accepted-order and open-position state
 
-1. **Price Source** (`pipeline/price_source.rs`) — WebSocket price buffer from Binance
-2. **Decider** (`pipeline/decider.rs`) — Signal detection + trade decision: evaluates market extremeness, spread check, BTC trend, entry price range, TTL, balance, daily loss limit, circuit breaker → outputs `Trade` or `Pass`
-3. **Executor** (`pipeline/executor.rs`) — Places FAK (Fill-And-Kill) limit orders via CLOB
-4. **Settler** (`pipeline/settler.rs`) — Tracks pending positions, resolves outcomes via Gamma API
+### Data client
 
-### Core Components
+`data/binance_prediction.rs` owns official Prediction REST API interaction:
 
-- `bot.rs` — Bot struct, main event loop (`run()`), per-tick logic (`tick()`), market refresh
-- `state.rs` — In-memory bot/market state
-- `tasks.rs` — Background async tasks: settlement checking (15s), market refresh (60s), status printing, balance persistence
-- `config.rs` — Typed config with validation, loaded from `config.toml`
-- `data/` — External data clients:
-  - `binance.rs` — WebSocket price feed with auto-reconnect and exponential backoff
-  - `market_discovery.rs` — Gamma API market slug generation (`btc-updown-5m-{timestamp}`) and resolution inference
-  - `polymarket.rs` — CLOB client (unauthenticated price fetching + authenticated order placement), on-chain balance checker, CTF position redeemer
-- `tui/` — ratatui terminal dashboard auto-launched with bot
+- wallet selection and USDT payment balance;
+- active BTC five-minute market discovery and strict UP/DOWN token mapping;
+- order-book walks and executable quote prices;
+- Get Quote / Place Order execution;
+- order-history reconciliation;
+- Paper reference/end-price resolution;
+- live settled-position history and redemption.
 
-### Concurrency Model
+### Concurrency
 
-- `tokio` async runtime with multiple spawned background tasks
-- `Arc<RwLock<T>>` for shared mutable state (market state, account state, settler, TUI state)
-- `broadcast` channels for price distribution from WebSocket to pipeline
-- `AtomicBool` for graceful shutdown coordination across tasks
+- `Arc<RwLock<T>>` protects market, account, tracker, and TUI state.
+- Binance WebSocket and background refresh/settlement/status tasks share an `AtomicBool` shutdown
+  flag.
+- A live accepted order whose fill state is unknown is persisted and blocks all new entries until
+  reconciled.
 
-### Terminal Dashboard (TUI)
+## Key conventions
 
-ratatui dashboard automatically launched with the bot. Shows:
-
-- Live BTC price and market info with TTL countdown
-- Balance, PnL, win/loss stats, streak counter
-- Recent trades table (scrolling via ↑↓)
-- Current decision status
-
-Keybindings: `q` or `Esc` to quit, `↑`/`↓` to scroll trade history.
-
-## Key Conventions
-
-- **Financial math**: Always `rust_decimal::Decimal`, never `f64`
-- **Secrets**: `secrecy::SecretString` with `.expose_secret()` access
-- **Error handling**: `anyhow::Result` with `.context()` for all fallible operations; `WsLoopError::Permanent` vs `Transient` for WebSocket errors
-- **Logging**: `tracing` crate with bracket prefixes: `[INIT]`, `[MKT]`, `[TRADE]`, `[SETTLED]`, `[STATUS]`, `[RISK]`, `[IDLE]`, `[SKIP]`, `[WS]`
-- **Imports**: std → external crates → local modules, separated by blank lines
-- **Visibility**: Prefer `pub(crate)` over `pub` for internal APIs
-- **File writes**: Atomic (write to temp file, then rename) to prevent corruption
-- **Formatting**: 100-char max width, 4 spaces, Unix newlines (`rustfmt.toml`)
-- **Tests**: `#[cfg(test)]` module at bottom of file; helper `d()` for Decimal creation in tests; async tests use `#[tokio::test]`
+- Financial values: `rust_decimal::Decimal`, never `f64`.
+- Errors: `anyhow::Result` with context at external boundaries.
+- Secrets: `secrecy::SecretString`; never log API credentials.
+- Logging prefixes: `[INIT]`, `[MKT]`, `[BOOK]`, `[TRADE]`, `[EXEC]`, `[SETTLED]`, `[REDEEM]`,
+  `[STATUS]`, `[RISK]`, `[IDLE]`, `[SKIP]`, `[WS]`.
+- Use fixed-USDT amounts. Binance Prediction MARKET/FOK orders require roughly 1.5 USDT minimum;
+  configuration enforces a 2 USDT minimum.
+- Persist state atomically by writing a temporary file and renaming it.
+- Prefer `pub(crate)` for internal APIs.
+- Format: rustfmt, 100-character width, Unix newlines.
 
 ## Configuration
 
-- `config.toml` — Main config. Validated on startup.
-- `.env` — `PRIVATE_KEY` (required), `ALCHEMY_KEY` (optional Polygon RPC)
-- Always live mode — no paper simulation
+`config.toml` contains non-secret settings. `.env` contains:
 
-## Logs & State Files
+```text
+BINANCE_API_KEY
+BINANCE_API_SECRET
+BINANCE_PREDICTION_WALLET_ID      # optional unless multiple wallets
+BINANCE_PREDICTION_WALLET_ADDRESS # optional unless multiple wallets
+```
 
+Paper and Live both require Binance API credentials because Binance Prediction endpoints are signed
+by the current SDK. Live additionally requires a selected registered Prediction Wallet.
+
+The checked-in mode is `paper`. Live requires both `mode = "live"` and
+`allow_uncalibrated_model_live = true` until calibration requirements are met.
+
+## Runtime files
+
+```text
+logs/binance/<mode>/
+├── bot.log.YYYY-MM-DD
+├── trades.csv
+├── observations.csv
+├── outcomes.csv
+├── balance
+└── pending_positions.json
 ```
-logs/
-  bot.log       # rolling daily log
-  trades.csv    # trade entries & settlements
-  balance       # current balance snapshot (atomic writes)
-```
+
+`observations.csv` is the calibration dataset; `outcomes.csv` contains official labels for entered
+markets. Do not infer success from win rate alone.

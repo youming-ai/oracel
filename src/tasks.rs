@@ -1,29 +1,26 @@
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use chrono::Utc;
-use futures_util::future::join_all;
-use polymarket_5m_bot::config;
-use polymarket_5m_bot::data::chainlink::ChainlinkSource;
-use polymarket_5m_bot::data::market_discovery::{
-    infer_resolution_state, MarketDiscovery, ResolutionState,
-};
-use polymarket_5m_bot::data::polymarket::CtfRedeemer;
-use polymarket_5m_bot::pipeline::decider::AccountState;
-use polymarket_5m_bot::pipeline::price_source::PriceSource;
-use polymarket_5m_bot::pipeline::settler::Settler;
-use polymarket_5m_bot::trade_log::TradeLogHandle;
-use polymarket_5m_bot::tui::state::TuiState;
-use rust_decimal::prelude::ToPrimitive;
-use rust_decimal::Decimal;
 use tokio::sync::RwLock;
 use tokio::time::Duration;
+
+use binance_5m_bot::config::TradingMode;
+use binance_5m_bot::data::binance_prediction::{
+    BinancePredictionClient, LiveSettlement, OrderReconciliation,
+};
+use binance_5m_bot::pipeline::decider::AccountState;
+use binance_5m_bot::pipeline::executor::OrderResult;
+use binance_5m_bot::pipeline::price_source::PriceSource;
+use binance_5m_bot::pipeline::settler::{SettlementResult, Settler};
+use binance_5m_bot::trade_log::TradeLogHandle;
+use binance_5m_bot::tui::state::{TradeRow, TuiState};
+use binance_5m_bot::util;
 
 use crate::state::MarketState;
 
 pub(crate) fn start_market_refresher(
-    discovery: Arc<MarketDiscovery>,
+    client: Arc<BinancePredictionClient>,
     market_state: Arc<RwLock<MarketState>>,
     shutdown: Arc<AtomicBool>,
     refresh_secs: u64,
@@ -31,28 +28,34 @@ pub(crate) fn start_market_refresher(
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(refresh_secs));
         loop {
+            interval.tick().await;
             if shutdown.load(Ordering::Acquire) {
                 tracing::debug!("[TASK] market refresher shutting down");
                 break;
             }
-
-            interval.tick().await;
-            match discovery.discover().await {
-                Ok(active) => {
-                    let current_yes = market_state.read().await.token_yes.clone();
-                    if current_yes != active.token_id_yes.clone().into() {
-                        tracing::debug!("[MKT] {} ends {}", active.market.slug, active.end_date);
-                        *market_state.write().await = MarketState {
-                            token_yes: active.token_id_yes.into(),
-                            token_no: active.token_id_no.into(),
-                            condition_id: active.condition_id.into(),
-                            market_slug: active.market.slug.into(),
-                            settlement_ms: active.end_date.timestamp_millis(),
-                        };
+            match client
+                .discover_active_market(Utc::now().timestamp_millis())
+                .await
+            {
+                Ok(market) => {
+                    let changed = market_state
+                        .read()
+                        .await
+                        .active
+                        .as_ref()
+                        .is_none_or(|current| current.market_topic_id != market.market_topic_id);
+                    if changed {
+                        tracing::info!(
+                            "[MKT] Binance Prediction {} topic={} ends={}",
+                            market.slug,
+                            market.market_topic_id,
+                            market.end_ms,
+                        );
+                        market_state.write().await.active = Some(market);
                     }
                 }
-                Err(e) => {
-                    tracing::debug!("[MARKET] Market refresh failed: {}", e);
+                Err(error) => {
+                    tracing::warn!("[MKT] Binance Prediction discovery failed: {error:#}");
                 }
             }
         }
@@ -64,54 +67,44 @@ pub(crate) fn start_status_printer(
     account: Arc<RwLock<AccountState>>,
     settler: Arc<RwLock<Settler>>,
     market_state: Arc<RwLock<MarketState>>,
-    mode: config::TradingMode,
+    mode: TradingMode,
     status_interval_ms: u64,
     shutdown: Arc<AtomicBool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(status_interval_ms));
         loop {
+            interval.tick().await;
             if shutdown.load(Ordering::Acquire) {
                 tracing::debug!("[TASK] status printer shutting down");
                 break;
             }
-
-            interval.tick().await;
-
-            let btc = price_source.latest().await.unwrap_or(Decimal::ZERO);
-            let acc = account.read().await;
+            let btc = price_source.latest().await.unwrap_or_default();
+            let account = account.read().await;
+            let market = market_state.read().await.active.clone();
             let pending = settler.read().await.pending_count();
-            let settle = market_state.read().await.settlement_ms;
-
-            let ttl = if settle > 0 {
-                let remaining_s = (settle - Utc::now().timestamp_millis()).max(0) / 1000;
-                if remaining_s > 0 {
-                    format!("{}m{}s", remaining_s / 60, remaining_s % 60)
-                } else {
-                    "expired".into()
-                }
-            } else {
-                "?".into()
-            };
-
-            let pnl = acc.pnl();
+            let ttl = market
+                .as_ref()
+                .map(|market| (market.end_ms - Utc::now().timestamp_millis()).max(0) / 1_000)
+                .unwrap_or_default();
             tracing::debug!(
-                "[STATUS] {} | BTC=${:.0} | bal=${:.2} pnl={:+.2} | {}W/{}L streak={} | pending={} | ttl={}",
+                "[STATUS] binance {} | BTC=${:.0} | bal={:.2} pnl={:+.2} | {}/{} streak={} | pending={} | ttl={}m{}s",
                 mode,
-                btc.to_f64().unwrap_or(0.0),
-                acc.balance,
-                pnl,
-                acc.total_wins,
-                acc.total_losses,
-                if acc.consecutive_wins > 0 {
-                    format!("+{}", acc.consecutive_wins)
-                } else if acc.consecutive_losses > 0 {
-                    format!("-{}", acc.consecutive_losses)
+                btc.round_dp(0),
+                account.balance,
+                account.pnl(),
+                account.total_wins,
+                account.total_losses,
+                if account.consecutive_wins > 0 {
+                    format!("+{}", account.consecutive_wins)
+                } else if account.consecutive_losses > 0 {
+                    format!("-{}", account.consecutive_losses)
                 } else {
-                    "0".into()
+                    "0".to_string()
                 },
                 pending,
-                ttl,
+                ttl / 60,
+                ttl % 60,
             );
         }
     })
@@ -119,204 +112,252 @@ pub(crate) fn start_status_printer(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn start_settlement_checker(
+    mode: TradingMode,
+    client: Arc<BinancePredictionClient>,
     settler: Arc<RwLock<Settler>>,
     account: Arc<RwLock<AccountState>>,
-    chainlink_source: Arc<ChainlinkSource>,
-    discovery: Arc<MarketDiscovery>,
-    redeemer: Option<Arc<CtfRedeemer>>,
+    price_source: Arc<PriceSource>,
     log_dir: String,
     trade_log: TradeLogHandle,
     shutdown: Arc<AtomicBool>,
     settlement_check_secs: u64,
-    redeem_max_retries: u32,
-    resolution_price_threshold: f64,
     tui_state: Arc<RwLock<TuiState>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(settlement_check_secs));
-        let mut redeem_queue: Vec<(String, String, u32)> = Vec::new();
-        let mut pending_retries: HashMap<String, u32> = HashMap::new();
-
         loop {
+            interval.tick().await;
             if shutdown.load(Ordering::Acquire) {
                 tracing::debug!("[TASK] settlement checker shutting down");
                 break;
             }
 
-            interval.tick().await;
+            reconcile_pending_orders(
+                mode, &client, &settler, &account, &trade_log, &log_dir, &tui_state,
+            )
+            .await;
 
-            let mut results = Vec::new();
             let due = settler.read().await.due_positions();
-
-            let fetch_futures = due.iter().map(|pos| async {
-                let result = discovery.fetch_market_by_slug(&pos.market_slug).await;
-                (pos.clone(), result)
-            });
-            let fetch_results = join_all(fetch_futures).await;
-
-            for (pos, market_result) in fetch_results {
-                let slug = pos.market_slug.to_string();
-                let market = match market_result {
-                    Ok(m) => m,
-                    Err(e) => {
-                        let retries = pending_retries.entry(slug).or_insert(0);
-                        *retries = retries.saturating_add(1);
-                        if *retries == 1 || (*retries).is_multiple_of(20) {
+            let mut settled = Vec::<(SettlementResult, bool)>::new();
+            for position in due {
+                let settlement = if mode.is_paper() {
+                    match client
+                        .paper_resolution(position.market_topic_id, Utc::now().timestamp_millis())
+                        .await
+                    {
+                        Ok(Some(winner)) => settler
+                            .write()
+                            .await
+                            .settle_paper(position.market_topic_id, winner)
+                            .map(|result| (result, false)),
+                        Ok(None) => None,
+                        Err(error) => {
                             tracing::warn!(
-                                "[SETTLE] Gamma fetch failed for {} (attempt {}): {}",
-                                pos.market_slug,
-                                retries,
-                                e
+                                "[SETTLE] Binance paper resolution failed for {}: {error:#}",
+                                position.market_topic_id
                             );
+                            None
                         }
-                        continue;
+                    }
+                } else {
+                    match client
+                        .live_settlement(
+                            position.market_topic_id,
+                            &position.token_id,
+                            position.settlement_time_ms,
+                        )
+                        .await
+                    {
+                        Ok(Some(LiveSettlement {
+                            won,
+                            payout,
+                            pnl,
+                            redeem_status,
+                        })) => {
+                            let redeem_needed = won && redemption_needed(redeem_status.as_deref());
+                            settler
+                                .write()
+                                .await
+                                .settle_live(position.market_topic_id, won, payout, pnl)
+                                .map(|result| (result, redeem_needed))
+                        }
+                        Ok(None) => None,
+                        Err(error) => {
+                            tracing::warn!(
+                                "[SETTLE] Binance live settlement failed for {}: {error:#}",
+                                position.market_topic_id
+                            );
+                            None
+                        }
                     }
                 };
-
-                match infer_resolution_state(&market, resolution_price_threshold) {
-                    Some(ResolutionState::Resolved(winner)) => {
-                        tracing::info!(
-                            "[SETTLE] {} resolved -> {} won",
-                            pos.market_slug,
-                            winner.as_str(),
-                        );
-                        let won = pos.direction == winner;
-                        if let Some(result) =
-                            settler.write().await.settle_by_slug(&pos.market_slug, won)
-                        {
-                            results.push(result);
-                        }
-                        pending_retries.remove(&slug);
-                    }
-                    Some(ResolutionState::Pending) => {
-                        let retries = pending_retries.entry(slug).or_insert(0);
-                        *retries = retries.saturating_add(1);
-                        if *retries == 1 || (*retries).is_multiple_of(20) {
-                            tracing::warn!(
-                                "[SETTLE] {} still pending after {}s",
-                                pos.market_slug,
-                                *retries as u64 * settlement_check_secs,
-                            );
-                        }
-                    }
-                    None => {
-                        let retries = pending_retries.entry(slug).or_insert(0);
-                        *retries = retries.saturating_add(1);
-                        if *retries == 1 || (*retries).is_multiple_of(20) {
-                            tracing::warn!(
-                                "[SETTLE] resolution unclear for {} (attempt {})",
-                                pos.market_slug,
-                                retries,
-                            );
-                        }
-                    }
+                if let Some(result) = settlement {
+                    settled.push(result);
                 }
             }
-            let settlement_btc_price = chainlink_source.latest().await.map(|tick| tick.price);
 
-            if !results.is_empty() {
-                if let Err(e) = settler.read().await.persist(&log_dir).await {
-                    tracing::error!("[STATE] Failed to persist settled positions: {}", e);
+            if settled.is_empty() {
+                continue;
+            }
+            if let Err(error) = settler.read().await.persist(&log_dir).await {
+                tracing::error!("[STATE] failed to persist Binance pending positions: {error:#}");
+            }
+
+            let now_ms = Utc::now().timestamp_millis();
+            let current_price = price_source.latest().await.unwrap_or_default();
+            let balance = {
+                let mut account = account.write().await;
+                account.reset_daily_if_needed(&Utc::now().format("%Y-%m-%d").to_string());
+                for (result, _) in &settled {
+                    account.record_settlement(
+                        result.won,
+                        result.payout,
+                        result.pnl,
+                        mode.is_paper(),
+                        now_ms,
+                    );
                 }
+                account.balance
+            };
+            if mode.is_paper() {
+                util::write_balance(&log_dir, balance).await;
+            }
 
-                let mut acc = account.write().await;
-                let today = Utc::now().format("%Y-%m-%d").to_string();
-                acc.reset_daily_if_needed(&today);
-                for r in &results {
-                    acc.record_settlement(r);
-                }
-
-                tracing::debug!(
-                    "[BAL] ${:.2} | {}W/{}L | settled={}",
-                    acc.balance,
-                    acc.total_wins,
-                    acc.total_losses,
-                    results.len(),
+            for (result, redeem_needed) in &settled {
+                tui_state.write().await.settle_market(
+                    &result.market_topic_id.to_string(),
+                    result.won,
+                    result.pnl,
                 );
-
-                let bal = acc.balance;
-                drop(acc);
-
-                for r in &results {
-                    tui_state
-                        .write()
-                        .await
-                        .settle_latest(r.direction.as_str(), r.won, r.pnl);
-                    if let Some(btc_price) = settlement_btc_price {
-                        trade_log
-                            .log_settlement(
-                                &r.market_slug,
-                                r.won,
-                                r.direction.as_str(),
-                                r.pnl,
-                                r.entry_btc_price,
-                                btc_price,
-                            )
-                            .await;
-                    }
+                trade_log.log_settlement(result, current_price).await;
+                if *redeem_needed {
+                    redeem_with_retry(&client, &result.token_id).await;
                 }
-
-                {
-                    let tmp = std::path::Path::new(&log_dir).join("balance.tmp");
-                    let dst = std::path::Path::new(&log_dir).join("balance");
-                    let text = format!("{}", bal.normalize());
-                    if let Err(e) = tokio::fs::write(&tmp, &text).await {
-                        tracing::warn!("[STATE] Failed to write balance: {}", e);
-                    } else if let Err(e) = tokio::fs::rename(&tmp, &dst).await {
-                        tracing::warn!("[STATE] Failed to rename balance file: {}", e);
-                    }
-                }
-
-                for r in &results {
-                    if r.won && !r.condition_id.is_empty() {
-                        redeem_queue.push((
-                            r.condition_id.clone(),
-                            r.direction.as_str().to_string(),
-                            redeem_max_retries,
-                        ));
-                    }
-                }
-            }
-
-            if let Some(ref redeemer) = redeemer {
-                let mut still_pending = Vec::new();
-                for (cid, dir, attempts) in redeem_queue.drain(..) {
-                    match redeemer.has_redeemable_position(&cid).await {
-                        Ok(true) => match redeemer.redeem(&cid).await {
-                            Ok(tx) => {
-                                tracing::info!("[REDEEM] {} tx={}", dir, tx);
-                            }
-                            Err(e) => {
-                                tracing::warn!("[REDEEM] {} failed: {}", dir, e);
-                            }
-                        },
-                        Ok(false) if attempts > 1 => {
-                            tracing::debug!(
-                                "[REDEEM] {} not redeemable yet, {} retries left",
-                                dir,
-                                attempts - 1
-                            );
-                            still_pending.push((cid, dir, attempts - 1));
-                        }
-                        Ok(false) => {
-                            tracing::debug!("[REDEEM] {} no redeemable position, dropping", dir);
-                        }
-                        Err(e) if attempts > 1 => {
-                            tracing::debug!(
-                                "[REDEEM] {} check failed: {}, {} retries left",
-                                dir,
-                                e,
-                                attempts - 1
-                            );
-                            still_pending.push((cid, dir, attempts - 1));
-                        }
-                        Err(e) => {
-                            tracing::warn!("[REDEEM] {} check failed, dropping: {}", dir, e);
-                        }
-                    }
-                }
-                redeem_queue = still_pending;
             }
         }
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn reconcile_pending_orders(
+    mode: TradingMode,
+    client: &BinancePredictionClient,
+    settler: &Arc<RwLock<Settler>>,
+    account: &Arc<RwLock<AccountState>>,
+    trade_log: &TradeLogHandle,
+    log_dir: &str,
+    tui_state: &Arc<RwLock<TuiState>>,
+) {
+    if mode.is_paper() {
+        return;
+    }
+    // Bind the guard to a `let` so the read lock drops here; iterating the guard
+    // directly would hold it across the `settler.write()` calls below and
+    // deadlock the (non-reentrant) RwLock.
+    let awaiting = settler.read().await.awaiting_reconciliation();
+    for position in awaiting {
+        match client
+            .reconcile_order(&position.order_id, position.settlement_time_ms)
+            .await
+        {
+            Ok(OrderReconciliation::Pending) => {}
+            Ok(OrderReconciliation::Unfilled) => {
+                tracing::warn!("[EXEC] Binance FOK {} was unfilled", position.order_id);
+                settler
+                    .write()
+                    .await
+                    .remove_unfilled(position.market_topic_id);
+                if let Err(error) = settler.read().await.persist(log_dir).await {
+                    tracing::error!("[STATE] failed to persist unfilled Binance order: {error:#}");
+                }
+            }
+            Ok(OrderReconciliation::Filled(fill)) => {
+                let entry_price = fill.entry_price();
+                let order = OrderResult {
+                    order_id: fill.order_id,
+                    direction: position.direction,
+                    requested_usdt: position.requested_usdt,
+                    entry_price,
+                    filled_shares: fill.filled_shares,
+                    trade_cost: fill.trade_cost,
+                    fee: fill.fee,
+                    settlement_time_ms: position.settlement_time_ms,
+                    entry_btc_price: position.entry_btc_price,
+                };
+                let updated = settler
+                    .write()
+                    .await
+                    .mark_filled(position.market_topic_id, order.clone());
+                let Some(updated) = updated else {
+                    continue;
+                };
+                if let Err(error) = settler.read().await.persist(log_dir).await {
+                    tracing::error!(
+                        "[STATE] failed to persist reconciled Binance order: {error:#}"
+                    );
+                }
+                let balance = {
+                    let mut account = account.write().await;
+                    account.record_trade(order.total_cost());
+                    account.balance
+                };
+                trade_log
+                    .log_reconciled_entry(&updated, &order, balance)
+                    .await;
+                tui_state.write().await.add_trade(TradeRow {
+                    time: Utc::now(),
+                    market_topic_id: updated.market_topic_id.to_string(),
+                    direction: order.direction.as_str().to_string(),
+                    entry_price: order.entry_price,
+                    cost: order.total_cost(),
+                    edge: Default::default(),
+                    result: "PENDING".to_string(),
+                    pnl: None,
+                });
+            }
+            Err(error) => tracing::warn!(
+                "[EXEC] failed to reconcile Binance order {}: {error:#}",
+                position.order_id
+            ),
+        }
+    }
+}
+
+/// Claim a winning position, retrying transient failures so a single RPC hiccup
+/// does not strand real funds.
+// ponytail: bounded inline retry, not a durable queue. A crash between settlement
+// persist and a successful redeem still needs manual `binance-5m-tools --redeem`
+// (Binance retains settled-position history). Add a persisted redeem queue only
+// if crash-time redemption loss is observed in practice.
+async fn redeem_with_retry(client: &BinancePredictionClient, token_id: &str) {
+    const ATTEMPTS: usize = 3;
+    for attempt in 1..=ATTEMPTS {
+        match client.redeem(token_id).await {
+            Ok(receipt) => {
+                tracing::info!(
+                    "[REDEEM] Binance token={} status={} tx={}",
+                    token_id,
+                    receipt.status,
+                    receipt.transaction_hash.as_deref().unwrap_or("pending"),
+                );
+                return;
+            }
+            Err(error) if attempt < ATTEMPTS => {
+                tracing::warn!(
+                    "[REDEEM] Binance token={token_id} attempt {attempt}/{ATTEMPTS} failed, retrying: {error:#}"
+                );
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            Err(error) => tracing::error!(
+                "[REDEEM] Binance token={token_id} failed after {ATTEMPTS} attempts; use binance-5m-tools --redeem for recovery: {error:#}"
+            ),
+        }
+    }
+}
+
+fn redemption_needed(status: Option<&str>) -> bool {
+    !matches!(
+        status.map(|status| status.to_ascii_uppercase()).as_deref(),
+        Some("CONFIRMED" | "CLAIMED" | "PENDING")
+    )
 }

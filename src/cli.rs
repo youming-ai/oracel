@@ -1,7 +1,10 @@
-//! Binance Prediction account and market diagnostics.
+//! Binance Prediction diagnostics and manual recovery tools.
+
+use std::path::Path;
 
 use anyhow::Result;
-use polymarket_5m_bot::data::binance_prediction::BinancePredictionClient;
+use binance_5m_bot::config::Config;
+use binance_5m_bot::data::binance_prediction::BinancePredictionClient;
 
 fn load_dotenv() {
     if let Err(error) = dotenvy::dotenv() {
@@ -17,23 +20,71 @@ async fn main() -> Result<()> {
         anyhow::bail!("failed to install rustls crypto provider: {error:?}");
     }
     load_dotenv();
+    let config = Config::load(Path::new("config.toml"))?;
+    config.validate()?;
 
-    if std::env::args().any(|argument| argument == "--binance-prediction-check") {
-        let client = BinancePredictionClient::from_env()?;
-        let report = client.access_report().await?;
-        println!("{}", serde_json::to_string_pretty(&report)?);
-        if report.wallets.is_empty() {
-            anyhow::bail!("no Binance Prediction wallet is registered for this API account");
-        }
-        if report.btc_5m_candidates.is_empty() {
-            anyhow::bail!("no BTC five-minute Prediction market is visible to this API account");
-        }
-        return Ok(());
+    if std::env::args().any(|argument| argument == "--check") {
+        return check(&config).await;
+    }
+    if let Some(token_id) = std::env::args()
+        .skip_while(|argument| argument != "--redeem")
+        .nth(1)
+    {
+        return redeem(&config, &token_id).await;
     }
 
-    eprintln!("polybot-tools — Binance Prediction diagnostics");
+    eprintln!("binance-5m-tools — Binance Prediction diagnostics");
     eprintln!();
     eprintln!("Usage:");
-    eprintln!("  polybot-tools --binance-prediction-check");
+    eprintln!("  binance-5m-tools --check");
+    eprintln!("  binance-5m-tools --redeem <prediction-token-id>");
     std::process::exit(1);
+}
+
+async fn check(config: &Config) -> Result<()> {
+    let client = BinancePredictionClient::connect(&config.binance_prediction, false).await?;
+    let wallets = client.list_wallets().await?;
+    if wallets.is_empty() {
+        anyhow::bail!(
+            "Binance account has no registered Prediction wallets; live trading cannot select one"
+        );
+    }
+    let balance = client.payment_balance().await?;
+    let market = client
+        .discover_active_market(chrono::Utc::now().timestamp_millis())
+        .await?;
+    println!("Binance Prediction API: OK");
+    println!(
+        "Payment account: {}",
+        config.binance_prediction.payment_account.as_api_str()
+    );
+    println!("Available balance: {balance:.8} USDT");
+    println!("Registered wallets: {}", wallets.len());
+    for wallet in wallets {
+        println!("  {} {}", wallet.wallet_id, wallet.wallet_address);
+    }
+    println!("Active BTC market: {}", market.slug);
+    println!(
+        "  topic={} start={} end={}",
+        market.market_topic_id, market.start_ms, market.end_ms
+    );
+    println!(
+        "  reference={} UP={} DOWN={}",
+        market.reference_price, market.up.token_id, market.down.token_id
+    );
+    Ok(())
+}
+
+async fn redeem(config: &Config, token_id: &str) -> Result<()> {
+    let client = BinancePredictionClient::connect(&config.binance_prediction, true).await?;
+    let receipt = client.redeem(token_id).await?;
+    println!("Redeem submitted");
+    println!("status={}", receipt.status);
+    if let Some(batch_id) = receipt.batch_id {
+        println!("batch_id={batch_id}");
+    }
+    if let Some(transaction_hash) = receipt.transaction_hash {
+        println!("tx_hash={transaction_hash}");
+    }
+    Ok(())
 }

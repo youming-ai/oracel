@@ -3,7 +3,6 @@ use ratatui::widgets::*;
 
 use super::state::TuiState;
 use chrono::Utc;
-use rust_decimal::prelude::ToPrimitive;
 
 pub fn render(frame: &mut Frame, state: Option<&TuiState>) {
     let chunks = Layout::vertical([
@@ -16,7 +15,7 @@ pub fn render(frame: &mut Frame, state: Option<&TuiState>) {
 
     let (btc_str, bal_str, pnl_str, record, streak, mode_str) = match state {
         Some(s) => (
-            format!("${:.0}", s.btc_price.to_f64().unwrap_or(0.0)),
+            format!("${}", s.btc_price.round_dp(0)),
             format!("${:.2}", s.balance),
             format!("{:+.2}", s.pnl),
             format!("{}W/{}L", s.total_wins, s.total_losses),
@@ -45,7 +44,7 @@ pub fn render(frame: &mut Frame, state: Option<&TuiState>) {
 
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
-            " POLYBOT v0.3.0 ",
+            " BINANCE 5M BOT ",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
