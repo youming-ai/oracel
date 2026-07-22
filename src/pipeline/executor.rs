@@ -100,7 +100,21 @@ impl Executor {
             .submit_market_buy(context.market, *direction, *size_usdt, *max_price)
             .await?;
         for _ in 0..self.client.runtime().reconciliation_attempts {
-            match self.client.reconcile_order(&order_id).await? {
+            let reconciliation = match self
+                .client
+                .reconcile_order(&order_id, context.market.end_ms)
+                .await
+            {
+                Ok(reconciliation) => reconciliation,
+                // The order was accepted; a reconcile-query failure must not throw
+                // away the known order_id. Hand it back so the caller persists it
+                // and halts entries until it can be reconciled.
+                Err(error) => {
+                    tracing::warn!("[EXEC] reconcile query failed for {order_id}: {error:#}");
+                    return Ok(ExecutionOutcome::AwaitingReconciliation { order_id });
+                }
+            };
+            match reconciliation {
                 OrderReconciliation::Filled(fill) => {
                     let entry_price = fill.entry_price();
                     return Ok(ExecutionOutcome::Filled(OrderResult {
@@ -125,13 +139,6 @@ impl Executor {
             }
         }
         Ok(ExecutionOutcome::AwaitingReconciliation { order_id })
-    }
-
-    pub async fn reconcile(&self, order_id: &str) -> Result<OrderReconciliation> {
-        if self.mode.is_paper() {
-            anyhow::bail!("paper orders do not require Binance reconciliation");
-        }
-        self.client.reconcile_order(order_id).await
     }
 }
 

@@ -116,7 +116,8 @@ impl PriceSource {
         let mut samples = 0_usize;
         for pair in ticks.windows(2) {
             let interval_ms = pair[1].timestamp_ms.saturating_sub(pair[0].timestamp_ms);
-            if pair[0].price <= Decimal::ZERO || interval_ms <= 0 {
+            if pair[0].price <= Decimal::ZERO || pair[1].price <= Decimal::ZERO || interval_ms <= 0
+            {
                 continue;
             }
             let price_return = (pair[1].price - pair[0].price) / pair[0].price;

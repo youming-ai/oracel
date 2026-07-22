@@ -316,9 +316,11 @@ fn decimal(value: Decimal) -> String {
 }
 
 fn csv(value: &str) -> String {
-    // Binance slugs and IDs should not contain commas. Quote defensively for logs.
+    // The TUI loader parses these files with a naive `split(',')`, so a field must
+    // never contain a separator. Binance slugs/IDs shouldn't anyway; strip
+    // defensively rather than emit quoted fields the reader can't understand.
     if value.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", value.replace('"', "\"\""))
+        value.replace([',', '"', '\n', '\r'], "_")
     } else {
         value.to_string()
     }

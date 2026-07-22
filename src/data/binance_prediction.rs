@@ -31,6 +31,10 @@ use crate::config::{BinancePredictionConfig, FundingSource, PaymentAccount};
 use crate::pipeline::decider::Direction;
 
 const REST_BASE_URL: &str = "https://api.binance.com";
+// Prediction `amountIn`/`minReceive`/filled amounts are wei (18 decimals) per the
+// binance-sdk docs (`w3w_prediction` trade API: "amountIn — Input amount in wei
+// (18 decimals). Example: 1000000000000000000 = 1 USDT"). Read and write sides
+// must both use this scale.
 const WEI_PER_USDT: &str = "1000000000000000000";
 const MARKET_DURATION_TOLERANCE_MS: u64 = 60_000;
 
@@ -563,18 +567,22 @@ impl BinancePredictionClient {
             .context("Binance Prediction place-order response omitted orderId")
     }
 
-    pub async fn reconcile_order(&self, order_id: &str) -> Result<OrderReconciliation> {
+    /// `anchor_ms` should be the market's settlement time (≈ placement time, since
+    /// orders are placed minutes before it). The ±1-day window brackets it so a
+    /// persisted order still reconciles after a restart across a UTC midnight.
+    pub async fn reconcile_order(
+        &self,
+        order_id: &str,
+        anchor_ms: i64,
+    ) -> Result<OrderReconciliation> {
         let wallet = self.wallet()?;
-        let today = Utc::now().date_naive();
-        let tomorrow = today
-            .checked_add_signed(Duration::days(1))
-            .context("failed to calculate order-history date")?;
+        let (start_date, end_date) = history_window(anchor_ms)?;
         let response = self
             .api
             .query_order_history(
                 QueryOrderHistoryParams::builder(wallet.wallet_address.clone())
-                    .start_date(today.to_string())
-                    .end_date(tomorrow.to_string())
+                    .start_date(start_date)
+                    .end_date(end_date)
                     .limit(100)
                     .build()?,
             )
@@ -671,25 +679,23 @@ impl BinancePredictionClient {
         }))
     }
 
+    /// `anchor_ms` is the position's settlement time; the ±1-day window brackets
+    /// it so positions still settle after downtime longer than the old fixed
+    /// "recent two-day" window (which silently stranded payouts and redemption).
     pub async fn live_settlement(
         &self,
         market_topic_id: i64,
         token_id: &str,
+        anchor_ms: i64,
     ) -> Result<Option<LiveSettlement>> {
         let wallet = self.wallet()?;
-        let today = Utc::now().date_naive();
-        let yesterday = today
-            .checked_sub_signed(Duration::days(1))
-            .context("failed to calculate settlement start date")?;
-        let tomorrow = today
-            .checked_add_signed(Duration::days(1))
-            .context("failed to calculate settlement end date")?;
+        let (start_date, end_date) = history_window(anchor_ms)?;
         let response = self
             .api
             .query_settled_position_history(
                 QuerySettledPositionHistoryParams::builder(wallet.wallet_address.clone())
-                    .start_date(yesterday.to_string())
-                    .end_date(tomorrow.to_string())
+                    .start_date(start_date)
+                    .end_date(end_date)
                     .limit(100)
                     .build()?,
             )
@@ -762,6 +768,22 @@ impl BinancePredictionClient {
             status: result.status.unwrap_or_else(|| "UNKNOWN".to_string()),
         })
     }
+}
+
+/// Binance history queries take inclusive `YYYY-MM-DD` day bounds. Bracket the
+/// anchor day by ±1 so a query survives a UTC-midnight rollover and downtime,
+/// while staying bounded to three days regardless of how old the position is.
+fn history_window(anchor_ms: i64) -> Result<(String, String)> {
+    let day = chrono::DateTime::from_timestamp_millis(anchor_ms)
+        .context("invalid Binance history anchor timestamp")?
+        .date_naive();
+    let start = day
+        .checked_sub_signed(Duration::days(1))
+        .context("failed to calculate history start date")?;
+    let end = day
+        .checked_add_signed(Duration::days(1))
+        .context("failed to calculate history end date")?;
+    Ok((start.to_string(), end.to_string()))
 }
 
 fn signed_query(
@@ -999,7 +1021,8 @@ fn parse_level(price: Option<&str>, size: Option<&str>, side: &str) -> Result<(D
         size.with_context(|| format!("Binance Prediction {side} is missing size"))?,
         &format!("{side} size"),
     )?;
-    if !(Decimal::ZERO..=Decimal::ONE).contains(&price) || size <= Decimal::ZERO {
+    // Strictly positive price: a zero ask would divide-by-zero in build_buy_quote.
+    if price <= Decimal::ZERO || price > Decimal::ONE || size <= Decimal::ZERO {
         anyhow::bail!("Binance Prediction {side} level is out of range");
     }
     Ok((price, size))
@@ -1183,6 +1206,21 @@ mod tests {
     #[test]
     fn rejects_insufficient_order_book_depth() {
         assert!(build_buy_quote(&[], vec![(d("0.50"), d("1"))], d("1"), 123).is_err());
+    }
+
+    #[test]
+    fn rejects_zero_price_level_to_avoid_divide_by_zero() {
+        assert!(parse_level(Some("0"), Some("1"), "ask").is_err());
+        assert!(parse_level(Some("0.5"), Some("1"), "ask").is_ok());
+    }
+
+    #[test]
+    fn history_window_brackets_anchor_day_across_midnight() {
+        // 2024-01-02T00:02:00Z → [2024-01-01, 2024-01-03], covering an order
+        // placed just before the midnight the market ended after.
+        let (start, end) = history_window(1_704_153_720_000).unwrap();
+        assert_eq!(start, "2024-01-01");
+        assert_eq!(end, "2024-01-03");
     }
 
     #[test]

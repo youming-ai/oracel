@@ -161,7 +161,11 @@ pub(crate) fn start_settlement_checker(
                     }
                 } else {
                     match client
-                        .live_settlement(position.market_topic_id, &position.token_id)
+                        .live_settlement(
+                            position.market_topic_id,
+                            &position.token_id,
+                            position.settlement_time_ms,
+                        )
                         .await
                     {
                         Ok(Some(LiveSettlement {
@@ -227,18 +231,7 @@ pub(crate) fn start_settlement_checker(
                 );
                 trade_log.log_settlement(result, current_price).await;
                 if *redeem_needed {
-                    match client.redeem(&result.token_id).await {
-                        Ok(receipt) => tracing::info!(
-                            "[REDEEM] Binance token={} status={} tx={}",
-                            result.token_id,
-                            receipt.status,
-                            receipt.transaction_hash.as_deref().unwrap_or("pending"),
-                        ),
-                        Err(error) => tracing::error!(
-                            "[REDEEM] Binance token={} failed; use binance-5m-tools for recovery: {error:#}",
-                            result.token_id
-                        ),
-                    }
+                    redeem_with_retry(&client, &result.token_id).await;
                 }
             }
         }
@@ -258,8 +251,15 @@ async fn reconcile_pending_orders(
     if mode.is_paper() {
         return;
     }
-    for position in settler.read().await.awaiting_reconciliation() {
-        match client.reconcile_order(&position.order_id).await {
+    // Bind the guard to a `let` so the read lock drops here; iterating the guard
+    // directly would hold it across the `settler.write()` calls below and
+    // deadlock the (non-reentrant) RwLock.
+    let awaiting = settler.read().await.awaiting_reconciliation();
+    for position in awaiting {
+        match client
+            .reconcile_order(&position.order_id, position.settlement_time_ms)
+            .await
+        {
             Ok(OrderReconciliation::Pending) => {}
             Ok(OrderReconciliation::Unfilled) => {
                 tracing::warn!("[EXEC] Binance FOK {} was unfilled", position.order_id);
@@ -318,6 +318,38 @@ async fn reconcile_pending_orders(
             Err(error) => tracing::warn!(
                 "[EXEC] failed to reconcile Binance order {}: {error:#}",
                 position.order_id
+            ),
+        }
+    }
+}
+
+/// Claim a winning position, retrying transient failures so a single RPC hiccup
+/// does not strand real funds.
+// ponytail: bounded inline retry, not a durable queue. A crash between settlement
+// persist and a successful redeem still needs manual `binance-5m-tools --redeem`
+// (Binance retains settled-position history). Add a persisted redeem queue only
+// if crash-time redemption loss is observed in practice.
+async fn redeem_with_retry(client: &BinancePredictionClient, token_id: &str) {
+    const ATTEMPTS: usize = 3;
+    for attempt in 1..=ATTEMPTS {
+        match client.redeem(token_id).await {
+            Ok(receipt) => {
+                tracing::info!(
+                    "[REDEEM] Binance token={} status={} tx={}",
+                    token_id,
+                    receipt.status,
+                    receipt.transaction_hash.as_deref().unwrap_or("pending"),
+                );
+                return;
+            }
+            Err(error) if attempt < ATTEMPTS => {
+                tracing::warn!(
+                    "[REDEEM] Binance token={token_id} attempt {attempt}/{ATTEMPTS} failed, retrying: {error:#}"
+                );
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            Err(error) => tracing::error!(
+                "[REDEEM] Binance token={token_id} failed after {ATTEMPTS} attempts; use binance-5m-tools --redeem for recovery: {error:#}"
             ),
         }
     }

@@ -37,13 +37,12 @@ async fn main() -> Result<()> {
     load_dotenv();
 
     let config_path = Path::new("config.toml");
-    let config = if config_path.exists() {
-        Config::load(config_path)?
-    } else {
-        let config = Config::default();
-        config.save(config_path)?;
-        config
-    };
+    if !config_path.exists() {
+        Config::default().save(config_path)?;
+    }
+    // Always load through Config::load so .env credential/wallet overrides apply,
+    // including on the first run that just wrote the default config.
+    let config = Config::load(config_path)?;
     config.validate()?;
 
     let log_dir = format!("logs/binance/{}", config.trading.mode);

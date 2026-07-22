@@ -44,6 +44,11 @@ async fn main() -> Result<()> {
 async fn check(config: &Config) -> Result<()> {
     let client = BinancePredictionClient::connect(&config.binance_prediction, false).await?;
     let wallets = client.list_wallets().await?;
+    if wallets.is_empty() {
+        anyhow::bail!(
+            "Binance account has no registered Prediction wallets; live trading cannot select one"
+        );
+    }
     let balance = client.payment_balance().await?;
     let market = client
         .discover_active_market(chrono::Utc::now().timestamp_millis())

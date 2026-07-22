@@ -454,6 +454,13 @@ impl Default for MiscConfig {
     }
 }
 
+fn env_nonempty(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let content = fs::read_to_string(path)?;
@@ -464,17 +471,23 @@ impl Config {
         if let Ok(value) = std::env::var("BINANCE_API_SECRET") {
             config.binance_prediction.api_secret = SecretString::new(value.into());
         }
-        if let Ok(value) = std::env::var("BINANCE_PREDICTION_WALLET_ID") {
+        // Treat a blank env var (e.g. from copying .env.example) as unset, so it
+        // does not become a half-configured wallet selection that fails validation.
+        if let Some(value) = env_nonempty("BINANCE_PREDICTION_WALLET_ID") {
             config.binance_prediction.wallet_id = Some(value);
         }
-        if let Ok(value) = std::env::var("BINANCE_PREDICTION_WALLET_ADDRESS") {
+        if let Some(value) = env_nonempty("BINANCE_PREDICTION_WALLET_ADDRESS") {
             config.binance_prediction.wallet_address = Some(value);
         }
         Ok(config)
     }
 
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
-        fs::write(path, toml::to_string_pretty(self)?)?;
+        // Atomic write: a crash mid-write must not leave a truncated config.toml.
+        let contents = toml::to_string_pretty(self)?;
+        let temporary = path.with_extension("toml.tmp");
+        fs::write(&temporary, contents)?;
+        fs::rename(&temporary, path)?;
         Ok(())
     }
 
