@@ -103,8 +103,18 @@ logs/binance/<mode>/
 ├── observations.csv
 ├── outcomes.csv
 ├── balance
-└── pending_positions.json
+├── account_state.json
+├── pending_positions.json
+└── state_write_failed        # durability marker; only after a failed state write
 ```
 
 `observations.csv` is the calibration dataset; `outcomes.csv` contains official labels for entered
 markets. Do not infer success from win rate alone.
+
+`account_state.json` persists the risk counters (daily loss/trade caps, loss-streak cooldown,
+circuit-breaker window) while holding an account lock, so under working storage a restart does not
+reset them; balance is re-derived on startup and a corrupt file fails startup. On a state-write
+failure the bot halts new entries and writes `state_write_failed` (sticky across restart); recover
+by reconciling `account_state.json`/`pending_positions.json` against the CSV logs and Binance
+history before deleting the marker. A simultaneous state- and marker-write failure followed by a
+crash can still fall back to an older snapshot — see docs/ARCHITECTURE.md.

@@ -41,6 +41,18 @@ pub(crate) struct Bot {
     executor: Executor,
     market_state: Arc<RwLock<MarketState>>,
     shutdown: Arc<AtomicBool>,
+    /// Set (never cleared in-process) when a risk/position state write fails, or
+    /// at startup if a prior run left the durability marker. Blocks *subsequent*
+    /// new entries so the bot takes on no further exposure it cannot record;
+    /// settlement keeps winding down. It does not retroactively guarantee that an
+    /// already-filled position or its risk increments reached disk — a marker
+    /// means the persisted state may be stale or incomplete. Safe recovery is
+    /// therefore operator-driven: reconcile `account_state.json` and
+    /// `pending_positions.json` against trades.csv/outcomes.csv and Binance
+    /// history, then remove the marker and restart. (An automated reconciliation
+    /// tool is not yet provided; see docs.) Sticky-only avoids any set/clear race
+    /// between the trade tick and the settlement task.
+    persist_halt: Arc<AtomicBool>,
     trade_log: TradeLog,
     tui_state: Arc<RwLock<TuiState>>,
     last_live_balance_refresh_ms: i64,
@@ -87,6 +99,17 @@ impl Bot {
         }
         let trade_log = TradeLog::open(&log_dir)
             .map_err(|error| anyhow::anyhow!("failed to open Binance trade log: {error}"))?;
+        let account = AccountState::restore(&log_dir, initial_balance).await?;
+        let marker_present = util::state_write_failed(&log_dir);
+        if marker_present {
+            tracing::error!(
+                "[INIT] durability marker present: a prior run failed to persist state, so \
+                 restored state may be stale/incomplete; entries stay halted. Reconcile \
+                 account_state.json and pending_positions.json against trades.csv/outcomes.csv \
+                 and Binance history, then delete logs/binance/{}/state_write_failed and restart",
+                config.trading.mode
+            );
+        }
         Ok(Self {
             executor: Executor::new(config.trading.mode, Arc::clone(&prediction)),
             config,
@@ -97,10 +120,11 @@ impl Bot {
                 execution_halted: restored_awaiting_execution,
                 ..BotState::new()
             })),
-            account: Arc::new(RwLock::new(AccountState::new(initial_balance))),
+            account: Arc::new(RwLock::new(account)),
             settler: Arc::new(RwLock::new(settler)),
             market_state: Arc::new(RwLock::new(MarketState::default())),
             shutdown: Arc::new(AtomicBool::new(false)),
+            persist_halt: Arc::new(AtomicBool::new(marker_present)),
             trade_log,
             tui_state,
             last_live_balance_refresh_ms: 0,
@@ -163,6 +187,7 @@ impl Bot {
             Arc::clone(&self.shutdown),
             self.config.polling.settlement_check_secs,
             Arc::clone(&self.tui_state),
+            Arc::clone(&self.persist_halt),
         );
         let mut refresher_handle = tasks::start_market_refresher(
             Arc::clone(&self.prediction),
@@ -241,6 +266,11 @@ impl Bot {
         .await;
         if let Err(error) = self.settler.read().await.persist(&self.log_dir).await {
             tracing::error!("[STATE] failed to persist Binance positions on shutdown: {error:#}");
+            util::mark_state_write_failed(&self.log_dir).await;
+        }
+        if let Err(error) = self.account.read().await.persist(&self.log_dir).await {
+            tracing::error!("[STATE] failed to persist account risk state on shutdown: {error:#}");
+            util::mark_state_write_failed(&self.log_dir).await;
         }
         self.trade_log.flush().await;
         Ok(())
@@ -250,6 +280,15 @@ impl Bot {
         DeciderConfig::from(&self.config)
     }
 
+    /// In Live mode the Binance payment API is the authoritative balance; only
+    /// the *risk* counters (daily pnl/trades, loss streak, circuit window) are
+    /// persisted and authoritative locally. Between refreshes the local
+    /// `record_trade` decrement gives a conservative (lower) view of available
+    /// balance; this refresh then overwrites it with the API value, which is at
+    /// worst one `status_interval_ms` stale and — under API eventual
+    /// consistency — may briefly reflect pre-settlement state and read higher
+    /// than truly spendable. The one-position-per-market and
+    /// max_unsettled_positions gates bound how many entries that window can admit.
     async fn refresh_live_balance_if_due(&mut self, now_ms: i64) {
         if self.config.trading.mode.is_paper()
             || now_ms.saturating_sub(self.last_live_balance_refresh_ms)
@@ -353,6 +392,14 @@ impl Bot {
             }
         }
 
+        if self.persist_halt.load(Ordering::Acquire) {
+            self.tui_state
+                .write()
+                .await
+                .set_decision("HALTED: state persistence failed; entries blocked".into());
+            return Ok(());
+        }
+
         let order_size = self.config.strategy.position_size_usdt;
         let (up_result, down_result) = join!(
             self.prediction
@@ -448,10 +495,21 @@ impl Bot {
                         };
                         let position = PendingPosition::from_filled(&market, order.clone());
                         self.settler.write().await.add(position);
+                        // Persist the real open position BEFORE the risk snapshot:
+                        // a crash here must never strand a filled exchange position
+                        // (lost settlement/redemption). Losing at most this trade's
+                        // daily-trade increment is the tolerable failure direction.
                         if let Err(error) = self.settler.read().await.persist(&self.log_dir).await {
                             tracing::error!(
                                 "[STATE] failed to persist Binance position: {error:#}"
                             );
+                            self.halt_on_persist_failure().await;
+                        }
+                        if let Err(error) = self.account.read().await.persist(&self.log_dir).await {
+                            tracing::error!(
+                                "[STATE] failed to persist account risk state: {error:#}"
+                            );
+                            self.halt_on_persist_failure().await;
                         }
                         if self.config.trading.mode.is_paper() {
                             util::write_balance(&self.log_dir, balance).await;
@@ -494,6 +552,7 @@ impl Bot {
                             tracing::error!(
                                 "[STATE] failed to persist uncertain Binance order: {error:#}"
                             );
+                            self.halt_on_persist_failure().await;
                         }
                         self.state.write().await.execution_halted = true;
                         self.tui_state
@@ -529,6 +588,13 @@ impl Bot {
             }
         }
         Ok(())
+    }
+
+    /// Block new entries and record a durability marker after a state write
+    /// failed, so the bot stops opening exposure it cannot durably record and a
+    /// restart cannot silently resume from a possibly-stale snapshot.
+    async fn halt_on_persist_failure(&self) {
+        util::halt_on_state_write_failure(&self.persist_halt, &self.log_dir).await;
     }
 
     async fn idle(&self, reason: &str, detail: &str) {

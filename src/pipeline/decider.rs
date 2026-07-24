@@ -83,7 +83,7 @@ impl From<&Config> for DeciderConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AccountState {
     pub balance: Decimal,
     pub initial_balance: Decimal,
@@ -158,6 +158,50 @@ impl AccountState {
             self.daily_trades = 0;
             self.daily_reset_date = today.to_string();
         }
+    }
+
+    /// Atomically persist risk-relevant counters so a crash/restart cannot
+    /// silently reset the daily loss/trade caps, loss-streak cooldown, or
+    /// circuit-breaker window. Call this while holding the account write lock so
+    /// the snapshot cannot be reordered behind a concurrent writer's update.
+    /// Balance is re-derived on restore (Paper file / Live payment API), so a
+    /// persist failure degrades only risk memory, never accounting.
+    pub async fn persist(&self, log_dir: &str) -> anyhow::Result<()> {
+        use anyhow::Context;
+        let directory = std::path::Path::new(log_dir);
+        let temporary = directory.join("account_state.json.tmp");
+        let destination = directory.join("account_state.json");
+        let bytes = serde_json::to_vec_pretty(self).context("failed to serialize account state")?;
+        tokio::fs::write(&temporary, &bytes)
+            .await
+            .context("failed to write account state")?;
+        tokio::fs::rename(&temporary, &destination)
+            .await
+            .context("failed to replace account state")?;
+        Ok(())
+    }
+
+    /// Restore persisted risk counters, overriding `balance` with the freshly
+    /// resolved value (Paper file / Live payment API). A missing file starts
+    /// fresh; a corrupt or unreadable file is an error that MUST fail startup,
+    /// never a silent reset — silently zeroing the daily loss/trade caps,
+    /// loss-streak cooldown, and circuit-breaker window would defeat the very
+    /// guarantee this persistence provides. Stale `daily_reset_date` is handled
+    /// by the first `reset_daily_if_needed` before any decision.
+    pub async fn restore(log_dir: &str, balance: Decimal) -> anyhow::Result<Self> {
+        use anyhow::Context;
+        let path = std::path::Path::new(log_dir).join("account_state.json");
+        let bytes = match tokio::fs::read(&path).await {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::new(balance));
+            }
+            Err(error) => return Err(error).context("failed to read persisted account state"),
+        };
+        let mut state: Self =
+            serde_json::from_slice(&bytes).context("failed to parse persisted account state")?;
+        state.balance = balance;
+        Ok(state)
     }
 }
 
@@ -493,5 +537,89 @@ mod tests {
         account.record_settlement(true, d("3.5"), d("1.5"), true, 1_700_000_000_000);
         assert_eq!(account.balance, d("101.5"));
         assert_eq!(account.daily_pnl, d("1.5"));
+    }
+
+    #[tokio::test]
+    async fn account_risk_state_survives_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().to_str().unwrap();
+
+        let mut account = AccountState::new(d("100"));
+        account.reset_daily_if_needed("2026-07-24");
+        account.record_trade(d("2"));
+        account.record_settlement(false, Decimal::ZERO, d("-2"), true, 1_700_000_000_000);
+        account.persist(path).await.unwrap();
+
+        // Balance comes from a fresh source (Paper file / Live API) on restart;
+        // every risk counter must be restored, not reset.
+        let restored = AccountState::restore(path, d("50")).await.unwrap();
+        assert_eq!(restored.balance, d("50"));
+        assert_eq!(restored.daily_pnl, d("-2"));
+        assert_eq!(restored.daily_trades, 1);
+        assert_eq!(restored.consecutive_losses, 1);
+        assert_eq!(restored.last_loss_ms, 1_700_000_000_000);
+        assert_eq!(restored.recent_results.len(), 1);
+        assert_eq!(restored.daily_reset_date, "2026-07-24");
+    }
+
+    #[tokio::test]
+    async fn restart_across_midnight_resets_daily_but_keeps_streak_and_window() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().to_str().unwrap();
+
+        let mut account = AccountState::new(d("100"));
+        account.reset_daily_if_needed("2026-07-24");
+        account.record_trade(d("2"));
+        account.record_settlement(false, Decimal::ZERO, d("-2"), true, 1_700_000_000_000);
+        account.persist(path).await.unwrap();
+
+        let mut restored = AccountState::restore(path, d("50")).await.unwrap();
+        restored.reset_daily_if_needed("2026-07-25");
+        // New day clears the daily caps ...
+        assert_eq!(restored.daily_pnl, Decimal::ZERO);
+        assert_eq!(restored.daily_trades, 0);
+        assert_eq!(restored.daily_reset_date, "2026-07-25");
+        // ... but the loss-streak cooldown and circuit-breaker window persist.
+        assert_eq!(restored.consecutive_losses, 1);
+        assert_eq!(restored.recent_results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn corrupt_account_state_fails_startup() {
+        let directory = tempfile::tempdir().unwrap();
+        tokio::fs::write(directory.path().join("account_state.json"), b"not-json")
+            .await
+            .unwrap();
+        // A corrupt risk-state file must refuse startup, never silently trade
+        // with reset daily/streak/circuit-breaker limits.
+        assert!(
+            AccountState::restore(directory.path().to_str().unwrap(), d("50"))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_account_state_starts_fresh() {
+        let directory = tempfile::tempdir().unwrap();
+        let restored = AccountState::restore(directory.path().to_str().unwrap(), d("50"))
+            .await
+            .unwrap();
+        assert_eq!(restored.balance, d("50"));
+        assert_eq!(restored.daily_trades, 0);
+    }
+
+    #[tokio::test]
+    async fn persist_surfaces_write_failure() {
+        // Use a regular file as the "log_dir": writing <file>/account_state.json.tmp
+        // fails deterministically (NotADirectory), so persist must return Err and
+        // let callers halt entries rather than trade blind.
+        let directory = tempfile::tempdir().unwrap();
+        let not_a_dir = directory.path().join("blocker");
+        tokio::fs::write(&not_a_dir, b"x").await.unwrap();
+        let result = AccountState::new(d("100"))
+            .persist(not_a_dir.to_str().unwrap())
+            .await;
+        assert!(result.is_err());
     }
 }

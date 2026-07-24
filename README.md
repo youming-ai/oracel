@@ -95,13 +95,24 @@ logs/binance/
 │   ├── observations.csv
 │   ├── outcomes.csv
 │   ├── balance
-│   └── pending_positions.json
+│   ├── account_state.json
+│   ├── pending_positions.json
+│   └── state_write_failed      # only after a failed state write
 └── live/
     └── ...
 ```
 
-`balance` and `pending_positions.json` use write-to-temp plus rename. Pending entries include
-accepted-but-not-yet-visible live orders so an uncertain submission cannot be silently retried.
+`balance`, `account_state.json`, and `pending_positions.json` use write-to-temp plus rename.
+`account_state.json` carries the risk counters (daily loss/trade caps, loss-streak cooldown,
+circuit-breaker window) so a restart cannot silently reset them; a corrupt file fails startup.
+Pending entries include accepted-but-not-yet-visible live orders so an uncertain submission
+cannot be silently retried.
+
+If a state write fails, the bot halts new entries (settlement continues) and writes a
+`state_write_failed` marker; the halt is sticky and survives restart. Do not just delete the
+marker: reconcile `account_state.json` and `pending_positions.json` against `trades.csv`,
+`outcomes.csv`, and Binance history first, then remove the marker and restart. See
+[Architecture](docs/ARCHITECTURE.md#state-write-failure-and-the-durability-halt).
 
 ## Data and execution sources
 

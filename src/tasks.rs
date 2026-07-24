@@ -122,6 +122,7 @@ pub(crate) fn start_settlement_checker(
     shutdown: Arc<AtomicBool>,
     settlement_check_secs: u64,
     tui_state: Arc<RwLock<TuiState>>,
+    persist_halt: Arc<AtomicBool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(settlement_check_secs));
@@ -133,7 +134,14 @@ pub(crate) fn start_settlement_checker(
             }
 
             reconcile_pending_orders(
-                mode, &client, &settler, &account, &trade_log, &log_dir, &tui_state,
+                mode,
+                &client,
+                &settler,
+                &account,
+                &trade_log,
+                &log_dir,
+                &tui_state,
+                &persist_halt,
             )
             .await;
 
@@ -201,6 +209,7 @@ pub(crate) fn start_settlement_checker(
             }
             if let Err(error) = settler.read().await.persist(&log_dir).await {
                 tracing::error!("[STATE] failed to persist Binance pending positions: {error:#}");
+                util::halt_on_state_write_failure(&persist_halt, &log_dir).await;
             }
 
             let now_ms = Utc::now().timestamp_millis();
@@ -216,6 +225,17 @@ pub(crate) fn start_settlement_checker(
                         mode.is_paper(),
                         now_ms,
                     );
+                }
+                // Persisted under the write lock, after the settler snapshot above,
+                // so a concurrent trade-tick persist cannot reorder ahead of it.
+                // Bounded residual: a crash between the settler persist and this
+                // write permanently forgets at most this batch's risk contribution
+                // (the positions are already gone from pending_positions.json, so
+                // nothing replays it); later settlements are unaffected. It never
+                // double-counts on replay.
+                if let Err(error) = account.persist(&log_dir).await {
+                    tracing::error!("[STATE] failed to persist account risk state: {error:#}");
+                    util::halt_on_state_write_failure(&persist_halt, &log_dir).await;
                 }
                 account.balance
             };
@@ -247,6 +267,7 @@ async fn reconcile_pending_orders(
     trade_log: &TradeLogHandle,
     log_dir: &str,
     tui_state: &Arc<RwLock<TuiState>>,
+    persist_halt: &Arc<AtomicBool>,
 ) {
     if mode.is_paper() {
         return;
@@ -269,6 +290,7 @@ async fn reconcile_pending_orders(
                     .remove_unfilled(position.market_topic_id);
                 if let Err(error) = settler.read().await.persist(log_dir).await {
                     tracing::error!("[STATE] failed to persist unfilled Binance order: {error:#}");
+                    util::halt_on_state_write_failure(persist_halt, log_dir).await;
                 }
             }
             Ok(OrderReconciliation::Filled(fill)) => {
@@ -295,10 +317,15 @@ async fn reconcile_pending_orders(
                     tracing::error!(
                         "[STATE] failed to persist reconciled Binance order: {error:#}"
                     );
+                    util::halt_on_state_write_failure(persist_halt, log_dir).await;
                 }
                 let balance = {
                     let mut account = account.write().await;
                     account.record_trade(order.total_cost());
+                    if let Err(error) = account.persist(log_dir).await {
+                        tracing::error!("[STATE] failed to persist account risk state: {error:#}");
+                        util::halt_on_state_write_failure(persist_halt, log_dir).await;
+                    }
                     account.balance
                 };
                 trade_log

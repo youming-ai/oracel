@@ -151,8 +151,46 @@ logs/binance/<mode>/
 ├── observations.csv          # every model evaluation after warm-up
 ├── outcomes.csv              # official labels keyed by Prediction market topic
 ├── balance                   # atomic replacement
-└── pending_positions.json    # atomic replacement and restart recovery
+├── account_state.json        # persisted risk counters; atomic replacement
+├── pending_positions.json    # atomic replacement and restart recovery
+└── state_write_failed        # durability marker; present only after a failed state write
 ```
+
+`account_state.json` persists the risk counters (daily PnL/trade count, loss
+streak and last-loss time, and the circuit-breaker window) so that, under working
+storage, a crash or restart does not silently reset the daily loss/trade caps or
+the loss-streak cooldown. It is written while holding an account lock (which
+serializes it against the settlement task), and on entry the pending-position
+snapshot is attempted *first*: the successful path writes the position before the
+risk counters, prioritizing exposure durability. If either write fails the bot
+halts and marks the state suspect (below), so a marker must not be read as proof
+that the two files are mutually consistent. Balance
+is not trusted from this file: it is re-derived on startup (Paper balance file /
+Live payment API). A corrupt or unreadable file fails startup rather than
+resetting.
+
+### State-write failure and the durability halt
+
+If any risk/position state write fails, the bot sets a sticky in-memory halt that
+blocks all *new* entries (settlement keeps winding down) and writes the
+`state_write_failed` marker. The halt is never cleared in-process — this
+deliberately avoids a set/clear race between the trade tick and the settlement
+task. If the marker is present at startup, entries stay halted from the start,
+because the restored snapshot may be stale or incomplete.
+
+The marker does **not** guarantee that an already-filled position or its risk
+increments reached disk; it only signals that persisted state is suspect.
+Recovery is therefore operator-driven and must not be a bare `rm`:
+
+1. Fix the underlying storage problem.
+2. Reconcile `account_state.json` and `pending_positions.json` against
+   `trades.csv`, `outcomes.csv`, and Binance order/settled-position history —
+   any entries or settlements from the failure window may be missing.
+3. Only then delete `logs/binance/<mode>/state_write_failed` and restart.
+
+An automated reconciliation tool is not yet provided; full transactional state
+across both files (write-ahead marker before every mutation, ledger replay on
+startup) is deferred until this failure class is observed in practice.
 
 ## Background tasks
 

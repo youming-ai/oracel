@@ -34,6 +34,10 @@ volatility_lookback_secs = 900
 min_volatility_samples = 120
 order_book_stale_threshold_ms = 8000
 max_unsettled_positions = 2
+# Catastrophe-only guard, NOT a tight risk control: it halts entries only after a
+# full window of settled trades whose win rate falls below the floor. The daily
+# loss limit, loss-streak cooldown, and daily trade cap in [risk] are the primary
+# controls. Raise circuit_breaker_min_win_rate to make it bite sooner.
 circuit_breaker_window = 50
 circuit_breaker_min_win_rate = 0.05
 

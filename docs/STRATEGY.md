@@ -148,6 +148,14 @@ network latency; those limitations must be considered during calibration.
 There is one position per Binance Prediction market topic. Averaging down, martingale sizing, and
 opposite-side micro-hedging are deliberately absent.
 
+The circuit breaker (`circuit_breaker_window`/`circuit_breaker_min_win_rate`, checked-in 50 / 0.05)
+is a catastrophe-only guard: it halts entries only after a full window of settled trades whose win
+rate falls below the floor. The daily loss limit, loss-streak cooldown, and daily trade cap are the
+primary controls. All of these counters are persisted to `account_state.json` while holding an
+account lock, so under working storage a crash or restart does not reset the daily caps or the
+loss-streak cooldown. If a state write fails the bot halts new entries and marks the state suspect;
+recovery is operator-driven (see docs/ARCHITECTURE.md).
+
 ## Settlement and redemption
 
 Paper holds until the official Binance `endPrice` is available. Live holds until Binance marks the
