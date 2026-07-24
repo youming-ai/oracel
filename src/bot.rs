@@ -581,3 +581,52 @@ impl Bot {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use rust_decimal::Decimal;
+
+    use super::Bot;
+
+    #[tokio::test]
+    async fn load_balance_parses_persisted_decimal() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("balance"), "100.50")
+            .await
+            .unwrap();
+        assert_eq!(
+            Bot::load_balance(dir.path().to_str().unwrap()).await,
+            Some(Decimal::new(10050, 2))
+        );
+    }
+
+    #[tokio::test]
+    async fn load_balance_trims_surrounding_whitespace() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("balance"), "  42 \n")
+            .await
+            .unwrap();
+        assert_eq!(
+            Bot::load_balance(dir.path().to_str().unwrap()).await,
+            Some(Decimal::new(42, 0))
+        );
+    }
+
+    #[tokio::test]
+    async fn load_balance_returns_none_when_missing_empty_or_invalid() {
+        // Missing file, empty file, and garbage all fall back to None so the caller can
+        // reuse the configured paper starting balance instead of crashing on restart.
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(Bot::load_balance(dir.path().to_str().unwrap()).await, None);
+
+        tokio::fs::write(dir.path().join("balance"), "")
+            .await
+            .unwrap();
+        assert_eq!(Bot::load_balance(dir.path().to_str().unwrap()).await, None);
+
+        tokio::fs::write(dir.path().join("balance"), "not-a-number")
+            .await
+            .unwrap();
+        assert_eq!(Bot::load_balance(dir.path().to_str().unwrap()).await, None);
+    }
+}

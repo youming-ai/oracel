@@ -361,3 +361,32 @@ fn redemption_needed(status: Option<&str>) -> bool {
         Some("CONFIRMED" | "CLAIMED" | "PENDING")
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::redemption_needed;
+
+    #[test]
+    fn redemption_needed_when_status_missing_or_unknown() {
+        // No recorded status means the winning token has not yet been claimed; a redeem
+        // request must still be submitted or real funds stay stranded on Binance.
+        assert!(redemption_needed(None));
+        assert!(redemption_needed(Some("")));
+        assert!(redemption_needed(Some("NOT_REDEEMED")));
+    }
+
+    #[test]
+    fn redemption_suppressed_for_terminal_and_pending_states() {
+        // CONFIRMED / CLAIMED are terminal; PENDING means a redeem is already in flight.
+        // All three must suppress a duplicate redeem request, case-insensitively.
+        for status in ["CONFIRMED", "CLAIMED", "PENDING"] {
+            assert!(
+                !redemption_needed(Some(status)),
+                "{status} should suppress redeem"
+            );
+        }
+        assert!(!redemption_needed(Some("confirmed")));
+        assert!(!redemption_needed(Some("Claimed")));
+        assert!(!redemption_needed(Some("pending")));
+    }
+}
