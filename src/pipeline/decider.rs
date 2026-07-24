@@ -292,23 +292,23 @@ pub fn decide(context: &DecideContext, account: &AccountState, config: &DeciderC
     }
 
     let (direction, probability, quote) = if estimate.normalized_move > Decimal::ZERO {
-        if !context
+        if context
             .binance_trend_15s_pct
-            .is_some_and(|value| value > Decimal::ZERO)
-            || !context
+            .is_none_or(|value| value <= Decimal::ZERO)
+            || context
                 .binance_trend_30s_pct
-                .is_some_and(|value| value > Decimal::ZERO)
+                .is_none_or(|value| value <= Decimal::ZERO)
         {
             return Decision::Pass("binance_momentum_not_confirmed_up".into());
         }
         (Direction::Up, estimate.p_up, context.up_quote)
     } else {
-        if !context
+        if context
             .binance_trend_15s_pct
-            .is_some_and(|value| value < Decimal::ZERO)
-            || !context
+            .is_none_or(|value| value >= Decimal::ZERO)
+            || context
                 .binance_trend_30s_pct
-                .is_some_and(|value| value < Decimal::ZERO)
+                .is_none_or(|value| value >= Decimal::ZERO)
         {
             return Decision::Pass("binance_momentum_not_confirmed_down".into());
         }
